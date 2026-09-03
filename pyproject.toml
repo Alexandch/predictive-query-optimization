@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "predictive-query-optimization"
+version = "0.1.0"
+description = "PostgreSQL query-time prediction and index recommendation system"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.2,<4",
+    "sqlglot>=30.18,<31",
+]
+
+[project.optional-dependencies]
+ml = [
+    "joblib>=1.6,<2",
+    "pandas>=3.0,<4",
+    "scikit-learn>=1.9,<2",
+    "xgboost>=3.4,<4",
+]
+dev = [
+    "pytest>=8.3,<9",
+    "joblib>=1.6,<2",
+    "pandas>=3.0,<4",
+    "scikit-learn>=1.9,<2",
+    "xgboost>=3.4,<4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+pqo-collect = "pqo.cli:main"
+pqo-generate = "pqo.generate_cli:main"
+pqo-train = "pqo.train_cli:main"
+pqo-predict = "pqo.predict_cli:main"
+pqo-export = "pqo.export_cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,158 @@
+[
+  {
+    "feature": "numeric__estimated_total_cost",
+    "importance": 0.25703877210617065
+  },
+  {
+    "feature": "numeric__seq_scan_count",
+    "importance": 0.2253263294696808
+  },
+  {
+    "feature": "numeric__estimated_rows_all_nodes",
+    "importance": 0.11341972649097443
+  },
+  {
+    "feature": "numeric__estimated_plan_width",
+    "importance": 0.10381123423576355
+  },
+  {
+    "feature": "numeric__index_scan_count",
+    "importance": 0.09455252438783646
+  },
+  {
+    "feature": "numeric__estimated_startup_cost",
+    "importance": 0.05763537809252739
+  },
+  {
+    "feature": "numeric__aggregate_function_count",
+    "importance": 0.05270681902766228
+  },
+  {
+    "feature": "numeric__left_join_count",
+    "importance": 0.030195996165275574
+  },
+  {
+    "feature": "numeric__node_count",
+    "importance": 0.01979265734553337
+  },
+  {
+    "feature": "numeric__sort_node_count",
+    "importance": 0.011857991106808186
+  },
+  {
+    "feature": "numeric__join_count",
+    "importance": 0.008375873789191246
+  },
+  {
+    "feature": "numeric__table_reference_count",
+    "importance": 0.005113201215863228
+  },
+  {
+    "feature": "numeric__select_expression_count",
+    "importance": 0.004786618985235691
+  },
+  {
+    "feature": "numeric__nested_loop_count",
+    "importance": 0.0024303384125232697
+  },
+  {
+    "feature": "numeric__has_group_by",
+    "importance": 0.0022195002529770136
+  },
+  {
+    "feature": "numeric__estimated_plan_rows",
+    "importance": 0.001957719447091222
+  },
+  {
+    "feature": "numeric__query_length",
+    "importance": 0.0015332369366660714
+  },
+  {
+    "feature": "root_node__root_node_type_Hash Join",
+    "importance": 0.0010336810955777764
+  },
+  {
+    "feature": "root_node__root_node_type_Limit",
+    "importance": 0.0010272162035107613
+  },
+  {
+    "feature": "numeric__subquery_count",
+    "importance": 0.0008205333142541349
+  },
+  {
+    "feature": "numeric__inner_join_count",
+    "importance": 0.0005970183410681784
+  },
+  {
+    "feature": "numeric__where_condition_count",
+    "importance": 0.0005219837184995413
+  },
+  {
+    "feature": "root_node__root_node_type_Sort",
+    "importance": 0.0005116475513204932
+  },
+  {
+    "feature": "root_node__root_node_type_Aggregate",
+    "importance": 0.00043170753633603454
+  },
+  {
+    "feature": "numeric__has_order_by",
+    "importance": 0.0004269890778232366
+  },
+  {
+    "feature": "root_node__root_node_type_Nested Loop",
+    "importance": 0.00040520826587453485
+  },
+  {
+    "feature": "numeric__unique_table_count",
+    "importance": 0.0004038719634991139
+  },
+  {
+    "feature": "numeric__max_plan_depth",
+    "importance": 0.00039255706360563636
+  },
+  {
+    "feature": "numeric__relation_count",
+    "importance": 0.00039131310768425465
+  },
+  {
+    "feature": "root_node__root_node_type_Seq Scan",
+    "importance": 0.00028224915149621665
+  },
+  {
+    "feature": "numeric__has_distinct",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__right_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__full_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__cross_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__index_only_scan_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__bitmap_heap_scan_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__hash_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__merge_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__aggregate_node_count",
+    "importance": 0.0
+  }
+]
