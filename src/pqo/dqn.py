@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import copy
+from functools import lru_cache
 import json
 from pathlib import Path
 import random
@@ -209,21 +210,33 @@ def predict_action_values(
 ) -> list[float]:
     import numpy as np
     import torch
+
+    model, feature_mean, feature_std = _load_prediction_model(
+        str(Path(model_path).resolve())
+    )
+    combined = np.asarray(
+        [state + action for action in action_features], dtype=np.float32
+    )
+    normalized = (combined - feature_mean) / feature_std
+    with torch.no_grad():
+        values = model(torch.tensor(normalized, dtype=torch.float32)).squeeze(1)
+    return [float(value) for value in values]
+
+
+@lru_cache(maxsize=4)
+def _load_prediction_model(model_path: str):
+    import torch
     from torch import nn
 
     artifact = torch.load(model_path, map_location="cpu", weights_only=True)
     model = _build_network(nn, artifact["input_size"])
     model.load_state_dict(artifact["model_state_dict"])
     model.eval()
-    combined = np.asarray(
-        [state + action for action in action_features], dtype=np.float32
+    return (
+        model,
+        artifact["feature_mean"].numpy(),
+        artifact["feature_std"].numpy(),
     )
-    feature_mean = artifact["feature_mean"].numpy()
-    feature_std = artifact["feature_std"].numpy()
-    normalized = (combined - feature_mean) / feature_std
-    with torch.no_grad():
-        values = model(torch.tensor(normalized, dtype=torch.float32)).squeeze(1)
-    return [float(value) for value in values]
 
 
 def _build_network(nn, input_size: int):

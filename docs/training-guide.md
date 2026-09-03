@@ -31,13 +31,13 @@ $env:PQO_INTEGRATION_TESTS = "1"
 Собрать стандартные запросы и сохранить измерения в служебной схеме БД:
 
 ```powershell
-.\.venv\Scripts\pqo-generate.exe 2400 artifacts\xgb_run.csv --seed 42
+.\.venv\Scripts\pqo-generate.exe 2400 artifacts\xgb_run.csv --seed 42 --repetitions 2
 ```
 
 Для нового запуска используйте другой seed. Дозапись в существующий CSV:
 
 ```powershell
-.\.venv\Scripts\pqo-generate.exe 2400 artifacts\xgb_run.csv --seed 43 --append
+.\.venv\Scripts\pqo-generate.exe 2400 artifacts\xgb_run.csv --seed 43 --repetitions 2 --append
 ```
 
 Для собственных сложных запросов скопируйте
@@ -53,6 +53,12 @@ $env:PQO_INTEGRATION_TESTS = "1"
 
 ```powershell
 .\.venv\Scripts\pqo-export.exe artifacts\xgb_all.csv --limit 10000
+```
+
+Либо объедините несколько совместимых CSV явно:
+
+```powershell
+.\.venv\Scripts\pqo-merge.exe artifacts\xgb_all.csv dataset\postgresql\aviation_dataset.csv artifacts\new_measurements.csv
 ```
 
 Обучение с подбором гиперпараметров:
@@ -74,16 +80,16 @@ $env:PQO_INTEGRATION_TESTS = "1"
 
 ## 3. Сколько ещё данных нужно XGBoost
 
-Текущие 2 400 измерений хорошо покрывают параметры 24 известных шаблонов
-(`R² = 0,9858`), но стресс-тест новых структур заметно слабее (`R² = 0,773`).
+Текущие 4 800 измерений покрывают 40 шаблонов. Универсальная модель получает
+`R² = 0,9760`, а stress-R² новых структур — `0,8823` вместо прежних `0,7731`.
 Поэтому простое повторение тех же запросов почти исчерпало пользу.
 
 Следующая разумная цель:
 
-- 36–48 структурных шаблонов вместо 24;
+- 48–60 структурных шаблонов вместо текущих 40;
 - 100–200 уникальных наборов параметров на шаблон;
 - 2–3 повтора каждого точного SQL для медианной агрегации;
-- ориентировочно 7 000–15 000 сырых измерений.
+- ориентировочно 10 000–20 000 сырых измерений в одной непрерывной серии.
 
 Добавляйте оконные функции, CTE, несколько уровней подзапросов, 3–5 JOIN,
 разные селективности, сортировки с LIMIT, HAVING, EXISTS/NOT EXISTS и запросы,
@@ -126,6 +132,15 @@ $env:PQO_INTEGRATION_TESTS = "1"
 ```powershell
 .\.venv\Scripts\pqo-recommend.exe artifacts\models\dqn\dqn_index_advisor.pt "SELECT flight_id FROM aviation.flights WHERE departure_airport = 'MSQ' ORDER BY scheduled_departure"
 ```
+
+Единый прикладной вызов XGBoost + DQN, используемый будущим PyQt-интерфейсом:
+
+```powershell
+.\.venv\Scripts\pqo-analyze.exe models\xgboost\xgboost_query_time.joblib models\dqn\dqn_index_advisor.pt "SELECT flight_id FROM aviation.flights WHERE departure_airport = 'MSQ' ORDER BY scheduled_departure" --threshold-ms 50
+```
+
+Без `--no-persist` прогноз и рекомендация записываются в служебные таблицы
+`pqo.query_run`, `pqo.model_prediction` и `pqo.index_recommendation`.
 
 Проверить рекомендацию реальным транзакционным экспериментом можно через
 `pqo-index`: сначала выведите кандидатов, затем передайте номер действия.

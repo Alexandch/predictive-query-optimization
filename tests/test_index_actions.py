@@ -58,6 +58,27 @@ class IndexActionTests(unittest.TestCase):
         self.assertNotIn("flight_date", indexed_columns)
         self.assertNotIn("total", indexed_columns)
 
+    def test_does_not_treat_cte_output_as_include_column(self):
+        actions = generate_index_actions(
+            """
+            WITH route_counts AS (
+                SELECT departure_airport, COUNT(*) AS flight_count
+                FROM aviation.flights
+                WHERE status = 'Scheduled'
+                GROUP BY departure_airport
+            )
+            SELECT departure_airport, flight_count
+            FROM route_counts
+            ORDER BY flight_count DESC
+            """
+        )
+        indexed_columns = {
+            column
+            for action in actions
+            for column in action.key_columns + action.include_columns
+        }
+        self.assertNotIn("flight_count", indexed_columns)
+
 
 if __name__ == "__main__":
     unittest.main()

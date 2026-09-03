@@ -14,6 +14,7 @@ class DatabaseSettings:
     host: str = "localhost"
     port: int = 55432
     connect_timeout: int = 5
+    statement_timeout_ms: int = 30_000
 
     @classmethod
     def from_env(cls) -> "DatabaseSettings":
@@ -26,6 +27,12 @@ class DatabaseSettings:
             port=int(os.getenv("POSTGRES_PORT", str(defaults.port))),
             connect_timeout=int(
                 os.getenv("POSTGRES_CONNECT_TIMEOUT", str(defaults.connect_timeout))
+            ),
+            statement_timeout_ms=int(
+                os.getenv(
+                    "POSTGRES_STATEMENT_TIMEOUT_MS",
+                    str(defaults.statement_timeout_ms),
+                )
             ),
         )
 

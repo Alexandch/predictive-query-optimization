@@ -34,7 +34,7 @@ class AviationQueryGeneratorTests(unittest.TestCase):
             for template_id in AviationQueryGenerator.TEMPLATE_IDS
         }
 
-        self.assertEqual(set(counts.values()), {2, 3})
+        self.assertEqual(set(counts.values()), {1, 2})
 
 
 if __name__ == "__main__":

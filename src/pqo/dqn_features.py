@@ -63,7 +63,11 @@ def build_query_state(
     plan_features = collect_explain(
         sql_text, settings=settings, analyze=False
     ).features.as_dict()
-    values = {**sql_features, **plan_features}
+    return encode_query_state({**sql_features, **plan_features})
+
+
+def encode_query_state(values: dict) -> list[float]:
+    """Encode already extracted features without another database request."""
 
     numeric = [
         math.log1p(max(0.0, float(values[name] or 0.0)))

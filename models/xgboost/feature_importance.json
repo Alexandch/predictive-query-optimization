@@ -1,123 +1,143 @@
 [
   {
     "feature": "numeric__estimated_total_cost",
-    "importance": 0.25703877210617065
-  },
-  {
-    "feature": "numeric__seq_scan_count",
-    "importance": 0.2253263294696808
+    "importance": 0.32480886578559875
   },
   {
     "feature": "numeric__estimated_rows_all_nodes",
-    "importance": 0.11341972649097443
-  },
-  {
-    "feature": "numeric__estimated_plan_width",
-    "importance": 0.10381123423576355
+    "importance": 0.21285772323608398
   },
   {
     "feature": "numeric__index_scan_count",
-    "importance": 0.09455252438783646
+    "importance": 0.16555972397327423
+  },
+  {
+    "feature": "numeric__estimated_plan_width",
+    "importance": 0.08932086080312729
   },
   {
     "feature": "numeric__estimated_startup_cost",
-    "importance": 0.05763537809252739
-  },
-  {
-    "feature": "numeric__aggregate_function_count",
-    "importance": 0.05270681902766228
-  },
-  {
-    "feature": "numeric__left_join_count",
-    "importance": 0.030195996165275574
-  },
-  {
-    "feature": "numeric__node_count",
-    "importance": 0.01979265734553337
-  },
-  {
-    "feature": "numeric__sort_node_count",
-    "importance": 0.011857991106808186
-  },
-  {
-    "feature": "numeric__join_count",
-    "importance": 0.008375873789191246
-  },
-  {
-    "feature": "numeric__table_reference_count",
-    "importance": 0.005113201215863228
+    "importance": 0.08846328407526016
   },
   {
     "feature": "numeric__select_expression_count",
-    "importance": 0.004786618985235691
+    "importance": 0.030935222283005714
   },
   {
-    "feature": "numeric__nested_loop_count",
-    "importance": 0.0024303384125232697
+    "feature": "numeric__aggregate_node_count",
+    "importance": 0.01795750856399536
   },
   {
-    "feature": "numeric__has_group_by",
-    "importance": 0.0022195002529770136
+    "feature": "numeric__sort_node_count",
+    "importance": 0.013661118224263191
   },
   {
-    "feature": "numeric__estimated_plan_rows",
-    "importance": 0.001957719447091222
-  },
-  {
-    "feature": "numeric__query_length",
-    "importance": 0.0015332369366660714
-  },
-  {
-    "feature": "root_node__root_node_type_Hash Join",
-    "importance": 0.0010336810955777764
-  },
-  {
-    "feature": "root_node__root_node_type_Limit",
-    "importance": 0.0010272162035107613
-  },
-  {
-    "feature": "numeric__subquery_count",
-    "importance": 0.0008205333142541349
-  },
-  {
-    "feature": "numeric__inner_join_count",
-    "importance": 0.0005970183410681784
-  },
-  {
-    "feature": "numeric__where_condition_count",
-    "importance": 0.0005219837184995413
-  },
-  {
-    "feature": "root_node__root_node_type_Sort",
-    "importance": 0.0005116475513204932
-  },
-  {
-    "feature": "root_node__root_node_type_Aggregate",
-    "importance": 0.00043170753633603454
-  },
-  {
-    "feature": "numeric__has_order_by",
-    "importance": 0.0004269890778232366
-  },
-  {
-    "feature": "root_node__root_node_type_Nested Loop",
-    "importance": 0.00040520826587453485
-  },
-  {
-    "feature": "numeric__unique_table_count",
-    "importance": 0.0004038719634991139
+    "feature": "numeric__node_count",
+    "importance": 0.006577503867447376
   },
   {
     "feature": "numeric__max_plan_depth",
-    "importance": 0.00039255706360563636
+    "importance": 0.0063463556580245495
+  },
+  {
+    "feature": "numeric__seq_scan_count",
+    "importance": 0.005845591891556978
+  },
+  {
+    "feature": "numeric__hash_join_count",
+    "importance": 0.004244111943989992
+  },
+  {
+    "feature": "numeric__query_length",
+    "importance": 0.003956347703933716
+  },
+  {
+    "feature": "numeric__where_condition_count",
+    "importance": 0.002514125779271126
+  },
+  {
+    "feature": "numeric__inner_join_count",
+    "importance": 0.0022721346467733383
+  },
+  {
+    "feature": "numeric__unique_table_count",
+    "importance": 0.0021321719978004694
+  },
+  {
+    "feature": "root_node__root_node_type_Sort",
+    "importance": 0.002068255329504609
+  },
+  {
+    "feature": "numeric__has_group_by",
+    "importance": 0.0018930205842480063
+  },
+  {
+    "feature": "numeric__subquery_count",
+    "importance": 0.0018800332909449935
+  },
+  {
+    "feature": "root_node__root_node_type_Hash Join",
+    "importance": 0.0014543907018378377
+  },
+  {
+    "feature": "numeric__estimated_plan_rows",
+    "importance": 0.0014071513433009386
+  },
+  {
+    "feature": "root_node__root_node_type_Limit",
+    "importance": 0.0013691572239622474
+  },
+  {
+    "feature": "numeric__nested_loop_count",
+    "importance": 0.001332294661551714
+  },
+  {
+    "feature": "numeric__index_only_scan_count",
+    "importance": 0.0012362078996375203
+  },
+  {
+    "feature": "numeric__left_join_count",
+    "importance": 0.001204286701977253
+  },
+  {
+    "feature": "numeric__merge_join_count",
+    "importance": 0.0011987490579485893
+  },
+  {
+    "feature": "numeric__table_reference_count",
+    "importance": 0.001161190215498209
+  },
+  {
+    "feature": "numeric__aggregate_function_count",
+    "importance": 0.0011593463132157922
+  },
+  {
+    "feature": "root_node__root_node_type_Nested Loop",
+    "importance": 0.0011027933796867728
+  },
+  {
+    "feature": "numeric__join_count",
+    "importance": 0.0010198741219937801
+  },
+  {
+    "feature": "numeric__has_order_by",
+    "importance": 0.0009693200117908418
   },
   {
     "feature": "numeric__relation_count",
-    "importance": 0.00039131310768425465
+    "importance": 0.0007653076900169253
+  },
+  {
+    "feature": "root_node__root_node_type_Aggregate",
+    "importance": 0.0006677796482108533
   },
   {
     "feature": "root_node__root_node_type_Seq Scan",
-    "importance": 0.00028224915149621665
+    "importance": 0.0006581986090168357
+  },
+  {
+    "feature": "root_node__root_node_type_Unique",
+    "importance": 0.0
   },
   {
     "feature": "numeric__has_distinct",
@@ -136,23 +156,7 @@
     "importance": 0.0
   },
   {
-    "feature": "numeric__index_only_scan_count",
-    "importance": 0.0
-  },
-  {
     "feature": "numeric__bitmap_heap_scan_count",
-    "importance": 0.0
-  },
-  {
-    "feature": "numeric__hash_join_count",
-    "importance": 0.0
-  },
-  {
-    "feature": "numeric__merge_join_count",
-    "importance": 0.0
-  },
-  {
-    "feature": "numeric__aggregate_node_count",
     "importance": 0.0
   }
 ]

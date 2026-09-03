@@ -150,3 +150,66 @@ def save_analysis(
         )
 
     return query_run_id
+
+
+def save_optimization_result(
+    query_run_id: int,
+    predicted_time_ms: float,
+    recommendation,
+    settings: DatabaseSettings | None = None,
+    *,
+    model_name: str = "xgboost",
+    model_version: str = "40-templates-v1",
+) -> None:
+    """Persist model output produced for an already stored estimated plan."""
+    import psycopg
+
+    from .index_actions import IndexActionKind
+
+    settings = settings or DatabaseSettings.from_env()
+    with psycopg.connect(**settings.connection_kwargs()) as connection:
+        connection.execute(
+            """
+            INSERT INTO pqo.model_prediction (
+                query_run_id, model_name, model_version, predicted_time_ms
+            ) VALUES (%s, %s, %s, %s)
+            """,
+            (query_run_id, model_name, model_version, predicted_time_ms),
+        )
+        if (
+            recommendation is not None
+            and recommendation.action.kind is IndexActionKind.CREATE
+        ):
+            action = recommendation.action
+            connection.execute(
+                """
+                INSERT INTO pqo.index_recommendation (
+                    query_run_id,
+                    table_name,
+                    index_columns,
+                    include_columns,
+                    action,
+                    proposed_ddl,
+                    estimated_improvement
+                ) VALUES (%s, %s, %s, %s, 'create', %s, %s)
+                """,
+                (
+                    query_run_id,
+                    f"{action.schema_name}.{action.table_name}",
+                    list(action.key_columns),
+                    list(action.include_columns),
+                    _proposed_ddl(action),
+                    recommendation.predicted_reward,
+                ),
+            )
+
+
+def _proposed_ddl(action) -> str:
+    keys = ", ".join(f'"{column}"' for column in action.key_columns)
+    statement = (
+        f'CREATE INDEX ON "{action.schema_name}"."{action.table_name}" ({keys})'
+    )
+    if action.include_columns:
+        includes = ", ".join(f'"{column}"' for column in action.include_columns)
+        statement += f" INCLUDE ({includes})"
+    return statement + ";"

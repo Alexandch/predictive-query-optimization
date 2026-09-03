@@ -38,6 +38,22 @@ class AviationQueryGenerator:
         "daily_flight_count",
         "aircraft_fare_capacity",
         "ticket_fare_lookup",
+        "monthly_route_rank",
+        "passenger_spending_rank",
+        "booking_fare_breakdown",
+        "aircraft_route_utilization",
+        "fare_price_percentiles",
+        "connecting_itineraries",
+        "unoccupied_seats",
+        "booking_month_outliers",
+        "airport_status_pivot",
+        "latest_route_flights",
+        "boarding_efficiency",
+        "routes_above_average_revenue",
+        "airport_revenue_rollup",
+        "passenger_fare_transitions",
+        "route_traffic_share",
+        "aircraft_capacity_load",
     )
 
     def __init__(self, seed: int = 42):
@@ -67,6 +83,22 @@ class AviationQueryGenerator:
             self._daily_flight_count,
             self._aircraft_fare_capacity,
             self._ticket_fare_lookup,
+            self._monthly_route_rank,
+            self._passenger_spending_rank,
+            self._booking_fare_breakdown,
+            self._aircraft_route_utilization,
+            self._fare_price_percentiles,
+            self._connecting_itineraries,
+            self._unoccupied_seats,
+            self._booking_month_outliers,
+            self._airport_status_pivot,
+            self._latest_route_flights,
+            self._boarding_efficiency,
+            self._routes_above_average_revenue,
+            self._airport_revenue_rollup,
+            self._passenger_fare_transitions,
+            self._route_traffic_share,
+            self._aircraft_capacity_load,
         )
 
     @property
@@ -378,4 +410,236 @@ class AviationQueryGenerator:
             "JOIN aviation.ticket_flights AS tf ON tf.ticket_no = t.ticket_no "
             f"WHERE t.passenger_id = '{passenger_id}' "
             f"AND tf.fare_conditions = '{fare}'",
+        )
+
+    def _monthly_route_rank(self) -> QueryCase:
+        month = self.random.randint(1, 12)
+        return QueryCase(
+            "monthly_route_rank",
+            "WITH route_month AS ("
+            "SELECT date_trunc('month', f.scheduled_departure) AS month_start, "
+            "f.departure_airport, f.arrival_airport, COUNT(*) AS sold, "
+            "SUM(tf.amount) AS revenue "
+            "FROM aviation.flights AS f "
+            "JOIN aviation.ticket_flights AS tf ON tf.flight_id = f.flight_id "
+            f"WHERE EXTRACT(MONTH FROM f.scheduled_departure) = {month} "
+            "GROUP BY month_start, f.departure_airport, f.arrival_airport) "
+            "SELECT month_start, departure_airport, arrival_airport, sold, revenue, "
+            "DENSE_RANK() OVER (PARTITION BY month_start ORDER BY revenue DESC) AS route_rank "
+            "FROM route_month ORDER BY month_start, route_rank LIMIT 100",
+        )
+
+    def _passenger_spending_rank(self) -> QueryCase:
+        minimum = self.random.randrange(10_000, 150_001, 5_000)
+        return QueryCase(
+            "passenger_spending_rank",
+            "WITH passenger_totals AS ("
+            "SELECT t.passenger_id, t.passenger_name, COUNT(*) AS segments, "
+            "SUM(tf.amount) AS total_spent "
+            "FROM aviation.tickets AS t "
+            "JOIN aviation.ticket_flights AS tf ON tf.ticket_no = t.ticket_no "
+            "GROUP BY t.passenger_id, t.passenger_name) "
+            "SELECT passenger_id, passenger_name, segments, total_spent, "
+            "ROW_NUMBER() OVER (ORDER BY total_spent DESC) AS spending_rank "
+            f"FROM passenger_totals WHERE total_spent >= {minimum} "
+            "ORDER BY spending_rank LIMIT 100",
+        )
+
+    def _booking_fare_breakdown(self) -> QueryCase:
+        day = date(2024, 10, 1) + timedelta(days=self.random.randrange(300))
+        return QueryCase(
+            "booking_fare_breakdown",
+            "SELECT b.book_ref, b.total_amount, COUNT(tf.flight_id) AS segments, "
+            "SUM(tf.amount) FILTER (WHERE tf.fare_conditions = 'Economy') AS economy, "
+            "SUM(tf.amount) FILTER (WHERE tf.fare_conditions = 'Business') AS business "
+            "FROM aviation.bookings AS b "
+            "JOIN aviation.tickets AS t ON t.book_ref = b.book_ref "
+            "JOIN aviation.ticket_flights AS tf ON tf.ticket_no = t.ticket_no "
+            f"WHERE b.book_date >= DATE '{day.isoformat()}' "
+            f"AND b.book_date < DATE '{(day + timedelta(days=30)).isoformat()}' "
+            "GROUP BY b.book_ref, b.total_amount HAVING COUNT(tf.flight_id) >= 2",
+        )
+
+    def _aircraft_route_utilization(self) -> QueryCase:
+        status = self.random.choice(self.STATUSES)
+        return QueryCase(
+            "aircraft_route_utilization",
+            "SELECT f.aircraft_code, f.departure_airport, f.arrival_airport, "
+            "COUNT(DISTINCT f.flight_id) AS flights, COUNT(tf.ticket_no) AS tickets, "
+            "AVG(tf.amount) AS average_fare "
+            "FROM aviation.flights AS f "
+            "LEFT JOIN aviation.ticket_flights AS tf ON tf.flight_id = f.flight_id "
+            f"WHERE f.status = '{status}' "
+            "GROUP BY f.aircraft_code, f.departure_airport, f.arrival_airport "
+            "ORDER BY tickets DESC LIMIT 100",
+        )
+
+    def _fare_price_percentiles(self) -> QueryCase:
+        fare = self.random.choice(self.FARES)
+        return QueryCase(
+            "fare_price_percentiles",
+            "SELECT f.departure_airport, f.arrival_airport, "
+            "percentile_cont(0.5) WITHIN GROUP (ORDER BY tf.amount) AS median_fare, "
+            "percentile_cont(0.9) WITHIN GROUP (ORDER BY tf.amount) AS p90_fare "
+            "FROM aviation.ticket_flights AS tf "
+            "JOIN aviation.flights AS f ON f.flight_id = tf.flight_id "
+            f"WHERE tf.fare_conditions = '{fare}' "
+            "GROUP BY f.departure_airport, f.arrival_airport",
+        )
+
+    def _connecting_itineraries(self) -> QueryCase:
+        origin = self.random.choice(self.AIRPORTS)
+        return QueryCase(
+            "connecting_itineraries",
+            "SELECT f1.flight_id AS first_flight, f2.flight_id AS second_flight, "
+            "f1.departure_airport, f1.arrival_airport AS connection_airport, "
+            "f2.arrival_airport AS destination "
+            "FROM aviation.flights AS f1 "
+            "JOIN aviation.flights AS f2 ON f2.departure_airport = f1.arrival_airport "
+            "AND f2.scheduled_departure BETWEEN f1.scheduled_arrival "
+            "AND f1.scheduled_arrival + INTERVAL '12 hours' "
+            f"WHERE f1.departure_airport = '{origin}' "
+            "AND f2.arrival_airport <> f1.departure_airport "
+            "ORDER BY f1.scheduled_departure LIMIT 100",
+        )
+
+    def _unoccupied_seats(self) -> QueryCase:
+        flight_id = self.random.randint(1, 10_000)
+        return QueryCase(
+            "unoccupied_seats",
+            "SELECT s.fare_conditions, COUNT(*) AS free_seats "
+            "FROM aviation.flights AS f "
+            "JOIN aviation.seats AS s ON s.aircraft_code = f.aircraft_code "
+            "LEFT JOIN aviation.boarding_passes AS bp "
+            "ON bp.flight_id = f.flight_id AND bp.seat_no = s.seat_no "
+            f"WHERE f.flight_id = {flight_id} AND bp.ticket_no IS NULL "
+            "GROUP BY s.fare_conditions",
+        )
+
+    def _booking_month_outliers(self) -> QueryCase:
+        multiplier = self.random.choice((1.2, 1.5, 2.0))
+        return QueryCase(
+            "booking_month_outliers",
+            "WITH monthly_average AS ("
+            "SELECT date_trunc('month', book_date) AS month_start, "
+            "AVG(total_amount) AS average_amount FROM aviation.bookings "
+            "GROUP BY date_trunc('month', book_date)) "
+            "SELECT b.book_ref, b.book_date, b.total_amount "
+            "FROM aviation.bookings AS b JOIN monthly_average AS m "
+            "ON m.month_start = date_trunc('month', b.book_date) "
+            f"WHERE b.total_amount > m.average_amount * {multiplier} "
+            "ORDER BY b.total_amount DESC LIMIT 100",
+        )
+
+    def _airport_status_pivot(self) -> QueryCase:
+        airport = self.random.choice(self.AIRPORTS)
+        return QueryCase(
+            "airport_status_pivot",
+            "SELECT departure_airport, "
+            "COUNT(*) FILTER (WHERE status = 'Scheduled') AS scheduled, "
+            "COUNT(*) FILTER (WHERE status = 'Departed') AS departed, "
+            "COUNT(*) FILTER (WHERE status = 'Arrived') AS arrived, "
+            "AVG(EXTRACT(EPOCH FROM (scheduled_arrival - scheduled_departure)) / 60) "
+            "AS average_duration_minutes FROM aviation.flights "
+            f"WHERE departure_airport = '{airport}' GROUP BY departure_airport",
+        )
+
+    def _latest_route_flights(self) -> QueryCase:
+        status = self.random.choice(self.STATUSES)
+        return QueryCase(
+            "latest_route_flights",
+            "SELECT DISTINCT ON (departure_airport, arrival_airport) "
+            "departure_airport, arrival_airport, flight_no, scheduled_departure "
+            "FROM aviation.flights "
+            f"WHERE status = '{status}' "
+            "ORDER BY departure_airport, arrival_airport, scheduled_departure DESC",
+        )
+
+    def _boarding_efficiency(self) -> QueryCase:
+        day = self._random_date()
+        return QueryCase(
+            "boarding_efficiency",
+            "WITH sold AS (SELECT flight_id, COUNT(*) AS sold_count "
+            "FROM aviation.ticket_flights GROUP BY flight_id), "
+            "boarded AS (SELECT flight_id, COUNT(*) AS boarded_count "
+            "FROM aviation.boarding_passes GROUP BY flight_id) "
+            "SELECT f.flight_id, COALESCE(s.sold_count, 0) AS sold_count, "
+            "COALESCE(b.boarded_count, 0) AS boarded_count, "
+            "COALESCE(b.boarded_count, 0)::numeric / NULLIF(s.sold_count, 0) AS ratio "
+            "FROM aviation.flights AS f "
+            "LEFT JOIN sold AS s ON s.flight_id = f.flight_id "
+            "LEFT JOIN boarded AS b ON b.flight_id = f.flight_id "
+            f"WHERE f.scheduled_departure >= DATE '{day.isoformat()}' "
+            f"AND f.scheduled_departure < DATE '{(day + timedelta(days=7)).isoformat()}'",
+        )
+
+    def _routes_above_average_revenue(self) -> QueryCase:
+        minimum = self.random.randrange(5_000, 50_001, 5_000)
+        return QueryCase(
+            "routes_above_average_revenue",
+            "WITH route_revenue AS (SELECT f.departure_airport, f.arrival_airport, "
+            "SUM(tf.amount) AS revenue FROM aviation.flights AS f "
+            "JOIN aviation.ticket_flights AS tf ON tf.flight_id = f.flight_id "
+            "GROUP BY f.departure_airport, f.arrival_airport) "
+            "SELECT departure_airport, arrival_airport, revenue FROM route_revenue "
+            "WHERE revenue > (SELECT AVG(revenue) FROM route_revenue) "
+            f"AND revenue >= {minimum} ORDER BY revenue DESC",
+        )
+
+    def _airport_revenue_rollup(self) -> QueryCase:
+        fare = self.random.choice(self.FARES)
+        return QueryCase(
+            "airport_revenue_rollup",
+            "SELECT f.departure_airport, f.arrival_airport, SUM(tf.amount) AS revenue "
+            "FROM aviation.flights AS f "
+            "JOIN aviation.ticket_flights AS tf ON tf.flight_id = f.flight_id "
+            f"WHERE tf.fare_conditions = '{fare}' "
+            "GROUP BY ROLLUP (f.departure_airport, f.arrival_airport) "
+            "ORDER BY f.departure_airport NULLS LAST, revenue DESC",
+        )
+
+    def _passenger_fare_transitions(self) -> QueryCase:
+        first_fare = self.random.choice(self.FARES)
+        return QueryCase(
+            "passenger_fare_transitions",
+            "SELECT t.passenger_id, tf1.fare_conditions AS first_fare, "
+            "tf2.fare_conditions AS next_fare, COUNT(*) AS transitions "
+            "FROM aviation.tickets AS t "
+            "JOIN aviation.ticket_flights AS tf1 ON tf1.ticket_no = t.ticket_no "
+            "JOIN aviation.ticket_flights AS tf2 ON tf2.ticket_no = t.ticket_no "
+            "AND tf2.flight_id > tf1.flight_id "
+            f"WHERE tf1.fare_conditions = '{first_fare}' "
+            "GROUP BY t.passenger_id, tf1.fare_conditions, tf2.fare_conditions "
+            "HAVING COUNT(*) >= 1 ORDER BY transitions DESC LIMIT 100",
+        )
+
+    def _route_traffic_share(self) -> QueryCase:
+        status = self.random.choice(self.STATUSES)
+        return QueryCase(
+            "route_traffic_share",
+            "WITH route_counts AS (SELECT departure_airport, arrival_airport, "
+            "COUNT(*) AS flight_count FROM aviation.flights "
+            f"WHERE status = '{status}' "
+            "GROUP BY departure_airport, arrival_airport) "
+            "SELECT departure_airport, arrival_airport, flight_count, "
+            "flight_count::numeric / SUM(flight_count) OVER "
+            "(PARTITION BY departure_airport) AS traffic_share "
+            "FROM route_counts ORDER BY traffic_share DESC",
+        )
+
+    def _aircraft_capacity_load(self) -> QueryCase:
+        aircraft = self.random.choice(("SU9", "320", "321", "738", "E95"))
+        return QueryCase(
+            "aircraft_capacity_load",
+            "WITH capacity AS (SELECT aircraft_code, COUNT(*) AS seats "
+            "FROM aviation.seats GROUP BY aircraft_code), "
+            "sold AS (SELECT flight_id, COUNT(*) AS tickets "
+            "FROM aviation.ticket_flights GROUP BY flight_id) "
+            "SELECT f.flight_id, f.aircraft_code, c.seats, COALESCE(s.tickets, 0) AS tickets, "
+            "COALESCE(s.tickets, 0)::numeric / NULLIF(c.seats, 0) AS load_factor "
+            "FROM aviation.flights AS f "
+            "JOIN capacity AS c ON c.aircraft_code = f.aircraft_code "
+            "LEFT JOIN sold AS s ON s.flight_id = f.flight_id "
+            f"WHERE f.aircraft_code = '{aircraft}' "
+            "ORDER BY load_factor DESC NULLS LAST LIMIT 100",
         )

@@ -9,11 +9,12 @@ PostgreSQL. Проект извлекает структурные призна�
 
 - PostgreSQL 17 запускается в Docker Compose;
 - предметная область содержит 8 связанных авиационных сущностей;
-- генератор формирует 24 структурных типа запросов;
-- обучающий набор содержит 2 400 реальных измерений;
-- лучшая XGBoost-модель достигает `R² = 0,9858` и `MAE = 2,44 мс`;
-- DQN выбирает лучшее измеренное индексное действие в `59,8%` случаев против
-  `24,4%` у случайной стратегии на основном holdout;
+- генератор формирует 40 структурных типов запросов;
+- обучающий набор содержит 4 800 измерений с точными повторами;
+- универсальная XGBoost-модель достигает `R² = 0,9760`, `MAE = 3,47 мс` и
+  stress-R² `0,8823` на полностью новых структурах;
+- DQN выбирает лучшее измеренное действие в `54,7%` случаев против `31,3%`
+  случайно, а на новых структурах — в `54,8%` против `33,9%`;
 - SQL, планы, прогнозы и рекомендации журналируются в служебной схеме `pqo`;
 - сбор данных, обучение, экспорт и прогноз доступны как Python API и CLI;
 - индексные действия формируются из SQL и безопасно оцениваются с откатом DDL;
@@ -54,7 +55,7 @@ PostgreSQL доступен на порту `55432`, чтобы не конфл�
 Сгенерировать и измерить сбалансированную выборку:
 
 ```powershell
-.\.venv\Scripts\pqo-generate.exe 2400 artifacts\aviation_dataset.csv --seed 42
+.\.venv\Scripts\pqo-generate.exe 2400 artifacts\aviation_dataset.csv --seed 42 --repetitions 2
 ```
 
 Обучить модель:
@@ -67,6 +68,12 @@ PostgreSQL доступен на порту `55432`, чтобы не конфл�
 
 ```powershell
 .\.venv\Scripts\pqo-predict.exe models\xgboost\xgboost_query_time.joblib "SELECT * FROM aviation.flights WHERE departure_airport = 'MSQ'"
+```
+
+Получить единый прогноз XGBoost и рекомендацию DQN с сохранением в `pqo`:
+
+```powershell
+.\.venv\Scripts\pqo-analyze.exe models\xgboost\xgboost_query_time.joblib models\dqn\dqn_index_advisor.pt "SELECT * FROM aviation.flights WHERE departure_airport = 'MSQ'" --threshold-ms 50
 ```
 
 Собрать признаки для списка запросов, по одному запросу в строке:

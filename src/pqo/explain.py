@@ -78,6 +78,10 @@ def collect_explain(
     with psycopg.connect(**settings.connection_kwargs()) as connection:
         with connection.transaction():
             connection.execute("SET TRANSACTION READ ONLY")
+            connection.execute(
+                "SELECT set_config('statement_timeout', %s, true)",
+                (f"{settings.statement_timeout_ms}ms",),
+            )
             options = (
                 "ANALYZE, BUFFERS, FORMAT JSON"
                 if analyze

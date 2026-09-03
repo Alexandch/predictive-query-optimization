@@ -1,7 +1,9 @@
 import hashlib
 import os
 import unittest
+from pathlib import Path
 
+from pqo.analysis_service import analyze_query
 from pqo.config import DatabaseSettings
 from pqo.dataset import collect_sample
 from pqo.explain import collect_explain
@@ -15,6 +17,7 @@ from pqo.query_generator import AviationQueryGenerator
     "set PQO_INTEGRATION_TESTS=1 to run PostgreSQL integration tests",
 )
 class PostgreSQLIntegrationTests(unittest.TestCase):
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
     def test_collects_real_explain_plan(self):
         result = collect_explain(
             "SELECT value FROM generate_series(1, 3) AS value"
@@ -137,6 +140,40 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
                 """
             ).fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_combined_analysis_is_persisted(self):
+        import psycopg
+
+        result = analyze_query(
+            "SELECT flight_id FROM aviation.flights "
+            "WHERE departure_airport = 'MSQ' ORDER BY scheduled_departure",
+            self.PROJECT_ROOT / "models/xgboost/xgboost_query_time.joblib",
+            self.PROJECT_ROOT / "models/dqn/dqn_index_advisor.pt",
+            recommendation_threshold_ms=0,
+            persist=True,
+        )
+        self.assertIsNotNone(result.query_run_id)
+        self.assertIsNotNone(result.recommendation)
+
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            stored = connection.execute(
+                """
+                SELECT qr.status, mp.model_name, mp.predicted_time_ms
+                FROM pqo.query_run AS qr
+                JOIN pqo.model_prediction AS mp ON mp.query_run_id = qr.id
+                WHERE qr.id = %s
+                """,
+                (result.query_run_id,),
+            ).fetchone()
+            connection.execute(
+                "DELETE FROM pqo.query_run WHERE id = %s",
+                (result.query_run_id,),
+            )
+
+        self.assertEqual(stored[0], "completed")
+        self.assertEqual(stored[1], "xgboost")
+        self.assertGreaterEqual(stored[2], 0)
 
 
 if __name__ == "__main__":

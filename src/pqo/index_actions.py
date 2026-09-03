@@ -110,6 +110,10 @@ def generate_index_actions(
         alias: [column for column in columns if column not in select_aliases]
         for alias, columns in order_columns.items()
     }
+    selected_columns = {
+        alias: [column for column in columns if column not in select_aliases]
+        for alias, columns in selected_columns.items()
+    }
 
     actions: list[IndexAction] = [IndexAction.noop()]
     seen: set[IndexAction] = set(actions)

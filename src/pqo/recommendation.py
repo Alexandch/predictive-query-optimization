@@ -31,6 +31,8 @@ def recommend_index(
         [encode_action(action) for action in actions],
     )
     best_index = max(range(len(actions)), key=values.__getitem__)
+    if best_index != 0 and values[best_index] <= 0:
+        best_index = 0
     return IndexRecommendation(
         action=actions[best_index],
         predicted_reward=values[best_index],
