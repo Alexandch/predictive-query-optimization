@@ -36,6 +36,7 @@ pqo-generate = "pqo.generate_cli:main"
 pqo-train = "pqo.train_cli:main"
 pqo-predict = "pqo.predict_cli:main"
 pqo-export = "pqo.export_cli:main"
+pqo-index = "pqo.index_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

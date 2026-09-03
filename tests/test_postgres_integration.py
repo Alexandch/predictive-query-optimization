@@ -5,6 +5,8 @@ import unittest
 from pqo.config import DatabaseSettings
 from pqo.dataset import collect_sample
 from pqo.explain import collect_explain
+from pqo.index_actions import IndexAction
+from pqo.index_environment import IndexExperimentEnvironment
 from pqo.query_generator import AviationQueryGenerator
 
 
@@ -106,6 +108,35 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
                 result = collect_sample(case, persist=False)
                 self.assertEqual(result.values["template_id"], case.template_id)
                 self.assertIsNotNone(result.values["actual_total_time_ms"])
+
+    def test_index_experiment_is_rolled_back(self):
+        import psycopg
+
+        action = IndexAction.create(
+            "aviation", "flights", ("departure_airport", "status")
+        )
+        environment = IndexExperimentEnvironment(repetitions=1)
+        result = environment.evaluate(
+            """
+            SELECT flight_id
+            FROM aviation.flights
+            WHERE departure_airport = 'MSQ' AND status = 'Scheduled'
+            """,
+            action,
+        )
+
+        self.assertGreater(result.baseline_time_ms, 0)
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            count = connection.execute(
+                """
+                SELECT count(*)
+                FROM pg_indexes
+                WHERE schemaname = 'aviation'
+                  AND indexname LIKE 'pqo_trial_%'
+                """
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":
