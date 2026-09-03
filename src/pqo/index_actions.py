@@ -92,7 +92,24 @@ def generate_index_actions(
         _predicate_nodes(tree), alias_to_table
     )
     order_columns = _columns_by_table(tree.find_all(exp.Order), alias_to_table)
-    selected_columns = _columns_by_table(tree.find_all(exp.Select), alias_to_table)
+    selected_columns = _columns_by_table(
+        (
+            expression
+            for select in tree.find_all(exp.Select)
+            for expression in select.expressions
+        ),
+        alias_to_table,
+    )
+    select_aliases = {
+        expression.alias
+        for select in tree.find_all(exp.Select)
+        for expression in select.expressions
+        if expression.alias
+    }
+    order_columns = {
+        alias: [column for column in columns if column not in select_aliases]
+        for alias, columns in order_columns.items()
+    }
 
     actions: list[IndexAction] = [IndexAction.noop()]
     seen: set[IndexAction] = set(actions)

@@ -1,0 +1,50 @@
+{
+  "split_mode": "unseen-template",
+  "experience_count": 1820,
+  "train_count": 1020,
+  "validation_count": 400,
+  "test_count": 400,
+  "train_templates": [
+    "aircraft_fare_capacity",
+    "aircraft_flight_counts",
+    "aircraft_seat_capacity",
+    "airport_connections",
+    "airport_departure_counts",
+    "booking_amount_range",
+    "booking_ticket_count",
+    "bookings_with_expensive_ticket",
+    "daily_flight_count",
+    "flight_revenue",
+    "route_revenue",
+    "ticket_fare_lookup",
+    "ticket_name_prefix",
+    "top_routes"
+  ],
+  "validation_templates": [
+    "fare_statistics",
+    "flight_occupancy",
+    "high_value_passengers",
+    "passengers_for_booking",
+    "recent_flights_sorted"
+  ],
+  "test_templates": [
+    "boarding_pass_lookup",
+    "flights_without_tickets",
+    "passenger_flight_history",
+    "route_by_date",
+    "unboarded_tickets"
+  ],
+  "validation_reward_mae": 0.3064512610435486,
+  "validation_recommendation_accuracy": 0.32978723404255317,
+  "validation_mean_regret": 0.2466605453718787,
+  "reward_mae": 0.31251993775367737,
+  "recommendation_accuracy": 0.31,
+  "mean_regret": 0.3211108477679801,
+  "noop_accuracy": 0.05,
+  "noop_mean_regret": 0.5866485347724462,
+  "random_accuracy": 0.23,
+  "random_mean_regret": 0.3938319043356085,
+  "epochs": 259,
+  "best_epoch": 9,
+  "seed": 42
+}

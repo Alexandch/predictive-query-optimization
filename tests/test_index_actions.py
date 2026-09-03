@@ -40,6 +40,24 @@ class IndexActionTests(unittest.TestCase):
         )
         self.assertEqual(actions, (IndexAction.noop(),))
 
+    def test_does_not_treat_order_alias_as_physical_column(self):
+        actions = generate_index_actions(
+            """
+            SELECT scheduled_departure::date AS flight_date, COUNT(*) AS total
+            FROM aviation.flights
+            WHERE departure_airport = 'MSQ'
+            GROUP BY scheduled_departure::date
+            ORDER BY flight_date
+            """
+        )
+        indexed_columns = {
+            column
+            for action in actions
+            for column in action.key_columns + action.include_columns
+        }
+        self.assertNotIn("flight_date", indexed_columns)
+        self.assertNotIn("total", indexed_columns)
+
 
 if __name__ == "__main__":
     unittest.main()

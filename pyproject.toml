@@ -19,12 +19,16 @@ ml = [
     "scikit-learn>=1.9,<2",
     "xgboost>=3.4,<4",
 ]
+rl = [
+    "torch>=2.10,<3",
+]
 dev = [
     "pytest>=8.3,<9",
     "joblib>=1.6,<2",
     "pandas>=3.0,<4",
     "scikit-learn>=1.9,<2",
     "xgboost>=3.4,<4",
+    "torch>=2.10,<3",
 ]
 
 [tool.setuptools.packages.find]
@@ -37,6 +41,9 @@ pqo-train = "pqo.train_cli:main"
 pqo-predict = "pqo.predict_cli:main"
 pqo-export = "pqo.export_cli:main"
 pqo-index = "pqo.index_cli:main"
+pqo-dqn-collect = "pqo.dqn_collect_cli:main"
+pqo-dqn-train = "pqo.dqn_train_cli:main"
+pqo-recommend = "pqo.recommend_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

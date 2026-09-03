@@ -21,6 +21,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not store collected plans and features in the pqo schema",
     )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="append compatible rows instead of overwriting the CSV",
+    )
     return parser
 
 
@@ -42,6 +47,7 @@ def main() -> int:
         args.output,
         persist=not args.no_persist,
         progress=report_progress,
+        append=args.append,
     )
     print(
         f"Collected {len(results)} generated queries from "

@@ -16,6 +16,9 @@ class ExplainResult:
 
 
 def _assert_read_only_query(sql_text: str) -> str:
+    from sqlglot import exp, parse
+    from sqlglot.errors import ParseError
+
     normalized = sql_text.strip()
     if not normalized:
         raise ValueError("SQL query must not be empty")
@@ -27,6 +30,33 @@ def _assert_read_only_query(sql_text: str) -> str:
     normalized = normalized.rstrip().removesuffix(";")
     if ";" in normalized:
         raise ValueError("Only one SQL statement can be analyzed at a time")
+
+    try:
+        statements = [item for item in parse(normalized, read="postgres") if item]
+    except ParseError as exc:
+        raise ValueError(f"Invalid PostgreSQL SQL: {exc}") from exc
+    if len(statements) != 1:
+        raise ValueError("Only one SQL statement can be analyzed at a time")
+
+    statement = statements[0]
+    forbidden_types = tuple(
+        expression_type
+        for name in (
+            "Alter",
+            "Command",
+            "Copy",
+            "Create",
+            "Delete",
+            "Drop",
+            "Insert",
+            "Merge",
+            "Transaction",
+            "Update",
+        )
+        if (expression_type := getattr(exp, name, None)) is not None
+    )
+    if any(isinstance(node, forbidden_types) for node in statement.walk()):
+        raise ValueError("Data-changing SQL is not allowed in analyzed queries")
 
     return normalized
 

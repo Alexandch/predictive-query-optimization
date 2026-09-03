@@ -60,6 +60,7 @@ def collect_to_csv(
     settings: DatabaseSettings | None = None,
     persist: bool = True,
     progress: Callable[[int, int, CollectionResult], None] | None = None,
+    append: bool = False,
 ) -> list[CollectionResult]:
     cases = [
         query if isinstance(query, QueryCase) else QueryCase("external", query)
@@ -78,9 +79,19 @@ def collect_to_csv(
 
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=list(results[0].values))
-        writer.writeheader()
+    fieldnames = list(results[0].values)
+    has_existing_data = append and destination.exists() and destination.stat().st_size > 0
+    if has_existing_data:
+        with destination.open(newline="", encoding="utf-8") as existing_file:
+            existing_fields = csv.DictReader(existing_file).fieldnames
+        if existing_fields != fieldnames:
+            raise ValueError("Existing CSV columns do not match collected features")
+
+    mode = "a" if append else "w"
+    with destination.open(mode, newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        if not has_existing_data:
+            writer.writeheader()
         writer.writerows(result.values for result in results)
 
     return results
