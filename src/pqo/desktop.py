@@ -564,14 +564,33 @@ class MainWindow(QMainWindow):
                 ("NOOP stress", dqn_stress["noop_accuracy"], "#115e59"),
             )
         )
-        rows = (
+        rows = [
             ("Точек «факт → прогноз»", len(report.prediction_points)),
             ("MAE на полном датасете, мс", f"{report.dataset_mae_ms:.4f}"),
             ("RMSE на полном датасете, мс", f"{report.dataset_rmse_ms:.4f}"),
             ("R² на полном датасете", f"{report.dataset_r2:.6f}"),
             ("XGBoost within 20%, parameter", f"{parameter['within_20_percent']:.2f}%"),
             ("DQN accuracy / random", f"{dqn['recommendation_accuracy']:.4f} / {dqn['random_accuracy']:.4f}"),
-        )
+        ]
+        control_directory = PROJECT_ROOT / "models" / "control"
+        try:
+            xgb_control = json.loads(
+                (control_directory / "xgboost_control_metrics.json").read_text(encoding="utf-8")
+            )
+            dqn_control = json.loads(
+                (control_directory / "dqn_control_metrics.json").read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        else:
+            rows.extend(
+                [
+                    ("Production control XGBoost R²", f"{xgb_control['r2']:.6f}"),
+                    ("Production control XGBoost MAE, мс", f"{xgb_control['mae_ms']:.4f}"),
+                    ("Production control DQN accuracy", f"{dqn_control['recommendation_accuracy']:.4f}"),
+                    ("Production control DQN regret", f"{dqn_control['mean_regret']:.4f}"),
+                ]
+            )
         self.experiment_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             for column, value in enumerate(row):

@@ -106,12 +106,21 @@ def generate_index_actions(
         for expression in select.expressions
         if expression.alias
     }
+    derived_columns = select_aliases | {
+        column_name
+        for cte in tree.find_all(exp.CTE)
+        for column_name in cte.alias_column_names
+    }
+    predicate_columns = {
+        alias: [column for column in columns if column not in derived_columns]
+        for alias, columns in predicate_columns.items()
+    }
     order_columns = {
-        alias: [column for column in columns if column not in select_aliases]
+        alias: [column for column in columns if column not in derived_columns]
         for alias, columns in order_columns.items()
     }
     selected_columns = {
-        alias: [column for column in columns if column not in select_aliases]
+        alias: [column for column in columns if column not in derived_columns]
         for alias, columns in selected_columns.items()
     }
 

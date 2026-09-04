@@ -101,6 +101,7 @@ PostgreSQL доступен на порту `55432`, чтобы не конфл�
 - [Среда индексных рекомендаций](docs/index-recommendation-environment.md)
 - [Самостоятельное обучение и проверка моделей](docs/training-guide.md)
 - [Десктопное PyQt6-приложение](docs/desktop-application.md)
+- [Production-like контрольный benchmark](docs/production-control-benchmark.md)
 
 ## Следующие этапы
 

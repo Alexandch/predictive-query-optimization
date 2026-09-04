@@ -79,6 +79,31 @@ class IndexActionTests(unittest.TestCase):
         }
         self.assertNotIn("flight_count", indexed_columns)
 
+    def test_does_not_index_cte_declared_or_computed_columns(self):
+        actions = generate_index_actions(
+            """
+            WITH RECURSIVE calendar(day) AS (
+                SELECT DATE '2025-01-01'
+                UNION ALL SELECT day + 1 FROM calendar
+                WHERE day < DATE '2025-01-10'
+            ), traffic AS (
+                SELECT scheduled_departure::date AS day, COUNT(*) AS flights
+                FROM aviation.flights GROUP BY scheduled_departure::date
+            )
+            SELECT c.day, COALESCE(t.flights, 0) AS daily_flights
+            FROM calendar c LEFT JOIN traffic t USING (day)
+            ORDER BY c.day
+            """
+        )
+        indexed_columns = {
+            column
+            for action in actions
+            for column in action.key_columns + action.include_columns
+        }
+        self.assertNotIn("day", indexed_columns)
+        self.assertNotIn("flights", indexed_columns)
+        self.assertNotIn("daily_flights", indexed_columns)
+
 
 if __name__ == "__main__":
     unittest.main()

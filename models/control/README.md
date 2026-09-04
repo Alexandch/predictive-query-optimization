@@ -1,0 +1,13 @@
+# Production-like control results
+
+Каталог содержит отчёты замороженных XGBoost и DQN на 30 новых production-like
+структурах. Эти данные не участвовали в обучении.
+
+- `xgboost_control_metrics.json` — общие метрики;
+- `xgboost_control_predictions.csv` — факт, прогноз и ошибка каждого SQL;
+- `xgboost_control_by_template.csv` — ошибки по структурным классам;
+- `dqn_control_metrics.json` — DQN против Random и NOOP;
+- `dqn_control_decisions.csv` — выбранное, фактически лучшее действие и regret.
+- `manifest.json` — условия прогона и SHA-256 выборок/моделей.
+
+Полная методика описана в `docs/production-control-benchmark.md`.

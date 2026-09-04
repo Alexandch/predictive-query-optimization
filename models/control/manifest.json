@@ -1,0 +1,24 @@
+{
+  "executed_at": "2026-09-04",
+  "database": "PostgreSQL 17.11",
+  "workload_seed": 7301,
+  "training_data_used": false,
+  "xgboost": {
+    "measurement_count": 600,
+    "requested_query_count": 300,
+    "unique_query_count": 171,
+    "template_count": 30,
+    "repetitions": 2,
+    "dataset_sha256": "7C2D9E8EE72955462CFB1812E6E7F9AEDD9B4639EA12BAEFAE1F1F12851C65C3",
+    "model_sha256": "A6418453AB44E709BB66619BE09798DA94EDAA39C15CCA1DAB8FF3E3E8B17C34"
+  },
+  "dqn": {
+    "record_count": 84,
+    "query_count_with_candidates": 27,
+    "template_count_with_candidates": 27,
+    "actions_per_query": 2,
+    "repetitions": 1,
+    "dataset_sha256": "BC2A5A79E65DFE88C76D6619DCE948008060AA703CAAAF84B684C9ABC35A0870",
+    "model_sha256": "75FC4BF3EDFD937E3D6D7117243392AE1B21E847C8CE2FB7F9ED956DA0C2F8AE"
+  }
+}

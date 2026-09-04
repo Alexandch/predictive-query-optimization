@@ -56,6 +56,7 @@ pqo-recommend = "pqo.recommend_cli:main"
 pqo-merge = "pqo.merge_cli:main"
 pqo-analyze = "pqo.analyze_cli:main"
 pqo-desktop = "pqo.desktop:main"
+pqo-production-benchmark = "pqo.production_benchmark_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
