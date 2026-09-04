@@ -44,7 +44,7 @@ INSERT INTO aviation.flights (
     aircraft_code
 )
 SELECT
-    concat('B2', lpad((1000 + series_id % 8999)::text, 4, '0')),
+    concat('B', lpad(series_id::text, 5, '0')),
     timestamptz '2025-01-01 00:00:00+03'
         + (series_id % 365) * interval '1 day'
         + (series_id % 24) * interval '1 hour',
@@ -56,7 +56,7 @@ SELECT
     airports[((series_id + 3) % 10) + 1],
     statuses[(series_id % 4) + 1],
     aircrafts[(series_id % 5) + 1]
-FROM generate_series(1, 10000) AS series_id
+FROM generate_series(1, 50000) AS series_id
 CROSS JOIN (
     SELECT
         ARRAY['MSQ','BQT','GME','VTB','GNA','SVO','LED','WAW','TBS','IST']::char(3)[] AS airports,
@@ -71,7 +71,7 @@ SELECT
     timestamptz '2024-10-01 00:00:00+03'
         + (series_id % 365) * interval '1 day',
     (5000 + (series_id * 7919) % 495000)::numeric(12, 2)
-FROM generate_series(1, 50000) AS series_id
+FROM generate_series(1, 250000) AS series_id
 ON CONFLICT DO NOTHING;
 
 INSERT INTO aviation.tickets (
@@ -82,10 +82,10 @@ INSERT INTO aviation.tickets (
 )
 SELECT
     lpad(series_id::text, 13, '0'),
-    lpad((((series_id - 1) % 50000) + 1)::text, 6, '0'),
+    lpad((((series_id - 1) % 250000) + 1)::text, 6, '0'),
     concat(lpad((series_id % 9999)::text, 4, '0'), '-', lpad((series_id % 999999)::text, 6, '0')),
     concat('Passenger ', series_id)
-FROM generate_series(1, 100000) AS series_id
+FROM generate_series(1, 500000) AS series_id
 ON CONFLICT DO NOTHING;
 
 INSERT INTO aviation.ticket_flights (
@@ -95,15 +95,16 @@ INSERT INTO aviation.ticket_flights (
     amount
 )
 SELECT
-    lpad(series_id::text, 13, '0'),
-    ((series_id * 37 - 1) % 10000) + 1,
+    lpad((((series_id - 1) % 500000) + 1)::text, 13, '0'),
+    (((((series_id::bigint - 1) % 500000) + 1) * 37
+        + ((series_id::bigint - 1) / 500000) * 7919 - 1) % 50000) + 1,
     CASE
         WHEN series_id % 20 = 0 THEN 'Business'
         WHEN series_id % 7 = 0 THEN 'Comfort'
         ELSE 'Economy'
     END,
-    (3000 + (series_id * 3571) % 120000)::numeric(12, 2)
-FROM generate_series(1, 100000) AS series_id
+    (3000 + (series_id::bigint * 3571) % 120000)::numeric(12, 2)
+FROM generate_series(1, 1000000) AS series_id
 ON CONFLICT DO NOTHING;
 
 INSERT INTO aviation.boarding_passes (

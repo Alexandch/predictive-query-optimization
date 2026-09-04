@@ -8,6 +8,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from .config import DatabaseSettings
+from .database_features import DatabaseFeatures
 from .plan_features import PlanFeatures
 from .sql_features import SQLFeatures
 
@@ -17,16 +18,32 @@ def save_analysis(
     plan_json: Any,
     sql_features: SQLFeatures,
     plan_features: PlanFeatures,
+    database_features: DatabaseFeatures,
     settings: DatabaseSettings | None = None,
     source: str = "dataset-collector",
     template_id: str = "external",
+    connection=None,
 ) -> int:
     import psycopg
 
     settings = settings or DatabaseSettings.from_env()
     sql_hash = hashlib.sha256(sql_text.encode("utf-8")).hexdigest()
 
-    with psycopg.connect(**settings.connection_kwargs()) as connection:
+    if connection is None:
+        with psycopg.connect(**settings.connection_kwargs()) as owned_connection:
+            return save_analysis(
+                sql_text,
+                plan_json,
+                sql_features,
+                plan_features,
+                database_features,
+                settings=settings,
+                source=source,
+                template_id=template_id,
+                connection=owned_connection,
+            )
+
+    with connection.transaction():
         query_run_id = connection.execute(
             "SELECT pqo.register_query_run(%s, %s, %s, %s)",
             (sql_text, sql_hash, source, template_id),
@@ -102,7 +119,13 @@ def save_analysis(
                 shared_hit_blocks,
                 shared_read_blocks,
                 temp_read_blocks,
-                temp_written_blocks
+                temp_written_blocks,
+                relation_row_estimate_sum,
+                largest_relation_rows,
+                relation_size_bytes,
+                index_size_bytes,
+                existing_index_count,
+                estimated_selectivity
             ) VALUES (
                 %(query_run_id)s,
                 %(plan_json)s,
@@ -128,13 +151,20 @@ def save_analysis(
                 %(shared_hit_blocks)s,
                 %(shared_read_blocks)s,
                 %(temp_read_blocks)s,
-                %(temp_written_blocks)s
+                %(temp_written_blocks)s,
+                %(relation_row_estimate_sum)s,
+                %(largest_relation_rows)s,
+                %(relation_size_bytes)s,
+                %(index_size_bytes)s,
+                %(existing_index_count)s,
+                %(estimated_selectivity)s
             )
             """,
             {
                 "query_run_id": query_run_id,
                 "plan_json": Jsonb(plan_json),
                 **plan_features.as_dict(),
+                **database_features.as_dict(),
             },
         )
 
@@ -159,7 +189,7 @@ def save_optimization_result(
     settings: DatabaseSettings | None = None,
     *,
     model_name: str = "xgboost",
-    model_version: str = "40-templates-v1",
+    model_version: str = "52-templates-v2",
 ) -> None:
     """Persist model output produced for an already stored estimated plan."""
     import psycopg

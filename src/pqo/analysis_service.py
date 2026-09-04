@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import DatabaseSettings
+from .database_features import collect_database_features
 from .dqn import predict_action_values
 from .dqn_features import encode_action, encode_query_state
 from .explain import collect_explain
@@ -40,9 +41,15 @@ def analyze_query(
     normalized_sql = sql_text.strip()
     sql_features = extract_sql_features(normalized_sql)
     estimated_plan = collect_explain(normalized_sql, settings=settings, analyze=False)
+    database_features = collect_database_features(
+        normalized_sql,
+        estimated_plan.features.estimated_plan_rows,
+        settings=settings,
+    )
     feature_values = {
         **sql_features.as_dict(),
         **estimated_plan.features.as_dict(),
+        **database_features.as_dict(),
     }
     predicted_time = predict_query_time(xgboost_model_path, feature_values)
     prediction = QueryTimePrediction(
@@ -60,7 +67,7 @@ def analyze_query(
         values = predict_action_values(
             dqn_model_path,
             encode_query_state(feature_values),
-            [encode_action(action) for action in actions],
+            [encode_action(action, normalized_sql) for action in actions],
         )
         best_index = max(range(len(actions)), key=values.__getitem__)
         if best_index != 0 and values[best_index] <= 0:
@@ -78,6 +85,7 @@ def analyze_query(
             estimated_plan.plan_json,
             sql_features,
             estimated_plan.features,
+            database_features,
             settings=settings,
             source="application",
         )

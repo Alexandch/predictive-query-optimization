@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import DatabaseSettings
+from .database_features import collect_database_features
 from .explain import collect_explain
 from .sql_features import extract_sql_features
 from .training import predict_query_time
@@ -29,9 +30,15 @@ def predict_sql_query(
     """Predict without executing the user's query."""
     sql_features = extract_sql_features(sql_text)
     estimated_plan = collect_explain(sql_text, settings=settings, analyze=False)
+    database_features = collect_database_features(
+        sql_text,
+        estimated_plan.features.estimated_plan_rows,
+        settings=settings,
+    )
     feature_values = {
         **sql_features.as_dict(),
         **estimated_plan.features.as_dict(),
+        **database_features.as_dict(),
     }
     predicted_time_ms = predict_query_time(model_path, feature_values)
 

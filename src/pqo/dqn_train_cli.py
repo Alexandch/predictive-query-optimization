@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--ranking-weight", type=float, default=0.10)
     parser.add_argument(
         "--split-mode",
         choices=("parameter", "unseen-template"),
@@ -33,6 +34,7 @@ def main() -> int:
         learning_rate=args.learning_rate,
         seed=args.seed,
         split_mode=args.split_mode,
+        ranking_weight=args.ranking_weight,
     )
     print(json.dumps(asdict(metrics), ensure_ascii=False, indent=2))
     return 0

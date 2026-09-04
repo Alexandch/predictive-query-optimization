@@ -65,6 +65,7 @@ def collect_explain(
     sql_text: str,
     settings: DatabaseSettings | None = None,
     analyze: bool = True,
+    connection=None,
 ) -> ExplainResult:
     """Collect an estimated or actually executed plan in a read-only transaction."""
     query = _assert_read_only_query(sql_text)
@@ -75,7 +76,9 @@ def collect_explain(
     except ImportError as exc:  # pragma: no cover - depends on optional runtime setup
         raise RuntimeError("Install project dependencies before connecting to PostgreSQL") from exc
 
-    with psycopg.connect(**settings.connection_kwargs()) as connection:
+    owns_connection = connection is None
+    connection = connection or psycopg.connect(**settings.connection_kwargs())
+    try:
         with connection.transaction():
             connection.execute("SET TRANSACTION READ ONLY")
             connection.execute(
@@ -90,6 +93,9 @@ def collect_explain(
             row = connection.execute(
                 f"EXPLAIN ({options}) {query}"
             ).fetchone()
+    finally:
+        if owns_connection:
+            connection.close()
 
     if row is None:
         raise RuntimeError("PostgreSQL returned no EXPLAIN result")

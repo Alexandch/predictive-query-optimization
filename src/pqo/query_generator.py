@@ -13,6 +13,9 @@ class AviationQueryGenerator:
     AIRPORTS = ("MSQ", "BQT", "GME", "VTB", "GNA", "SVO", "LED", "WAW", "TBS", "IST")
     FARES = ("Economy", "Comfort", "Business")
     STATUSES = ("Scheduled", "On Time", "Departed", "Arrived")
+    FLIGHT_COUNT = 50_000
+    BOOKING_COUNT = 250_000
+    TICKET_COUNT = 500_000
     TEMPLATE_IDS = (
         "booking_amount_range",
         "route_by_date",
@@ -54,6 +57,18 @@ class AviationQueryGenerator:
         "passenger_fare_transitions",
         "route_traffic_share",
         "aircraft_capacity_load",
+        "route_moving_average",
+        "flight_gap_analysis",
+        "booking_segment_summary",
+        "fare_deviation",
+        "airport_pair_union",
+        "no_show_revenue",
+        "aircraft_revenue_rank",
+        "route_revenue_grouping_sets",
+        "passenger_latest_segment",
+        "flight_capacity_shortfall",
+        "booking_value_buckets",
+        "route_peak_comparison",
     )
 
     def __init__(self, seed: int = 42):
@@ -99,6 +114,18 @@ class AviationQueryGenerator:
             self._passenger_fare_transitions,
             self._route_traffic_share,
             self._aircraft_capacity_load,
+            self._route_moving_average,
+            self._flight_gap_analysis,
+            self._booking_segment_summary,
+            self._fare_deviation,
+            self._airport_pair_union,
+            self._no_show_revenue,
+            self._aircraft_revenue_rank,
+            self._route_revenue_grouping_sets,
+            self._passenger_latest_segment,
+            self._flight_capacity_shortfall,
+            self._booking_value_buckets,
+            self._route_peak_comparison,
         )
 
     @property
@@ -149,7 +176,7 @@ class AviationQueryGenerator:
         )
 
     def _passengers_for_booking(self) -> QueryCase:
-        book_ref = f"{self.random.randint(1, 50_000):06d}"
+        book_ref = f"{self.random.randint(1, self.BOOKING_COUNT):06d}"
         return QueryCase(
             "passengers_for_booking",
             "SELECT b.book_ref, b.book_date, t.ticket_no, t.passenger_name "
@@ -159,7 +186,7 @@ class AviationQueryGenerator:
         )
 
     def _flight_revenue(self) -> QueryCase:
-        flight_id = self.random.randint(1, 10_000)
+        flight_id = self.random.randint(1, self.FLIGHT_COUNT)
         return QueryCase(
             "flight_revenue",
             "SELECT f.flight_id, f.flight_no, COUNT(*) AS ticket_count, "
@@ -206,7 +233,7 @@ class AviationQueryGenerator:
         )
 
     def _passenger_flight_history(self) -> QueryCase:
-        passenger_number = self.random.randint(1, 100_000)
+        passenger_number = self.random.randint(1, self.TICKET_COUNT)
         passenger_id = (
             f"{passenger_number % 9999:04d}-{passenger_number % 999999:06d}"
         )
@@ -267,7 +294,7 @@ class AviationQueryGenerator:
         )
 
     def _boarding_pass_lookup(self) -> QueryCase:
-        flight_id = self.random.randint(1, 10_000)
+        flight_id = self.random.randint(1, self.FLIGHT_COUNT)
         lower = self.random.randint(1, 5)
         upper = lower + self.random.randint(2, 5)
         return QueryCase(
@@ -292,7 +319,7 @@ class AviationQueryGenerator:
         )
 
     def _unboarded_tickets(self) -> QueryCase:
-        flight_id = self.random.randint(1, 10_000)
+        flight_id = self.random.randint(1, self.FLIGHT_COUNT)
         return QueryCase(
             "unboarded_tickets",
             "SELECT tf.ticket_no, tf.fare_conditions "
@@ -314,7 +341,7 @@ class AviationQueryGenerator:
         )
 
     def _flight_occupancy(self) -> QueryCase:
-        flight_id = self.random.randint(1, 10_000)
+        flight_id = self.random.randint(1, self.FLIGHT_COUNT)
         return QueryCase(
             "flight_occupancy",
             "SELECT f.flight_id, COUNT(DISTINCT tf.ticket_no) AS tickets, "
@@ -398,7 +425,7 @@ class AviationQueryGenerator:
         )
 
     def _ticket_fare_lookup(self) -> QueryCase:
-        passenger_number = self.random.randint(1, 100_000)
+        passenger_number = self.random.randint(1, self.TICKET_COUNT)
         passenger_id = (
             f"{passenger_number % 9999:04d}-{passenger_number % 999999:06d}"
         )
@@ -431,6 +458,8 @@ class AviationQueryGenerator:
 
     def _passenger_spending_rank(self) -> QueryCase:
         minimum = self.random.randrange(10_000, 150_001, 5_000)
+        first_ticket = self.random.randint(1, self.TICKET_COUNT - 50_000)
+        last_ticket = first_ticket + self.random.choice((10_000, 25_000, 50_000))
         return QueryCase(
             "passenger_spending_rank",
             "WITH passenger_totals AS ("
@@ -438,6 +467,7 @@ class AviationQueryGenerator:
             "SUM(tf.amount) AS total_spent "
             "FROM aviation.tickets AS t "
             "JOIN aviation.ticket_flights AS tf ON tf.ticket_no = t.ticket_no "
+            f"WHERE t.ticket_no BETWEEN '{first_ticket:013d}' AND '{last_ticket:013d}' "
             "GROUP BY t.passenger_id, t.passenger_name) "
             "SELECT passenger_id, passenger_name, segments, total_spent, "
             "ROW_NUMBER() OVER (ORDER BY total_spent DESC) AS spending_rank "
@@ -462,6 +492,8 @@ class AviationQueryGenerator:
 
     def _aircraft_route_utilization(self) -> QueryCase:
         status = self.random.choice(self.STATUSES)
+        day = self._random_date()
+        end_day = day + timedelta(days=self.random.choice((14, 30, 60, 90)))
         return QueryCase(
             "aircraft_route_utilization",
             "SELECT f.aircraft_code, f.departure_airport, f.arrival_airport, "
@@ -470,6 +502,8 @@ class AviationQueryGenerator:
             "FROM aviation.flights AS f "
             "LEFT JOIN aviation.ticket_flights AS tf ON tf.flight_id = f.flight_id "
             f"WHERE f.status = '{status}' "
+            f"AND f.scheduled_departure >= DATE '{day.isoformat()}' "
+            f"AND f.scheduled_departure < DATE '{end_day.isoformat()}' "
             "GROUP BY f.aircraft_code, f.departure_airport, f.arrival_airport "
             "ORDER BY tickets DESC LIMIT 100",
         )
@@ -489,6 +523,8 @@ class AviationQueryGenerator:
 
     def _connecting_itineraries(self) -> QueryCase:
         origin = self.random.choice(self.AIRPORTS)
+        day = self._random_date()
+        end_day = day + timedelta(days=self.random.choice((3, 7, 14)))
         return QueryCase(
             "connecting_itineraries",
             "SELECT f1.flight_id AS first_flight, f2.flight_id AS second_flight, "
@@ -499,12 +535,14 @@ class AviationQueryGenerator:
             "AND f2.scheduled_departure BETWEEN f1.scheduled_arrival "
             "AND f1.scheduled_arrival + INTERVAL '12 hours' "
             f"WHERE f1.departure_airport = '{origin}' "
+            f"AND f1.scheduled_departure >= DATE '{day.isoformat()}' "
+            f"AND f1.scheduled_departure < DATE '{end_day.isoformat()}' "
             "AND f2.arrival_airport <> f1.departure_airport "
             "ORDER BY f1.scheduled_departure LIMIT 100",
         )
 
     def _unoccupied_seats(self) -> QueryCase:
-        flight_id = self.random.randint(1, 10_000)
+        flight_id = self.random.randint(1, self.FLIGHT_COUNT)
         return QueryCase(
             "unoccupied_seats",
             "SELECT s.fare_conditions, COUNT(*) AS free_seats "
@@ -559,18 +597,22 @@ class AviationQueryGenerator:
         day = self._random_date()
         return QueryCase(
             "boarding_efficiency",
-            "WITH sold AS (SELECT flight_id, COUNT(*) AS sold_count "
-            "FROM aviation.ticket_flights GROUP BY flight_id), "
-            "boarded AS (SELECT flight_id, COUNT(*) AS boarded_count "
-            "FROM aviation.boarding_passes GROUP BY flight_id) "
+            "WITH selected_flights AS (SELECT * FROM aviation.flights "
+            f"WHERE scheduled_departure >= DATE '{day.isoformat()}' "
+            f"AND scheduled_departure < DATE '{(day + timedelta(days=7)).isoformat()}'), "
+            "sold AS (SELECT tf.flight_id, COUNT(*) AS sold_count "
+            "FROM aviation.ticket_flights AS tf JOIN selected_flights AS sf "
+            "ON sf.flight_id = tf.flight_id GROUP BY tf.flight_id), "
+            "boarded AS (SELECT bp.flight_id, COUNT(*) AS boarded_count "
+            "FROM aviation.boarding_passes AS bp JOIN selected_flights AS sf "
+            "ON sf.flight_id = bp.flight_id GROUP BY bp.flight_id) "
             "SELECT f.flight_id, COALESCE(s.sold_count, 0) AS sold_count, "
             "COALESCE(b.boarded_count, 0) AS boarded_count, "
             "COALESCE(b.boarded_count, 0)::numeric / NULLIF(s.sold_count, 0) AS ratio "
-            "FROM aviation.flights AS f "
+            "FROM selected_flights AS f "
             "LEFT JOIN sold AS s ON s.flight_id = f.flight_id "
             "LEFT JOIN boarded AS b ON b.flight_id = f.flight_id "
-            f"WHERE f.scheduled_departure >= DATE '{day.isoformat()}' "
-            f"AND f.scheduled_departure < DATE '{(day + timedelta(days=7)).isoformat()}'",
+            "",
         )
 
     def _routes_above_average_revenue(self) -> QueryCase:
@@ -600,6 +642,8 @@ class AviationQueryGenerator:
 
     def _passenger_fare_transitions(self) -> QueryCase:
         first_fare = self.random.choice(self.FARES)
+        first_ticket = self.random.randint(1, self.TICKET_COUNT - 25_000)
+        last_ticket = first_ticket + self.random.choice((5_000, 10_000, 25_000))
         return QueryCase(
             "passenger_fare_transitions",
             "SELECT t.passenger_id, tf1.fare_conditions AS first_fare, "
@@ -609,6 +653,7 @@ class AviationQueryGenerator:
             "JOIN aviation.ticket_flights AS tf2 ON tf2.ticket_no = t.ticket_no "
             "AND tf2.flight_id > tf1.flight_id "
             f"WHERE tf1.fare_conditions = '{first_fare}' "
+            f"AND t.ticket_no BETWEEN '{first_ticket:013d}' AND '{last_ticket:013d}' "
             "GROUP BY t.passenger_id, tf1.fare_conditions, tf2.fare_conditions "
             "HAVING COUNT(*) >= 1 ORDER BY transitions DESC LIMIT 100",
         )
@@ -642,4 +687,191 @@ class AviationQueryGenerator:
             "LEFT JOIN sold AS s ON s.flight_id = f.flight_id "
             f"WHERE f.aircraft_code = '{aircraft}' "
             "ORDER BY load_factor DESC NULLS LAST LIMIT 100",
+        )
+
+    def _route_moving_average(self) -> QueryCase:
+        airport = self.random.choice(self.AIRPORTS)
+        window = self.random.choice((2, 4, 6, 8))
+        return QueryCase(
+            "route_moving_average",
+            "WITH daily AS (SELECT scheduled_departure::date AS flight_date, "
+            "arrival_airport, COUNT(*) AS flights FROM aviation.flights "
+            f"WHERE departure_airport = '{airport}' "
+            "GROUP BY scheduled_departure::date, arrival_airport) "
+            "SELECT flight_date, arrival_airport, flights, "
+            "AVG(flights) OVER (PARTITION BY arrival_airport ORDER BY flight_date "
+            f"ROWS BETWEEN {window} PRECEDING AND CURRENT ROW) AS moving_average "
+            "FROM daily ORDER BY arrival_airport, flight_date",
+        )
+
+    def _flight_gap_analysis(self) -> QueryCase:
+        airport = self.random.choice(self.AIRPORTS)
+        day = self._random_date()
+        return QueryCase(
+            "flight_gap_analysis",
+            "WITH ordered AS (SELECT flight_id, arrival_airport, scheduled_departure, "
+            "LAG(scheduled_departure) OVER (PARTITION BY arrival_airport "
+            "ORDER BY scheduled_departure) AS previous_departure "
+            "FROM aviation.flights "
+            f"WHERE departure_airport = '{airport}') "
+            "SELECT flight_id, arrival_airport, scheduled_departure, "
+            "scheduled_departure - previous_departure AS departure_gap FROM ordered "
+            f"WHERE scheduled_departure >= DATE '{day.isoformat()}' "
+            "ORDER BY departure_gap DESC NULLS LAST LIMIT 100",
+        )
+
+    def _booking_segment_summary(self) -> QueryCase:
+        day = date(2024, 10, 1) + timedelta(days=self.random.randrange(300))
+        duration = self.random.choice((3, 7, 14, 21))
+        return QueryCase(
+            "booking_segment_summary",
+            "SELECT b.book_ref, COUNT(DISTINCT t.ticket_no) AS passengers, "
+            "COUNT(tf.flight_id) AS segments, SUM(tf.amount) AS segment_revenue "
+            "FROM aviation.bookings AS b JOIN aviation.tickets AS t "
+            "ON t.book_ref = b.book_ref JOIN aviation.ticket_flights AS tf "
+            "ON tf.ticket_no = t.ticket_no "
+            f"WHERE b.book_date >= DATE '{day.isoformat()}' "
+            f"AND b.book_date < DATE '{(day + timedelta(days=duration)).isoformat()}' "
+            "GROUP BY b.book_ref HAVING COUNT(tf.flight_id) >= 2 "
+            "ORDER BY segment_revenue DESC LIMIT 100",
+        )
+
+    def _fare_deviation(self) -> QueryCase:
+        airport = self.random.choice(self.AIRPORTS)
+        factor = self.random.choice((1.05, 1.10, 1.20, 1.35))
+        return QueryCase(
+            "fare_deviation",
+            "WITH route_fares AS (SELECT f.departure_airport, f.arrival_airport, "
+            "AVG(tf.amount) AS average_fare FROM aviation.flights AS f "
+            "JOIN aviation.ticket_flights AS tf ON tf.flight_id = f.flight_id "
+            "GROUP BY f.departure_airport, f.arrival_airport) "
+            "SELECT tf.ticket_no, f.flight_id, tf.amount, r.average_fare "
+            "FROM aviation.ticket_flights AS tf JOIN aviation.flights AS f "
+            "ON f.flight_id = tf.flight_id JOIN route_fares AS r "
+            "ON r.departure_airport = f.departure_airport "
+            "AND r.arrival_airport = f.arrival_airport "
+            f"WHERE f.departure_airport = '{airport}' "
+            f"AND tf.amount > r.average_fare * {factor} "
+            "ORDER BY tf.amount DESC LIMIT 100",
+        )
+
+    def _airport_pair_union(self) -> QueryCase:
+        airport = self.random.choice(self.AIRPORTS)
+        day = self._random_date()
+        return QueryCase(
+            "airport_pair_union",
+            "SELECT flight_id, arrival_airport AS paired_airport, 'departure' AS direction "
+            "FROM aviation.flights "
+            f"WHERE departure_airport = '{airport}' "
+            f"AND scheduled_departure >= DATE '{day.isoformat()}' UNION ALL "
+            "SELECT flight_id, departure_airport AS paired_airport, 'arrival' AS direction "
+            "FROM aviation.flights "
+            f"WHERE arrival_airport = '{airport}' "
+            f"AND scheduled_arrival >= DATE '{day.isoformat()}' LIMIT 200",
+        )
+
+    def _no_show_revenue(self) -> QueryCase:
+        airport = self.random.choice(self.AIRPORTS)
+        fare = self.random.choice(self.FARES)
+        return QueryCase(
+            "no_show_revenue",
+            "SELECT f.departure_airport, f.arrival_airport, COUNT(*) AS no_shows, "
+            "SUM(tf.amount) AS retained_revenue FROM aviation.ticket_flights AS tf "
+            "JOIN aviation.flights AS f ON f.flight_id = tf.flight_id "
+            "LEFT JOIN aviation.boarding_passes AS bp ON bp.ticket_no = tf.ticket_no "
+            "AND bp.flight_id = tf.flight_id "
+            f"WHERE f.departure_airport = '{airport}' "
+            f"AND tf.fare_conditions = '{fare}' AND bp.ticket_no IS NULL "
+            "GROUP BY f.departure_airport, f.arrival_airport "
+            "ORDER BY retained_revenue DESC",
+        )
+
+    def _aircraft_revenue_rank(self) -> QueryCase:
+        status = self.random.choice(self.STATUSES)
+        minimum = self.random.randrange(10_000, 100_001, 2_500)
+        return QueryCase(
+            "aircraft_revenue_rank",
+            "WITH totals AS (SELECT f.aircraft_code, f.departure_airport, "
+            "SUM(tf.amount) AS revenue FROM aviation.flights AS f "
+            "JOIN aviation.ticket_flights AS tf ON tf.flight_id = f.flight_id "
+            f"WHERE f.status = '{status}' GROUP BY f.aircraft_code, f.departure_airport) "
+            "SELECT aircraft_code, departure_airport, revenue, DENSE_RANK() OVER "
+            "(PARTITION BY aircraft_code ORDER BY revenue DESC) AS revenue_rank "
+            f"FROM totals WHERE revenue >= {minimum} ORDER BY aircraft_code, revenue_rank",
+        )
+
+    def _route_revenue_grouping_sets(self) -> QueryCase:
+        day = self._random_date()
+        end_day = day + timedelta(days=self.random.choice((14, 30, 60)))
+        return QueryCase(
+            "route_revenue_grouping_sets",
+            "SELECT f.departure_airport, f.arrival_airport, tf.fare_conditions, "
+            "COUNT(*) AS tickets, SUM(tf.amount) AS revenue "
+            "FROM aviation.flights AS f JOIN aviation.ticket_flights AS tf "
+            "ON tf.flight_id = f.flight_id "
+            f"WHERE f.scheduled_departure >= DATE '{day.isoformat()}' "
+            f"AND f.scheduled_departure < DATE '{end_day.isoformat()}' "
+            "GROUP BY GROUPING SETS ((f.departure_airport, f.arrival_airport, "
+            "tf.fare_conditions), (f.departure_airport, f.arrival_airport), ()) "
+            "ORDER BY revenue DESC NULLS LAST",
+        )
+
+    def _passenger_latest_segment(self) -> QueryCase:
+        prefix = self.random.randint(0, 9999)
+        return QueryCase(
+            "passenger_latest_segment",
+            "SELECT t.passenger_id, t.passenger_name, latest.flight_id, latest.amount "
+            "FROM aviation.tickets AS t CROSS JOIN LATERAL ("
+            "SELECT tf.flight_id, tf.amount FROM aviation.ticket_flights AS tf "
+            "WHERE tf.ticket_no = t.ticket_no ORDER BY tf.flight_id DESC LIMIT 1"
+            ") AS latest "
+            f"WHERE t.passenger_id LIKE '{prefix:04d}-%' "
+            "ORDER BY latest.amount DESC LIMIT 100",
+        )
+
+    def _flight_capacity_shortfall(self) -> QueryCase:
+        day = self._random_date()
+        ratio = self.random.choice((0.50, 0.65, 0.75, 0.85))
+        return QueryCase(
+            "flight_capacity_shortfall",
+            "WITH capacity AS (SELECT aircraft_code, COUNT(*) AS seats "
+            "FROM aviation.seats GROUP BY aircraft_code), boarded AS ("
+            "SELECT flight_id, COUNT(*) AS boarded FROM aviation.boarding_passes "
+            "GROUP BY flight_id) SELECT f.flight_id, c.seats, COALESCE(b.boarded, 0) "
+            "AS boarded FROM aviation.flights AS f JOIN capacity AS c "
+            "ON c.aircraft_code = f.aircraft_code LEFT JOIN boarded AS b "
+            "ON b.flight_id = f.flight_id "
+            f"WHERE f.scheduled_departure >= DATE '{day.isoformat()}' "
+            f"AND COALESCE(b.boarded, 0) < c.seats * {ratio} "
+            "ORDER BY boarded LIMIT 100",
+        )
+
+    def _booking_value_buckets(self) -> QueryCase:
+        day = date(2024, 10, 1) + timedelta(days=self.random.randrange(300))
+        buckets = self.random.choice((5, 8, 10, 12))
+        return QueryCase(
+            "booking_value_buckets",
+            f"SELECT width_bucket(total_amount, 0, 500000, {buckets}) AS amount_bucket, "
+            "COUNT(*) AS bookings, AVG(total_amount) AS average_amount "
+            "FROM aviation.bookings "
+            f"WHERE book_date >= DATE '{day.isoformat()}' "
+            "GROUP BY amount_bucket ORDER BY amount_bucket",
+        )
+
+    def _route_peak_comparison(self) -> QueryCase:
+        airport = self.random.choice(self.AIRPORTS)
+        minimum = self.random.randrange(5, 31)
+        return QueryCase(
+            "route_peak_comparison",
+            "WITH route_daily AS (SELECT scheduled_departure::date AS flight_date, "
+            "departure_airport, arrival_airport, COUNT(*) AS flights "
+            "FROM aviation.flights GROUP BY scheduled_departure::date, "
+            "departure_airport, arrival_airport), route_average AS ("
+            "SELECT departure_airport, arrival_airport, AVG(flights) AS average_flights "
+            "FROM route_daily GROUP BY departure_airport, arrival_airport) "
+            "SELECT d.flight_date, d.arrival_airport, d.flights, a.average_flights "
+            "FROM route_daily AS d JOIN route_average AS a USING "
+            "(departure_airport, arrival_airport) "
+            f"WHERE d.departure_airport = '{airport}' AND d.flights >= {minimum} "
+            "AND d.flights > a.average_flights ORDER BY d.flights DESC",
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 
 from .dataset import collect_to_csv
@@ -32,11 +33,18 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="append compatible rows instead of overwriting the CSV",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue an interrupted deterministic run from the existing CSV",
+    )
     return parser
 
 
 def main() -> int:
     args = _build_parser().parse_args()
+    if args.append and args.resume:
+        raise ValueError("--append and --resume cannot be used together")
     if args.repetitions <= 0:
         raise ValueError("repetitions must be greater than zero")
     generator = AviationQueryGenerator(seed=args.seed)
@@ -46,6 +54,13 @@ def main() -> int:
         for case in unique_cases
         for _ in range(args.repetitions)
     ]
+    completed_count = 0
+    if args.resume and args.output.exists():
+        with args.output.open(newline="", encoding="utf-8") as stream:
+            completed_count = sum(1 for _ in csv.DictReader(stream))
+        if completed_count > len(cases):
+            raise ValueError("Existing CSV contains more rows than the requested run")
+        cases = cases[completed_count:]
 
     def report_progress(position, total, result):
         interval = max(1, total // 20)
@@ -61,10 +76,11 @@ def main() -> int:
         args.output,
         persist=not args.no_persist,
         progress=report_progress,
-        append=args.append,
+        append=args.append or completed_count > 0,
     )
     print(
-        f"Collected {len(results)} measurements ({len(unique_cases)} queries) from "
+        f"Collected {completed_count + len(results)} measurements "
+        f"({len(unique_cases)} queries) from "
         f"{len(generator.template_ids)} templates into {args.output}"
     )
     return 0

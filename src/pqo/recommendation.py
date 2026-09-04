@@ -28,7 +28,7 @@ def recommend_index(
     values = predict_action_values(
         model_path,
         state,
-        [encode_action(action) for action in actions],
+        [encode_action(action, sql_text) for action in actions],
     )
     best_index = max(range(len(actions)), key=values.__getitem__)
     if best_index != 0 and values[best_index] <= 0:

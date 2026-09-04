@@ -6,6 +6,7 @@ import hashlib
 import math
 
 from .config import DatabaseSettings
+from .database_features import collect_database_features
 from .explain import collect_explain
 from .index_actions import IndexAction, IndexActionKind
 from .sql_features import extract_sql_features
@@ -52,18 +53,33 @@ ACTION_FEATURE_NAMES = (
     *(f"table_{name}" for name in AVIATION_TABLES),
     *(f"key_column_bucket_{index}" for index in range(COLUMN_HASH_BUCKETS)),
     *(f"include_column_bucket_{index}" for index in range(COLUMN_HASH_BUCKETS)),
+    "key_in_where_count",
+    "key_in_join_count",
+    "key_in_order_count",
+    "include_in_select_count",
+    "leading_key_in_where",
+    "leading_key_in_join",
+    "leading_key_in_order",
+    "target_table_reference_count",
 )
 
 
 def build_query_state(
     sql_text: str,
     settings: DatabaseSettings | None = None,
+    connection=None,
 ) -> list[float]:
     sql_features = extract_sql_features(sql_text).as_dict()
     plan_features = collect_explain(
-        sql_text, settings=settings, analyze=False
+        sql_text, settings=settings, analyze=False, connection=connection
     ).features.as_dict()
-    return encode_query_state({**sql_features, **plan_features})
+    database_features = collect_database_features(
+        sql_text,
+        plan_features["estimated_plan_rows"],
+        settings=settings,
+        connection=connection,
+    ).as_dict()
+    return encode_query_state({**sql_features, **plan_features, **database_features})
 
 
 def encode_query_state(values: dict) -> list[float]:
@@ -80,7 +96,7 @@ def encode_query_state(values: dict) -> list[float]:
     return [*numeric, *root_encoding]
 
 
-def encode_action(action: IndexAction) -> list[float]:
+def encode_action(action: IndexAction, sql_text: str | None = None) -> list[float]:
     table_name = action.table_name or "other"
     if table_name not in AVIATION_TABLES:
         table_name = "other"
@@ -96,7 +112,70 @@ def encode_action(action: IndexAction) -> list[float]:
     tables = [float(table_name == name) for name in AVIATION_TABLES]
     keys = _hashed_columns(action.key_columns)
     includes = _hashed_columns(action.include_columns)
-    return [*prefix, *tables, *keys, *includes]
+    context = _action_query_context(action, sql_text)
+    return [*prefix, *tables, *keys, *includes, *context]
+
+
+def _action_query_context(
+    action: IndexAction,
+    sql_text: str | None,
+) -> list[float]:
+    if action.kind is IndexActionKind.NOOP or not sql_text:
+        return [0.0] * 8
+
+    from sqlglot import exp, parse_one
+
+    tree = parse_one(sql_text, read="postgres")
+    aliases = {
+        table.alias_or_name
+        for table in tree.find_all(exp.Table)
+        if (table.db or "public") == action.schema_name
+        and table.name == action.table_name
+    }
+    physical_tables = [
+        table
+        for table in tree.find_all(exp.Table)
+        if (table.db or "public") == action.schema_name
+    ]
+    allow_unqualified = len(physical_tables) == 1
+
+    def referenced_columns(nodes) -> set[str]:
+        return {
+            column.name
+            for node in nodes
+            for column in node.find_all(exp.Column)
+            if column.table in aliases or (not column.table and allow_unqualified)
+        }
+
+    where_columns = referenced_columns(tree.find_all(exp.Where))
+    join_columns = referenced_columns(
+        condition
+        for join in tree.find_all(exp.Join)
+        if (condition := join.args.get("on")) is not None
+    )
+    order_columns = referenced_columns(tree.find_all(exp.Order))
+    select_columns = referenced_columns(
+        expression
+        for select in tree.find_all(exp.Select)
+        for expression in select.expressions
+    )
+    leading = action.key_columns[0]
+    table_references = sum(
+        1
+        for table in tree.find_all(exp.Table)
+        if (table.db or "public") == action.schema_name
+        and table.name == action.table_name
+    )
+    return [
+        float(sum(column in where_columns for column in action.key_columns)),
+        float(sum(column in join_columns for column in action.key_columns)),
+        float(sum(column in order_columns for column in action.key_columns)),
+        float(sum(column in select_columns for column in action.include_columns)),
+        float(leading in where_columns),
+        float(leading in join_columns),
+        float(leading in order_columns),
+        float(table_references),
+    ]
 
 
 def _hashed_columns(columns: tuple[str, ...]) -> list[float]:

@@ -33,6 +33,7 @@ class DQNTrainingMetrics:
     epochs: int
     best_epoch: int
     seed: int
+    ranking_weight: float
 
 
 def train_dqn(
@@ -46,12 +47,15 @@ def train_dqn(
     tau: float = 0.02,
     seed: int = 42,
     split_mode: str = "parameter",
+    ranking_weight: float = 0.10,
 ) -> DQNTrainingMetrics:
     import numpy as np
     import torch
     from torch import nn
 
     records = _read_experience(experience_path)
+    if ranking_weight < 0:
+        raise ValueError("ranking_weight must be non-negative")
     templates = sorted({record["template_id"] for record in records})
     if len(records) < 40 or len(templates) < 4:
         raise ValueError("DQN training requires at least 40 experiences and 4 templates")
@@ -90,7 +94,8 @@ def train_dqn(
     target.eval()
     optimizer = torch.optim.AdamW(online.parameters(), lr=learning_rate)
     loss_function = nn.SmoothL1Loss()
-    replay = list(range(len(train_records)))
+    train_groups = _query_index_groups(train_records)
+    validation_groups = _query_index_groups(validation_records)
 
     train_x = torch.tensor(x_train, dtype=torch.float32)
     train_y = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)
@@ -102,8 +107,39 @@ def train_dqn(
     patience = max(50, epochs // 8)
     stale_epochs = 0
     completed_epochs = 0
+
+    def ranking_loss(predicted, expected, groups):
+        losses = []
+        flat_predictions = predicted.squeeze(1)
+        flat_expected = expected.squeeze(1)
+        for indices in groups:
+            if len(indices) < 2:
+                continue
+            group_indices = torch.tensor(indices, dtype=torch.long)
+            rewards = flat_expected[group_indices]
+            values = flat_predictions[group_indices]
+            best = int(torch.argmax(rewards).item())
+            alternatives = torch.arange(len(indices)) != best
+            required_gap = torch.clamp(
+                rewards[best] - rewards[alternatives], min=0.01, max=0.50
+            )
+            actual_gap = values[best] - values[alternatives]
+            losses.append(torch.relu(required_gap - actual_gap).mean())
+        if not losses:
+            return predicted.sum() * 0.0
+        return torch.stack(losses).mean()
+
     for epoch in range(1, epochs + 1):
-        indices = randomizer.sample(replay, min(batch_size, len(replay)))
+        selected_groups = randomizer.sample(
+            train_groups,
+            min(max(1, batch_size // 4), len(train_groups)),
+        )
+        indices = [index for group in selected_groups for index in group]
+        local_groups = []
+        offset = 0
+        for group in selected_groups:
+            local_groups.append(list(range(offset, offset + len(group))))
+            offset += len(group)
         batch_x = train_x[indices]
         rewards = train_y[indices]
 
@@ -111,7 +147,9 @@ def train_dqn(
         # the artifact contract for the later multi-index sequential extension.
         expected_q = rewards
         predicted_q = online(batch_x)
-        loss = loss_function(predicted_q, expected_q)
+        loss = loss_function(predicted_q, expected_q) + ranking_weight * ranking_loss(
+            predicted_q, expected_q, local_groups
+        )
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_value_(online.parameters(), 10.0)
@@ -123,8 +161,17 @@ def train_dqn(
             ):
                 target_parameter.mul_(1.0 - tau).add_(online_parameter, alpha=tau)
 
+            validation_predictions_for_loss = online(validation_x)
             validation_loss = float(
-                loss_function(online(validation_x), validation_y).item()
+                (
+                    loss_function(validation_predictions_for_loss, validation_y)
+                    + ranking_weight
+                    * ranking_loss(
+                        validation_predictions_for_loss,
+                        validation_y,
+                        validation_groups,
+                    )
+                ).item()
             )
         completed_epochs = epoch
         if validation_loss < best_validation_loss - 1e-7:
@@ -178,6 +225,7 @@ def train_dqn(
         epochs=completed_epochs,
         best_epoch=best_epoch,
         seed=seed,
+        ranking_weight=ranking_weight,
     )
 
     destination = Path(output_dir)
@@ -192,6 +240,7 @@ def train_dqn(
             "feature_std": torch.tensor(feature_std, dtype=torch.float32),
             "gamma": gamma,
             "tau": tau,
+            "ranking_weight": ranking_weight,
             "seed": seed,
         },
         destination / "dqn_index_advisor.pt",
@@ -264,6 +313,13 @@ def _arrays(records, np):
     )
     y = np.asarray([record["reward"] for record in records], dtype=np.float32)
     return x, y
+
+
+def _query_index_groups(records: list[dict]) -> list[list[int]]:
+    groups: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        groups.setdefault(record["query_id"], []).append(index)
+    return list(groups.values())
 
 
 def _recommendation_accuracy(records, predictions, np):

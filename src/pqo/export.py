@@ -24,7 +24,16 @@ def export_recent_dataset(
     with psycopg.connect(**settings.connection_kwargs()) as connection:
         rows = connection.execute(
             """
-            SELECT qr.template_id, qr.sql_text, ep.plan_json
+            SELECT
+                qr.template_id,
+                qr.sql_text,
+                ep.plan_json,
+                ep.relation_row_estimate_sum,
+                ep.largest_relation_rows,
+                ep.relation_size_bytes,
+                ep.index_size_bytes,
+                ep.existing_index_count,
+                ep.estimated_selectivity
             FROM pqo.query_run AS qr
             JOIN pqo.execution_plan AS ep ON ep.query_run_id = qr.id
             WHERE qr.status = 'completed'
@@ -39,13 +48,29 @@ def export_recent_dataset(
         raise ValueError("No completed query measurements were found")
 
     records = []
-    for template_id, sql_text, plan_json in reversed(rows):
+    for (
+        template_id,
+        sql_text,
+        plan_json,
+        relation_row_estimate_sum,
+        largest_relation_rows,
+        relation_size_bytes,
+        index_size_bytes,
+        existing_index_count,
+        estimated_selectivity,
+    ) in reversed(rows):
         records.append(
             {
                 "template_id": template_id,
                 "sql_text": sql_text,
                 **extract_sql_features(sql_text).as_dict(),
                 **extract_plan_features(plan_json).as_dict(),
+                "relation_row_estimate_sum": relation_row_estimate_sum,
+                "largest_relation_rows": largest_relation_rows,
+                "relation_size_bytes": relation_size_bytes,
+                "index_size_bytes": index_size_bytes,
+                "existing_index_count": existing_index_count,
+                "estimated_selectivity": estimated_selectivity,
             }
         )
 

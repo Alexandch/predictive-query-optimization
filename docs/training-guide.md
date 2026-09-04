@@ -31,13 +31,13 @@ $env:PQO_INTEGRATION_TESTS = "1"
 Собрать стандартные запросы и сохранить измерения в служебной схеме БД:
 
 ```powershell
-.\.venv\Scripts\pqo-generate.exe 2400 artifacts\xgb_run.csv --seed 42 --repetitions 2
+.\.venv\Scripts\pqo-generate.exe 5200 artifacts\xgb_run.csv --seed 4242 --repetitions 2
 ```
 
-Для нового запуска используйте другой seed. Дозапись в существующий CSV:
+Если детерминированный запуск был прерван, продолжите его без дублей:
 
 ```powershell
-.\.venv\Scripts\pqo-generate.exe 2400 artifacts\xgb_run.csv --seed 43 --repetitions 2 --append
+.\.venv\Scripts\pqo-generate.exe 5200 artifacts\xgb_run.csv --seed 4242 --repetitions 2 --resume
 ```
 
 Для собственных сложных запросов скопируйте
@@ -80,26 +80,19 @@ $env:PQO_INTEGRATION_TESTS = "1"
 
 ## 3. Сколько ещё данных нужно XGBoost
 
-Текущие 4 800 измерений покрывают 40 шаблонов. Универсальная модель получает
-`R² = 0,9760`, а stress-R² новых структур — `0,8823` вместо прежних `0,7731`.
-Поэтому простое повторение тех же запросов почти исчерпало пользу.
+Текущие 10 400 измерений покрывают 52 шаблона. Универсальная модель получает
+`R² = 0,9661`, а stress-R² новых структур — `0,9582`. Цель текущего этапа
+достигнута; простое повторение тех же запросов почти исчерпало пользу.
 
-Следующая разумная цель:
+Для следующего исследовательского этапа разумнее:
 
-- 48–60 структурных шаблонов вместо текущих 40;
-- 100–200 уникальных наборов параметров на шаблон;
-- 2–3 повтора каждого точного SQL для медианной агрегации;
-- ориентировочно 10 000–20 000 сырых измерений в одной непрерывной серии.
+- подключить вторую предметную схему или другой масштаб данных;
+- сохранить текущие seed и разбиения как неизменный benchmark;
+- добавлять новые структуры только при наличии реального сценария;
+- остановить расширение, если два последовательных шага дают менее 0,01 stress-R².
 
-Добавляйте оконные функции, CTE, несколько уровней подзапросов, 3–5 JOIN,
-разные селективности, сортировки с LIMIT, HAVING, EXISTS/NOT EXISTS и запросы,
-которые возвращают как очень мало, так и много строк. Не следует искусственно
-делать SQL длинным: важнее разнообразие планов выполнения.
-
-Остановить расширение можно, когда два последовательных увеличения набора на
-20–25% дают прирост `unseen_template_stress.r2` менее `0,01`, MAE почти не
-снижается, а целевой стресс-R² достиг хотя бы `0,90`. Контрольный набор и seed
-при сравнении версий должны оставаться одинаковыми.
+При расширении важнее разнообразие реальных планов выполнения, чем искусственная
+длина SQL или повторение уже покрытых параметров.
 
 ## 4. Обучение DQN
 
@@ -107,7 +100,7 @@ $env:PQO_INTEGRATION_TESTS = "1"
 его следует запускать только на учебной копии БД:
 
 ```powershell
-.\.venv\Scripts\pqo-dqn-collect.exe 480 artifacts\dqn.jsonl --actions-per-query 3 --repetitions 2 --seed 2027 --resume
+.\.venv\Scripts\pqo-dqn-collect.exe 1040 artifacts\dqn.jsonl --actions-per-query 3 --repetitions 1 --seed 2027 --resume
 ```
 
 `--resume` продолжает незавершённый запуск. Для более надёжного итогового
@@ -118,13 +111,13 @@ $env:PQO_INTEGRATION_TESTS = "1"
 Обучение и основной parameter-holdout:
 
 ```powershell
-.\.venv\Scripts\pqo-dqn-train.exe artifacts\dqn.jsonl artifacts\models\dqn --epochs 2000 --batch-size 128 --learning-rate 0.0005 --seed 42
+.\.venv\Scripts\pqo-dqn-train.exe artifacts\dqn.jsonl artifacts\models\dqn --epochs 2000 --batch-size 128 --learning-rate 0.001 --ranking-weight 0.10 --seed 42
 ```
 
 Отдельный стресс-тест новых структур:
 
 ```powershell
-.\.venv\Scripts\pqo-dqn-train.exe artifacts\dqn.jsonl artifacts\models\dqn_stress --epochs 2000 --batch-size 128 --learning-rate 0.001 --seed 42 --split-mode unseen-template
+.\.venv\Scripts\pqo-dqn-train.exe artifacts\dqn.jsonl artifacts\models\dqn_stress --epochs 2000 --batch-size 128 --learning-rate 0.001 --ranking-weight 0.10 --seed 42 --split-mode unseen-template
 ```
 
 Получить рекомендацию без создания постоянного индекса:

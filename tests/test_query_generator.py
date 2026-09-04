@@ -28,7 +28,9 @@ class AviationQueryGeneratorTests(unittest.TestCase):
             AviationQueryGenerator().generate(0)
 
     def test_template_distribution_is_balanced(self):
-        cases = AviationQueryGenerator(seed=7).generate(50)
+        cases = AviationQueryGenerator(seed=7).generate(
+            len(AviationQueryGenerator.TEMPLATE_IDS) + 8
+        )
         counts = {
             template_id: sum(case.template_id == template_id for case in cases)
             for template_id in AviationQueryGenerator.TEMPLATE_IDS

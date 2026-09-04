@@ -41,7 +41,12 @@ class IndexExperimentEnvironment:
         self.repetitions = repetitions
         self.statement_timeout_ms = statement_timeout_ms
 
-    def evaluate(self, sql_text: str, action: IndexAction) -> IndexExperimentResult:
+    def evaluate(
+        self,
+        sql_text: str,
+        action: IndexAction,
+        connection=None,
+    ) -> IndexExperimentResult:
         query = _assert_read_only_query(sql_text)
         if action.kind is IndexActionKind.CREATE:
             if action.schema_name not in self.allowed_schemas:
@@ -54,63 +59,66 @@ class IndexExperimentEnvironment:
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("Install project dependencies before evaluation") from exc
 
-        with psycopg.connect(**self.settings.connection_kwargs()) as connection:
-            try:
-                connection.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
-                    ("pqo-index-experiment",),
-                )
-                connection.execute(
-                    "SELECT set_config('statement_timeout', %s, true)",
-                    (f"{self.statement_timeout_ms}ms",),
-                )
-                before, _ = self._measure(connection, query)
+        if connection is None:
+            with psycopg.connect(**self.settings.connection_kwargs()) as owned_connection:
+                return self.evaluate(sql_text, action, connection=owned_connection)
 
-                if action.kind is IndexActionKind.NOOP:
-                    baseline = median(before)
-                    return IndexExperimentResult(
-                        action, baseline, baseline, 0.0, 0.0, 0.0, False
-                    )
+        try:
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("pqo-index-experiment",),
+            )
+            connection.execute(
+                "SELECT set_config('statement_timeout', %s, true)",
+                (f"{self.statement_timeout_ms}ms",),
+            )
+            before, _ = self._measure(connection, query)
 
-                connection.execute("SAVEPOINT pqo_index_trial")
-                index_name = self._temporary_index_name(query, action)
-                statement = sql.SQL("CREATE INDEX {} ON {}.{} ({})").format(
-                    sql.Identifier(index_name),
-                    sql.Identifier(action.schema_name),
-                    sql.Identifier(action.table_name),
-                    sql.SQL(", ").join(map(sql.Identifier, action.key_columns)),
-                )
-                if action.include_columns:
-                    statement += sql.SQL(" INCLUDE ({})").format(
-                        sql.SQL(", ").join(
-                            map(sql.Identifier, action.include_columns)
-                        )
-                    )
-                connection.execute(statement)
-                candidate_times, candidate_plan = self._measure(connection, query)
-
-                connection.execute("ROLLBACK TO SAVEPOINT pqo_index_trial")
-                after, _ = self._measure(connection, query)
-
-                baseline = median((*before, *after))
-                candidate = median(candidate_times)
-                improvement = (baseline - candidate) / max(baseline, 0.001)
-                complexity_penalty = (
-                    0.01 * len(action.key_columns)
-                    + 0.005 * len(action.include_columns)
-                )
-                plan_text = str(candidate_plan)
+            if action.kind is IndexActionKind.NOOP:
+                baseline = median(before)
                 return IndexExperimentResult(
-                    action=action,
-                    baseline_time_ms=baseline,
-                    candidate_time_ms=candidate,
-                    improvement_ratio=improvement,
-                    reward=improvement - complexity_penalty,
-                    candidate_plan_cost=float(candidate_plan[0]["Plan"]["Total Cost"]),
-                    candidate_uses_index="Index" in plan_text or "Bitmap" in plan_text,
+                    action, baseline, baseline, 0.0, 0.0, 0.0, False
                 )
-            finally:
-                connection.rollback()
+
+            connection.execute("SAVEPOINT pqo_index_trial")
+            index_name = self._temporary_index_name(query, action)
+            statement = sql.SQL("CREATE INDEX {} ON {}.{} ({})").format(
+                sql.Identifier(index_name),
+                sql.Identifier(action.schema_name),
+                sql.Identifier(action.table_name),
+                sql.SQL(", ").join(map(sql.Identifier, action.key_columns)),
+            )
+            if action.include_columns:
+                statement += sql.SQL(" INCLUDE ({})").format(
+                    sql.SQL(", ").join(
+                        map(sql.Identifier, action.include_columns)
+                    )
+                )
+            connection.execute(statement)
+            candidate_times, candidate_plan = self._measure(connection, query)
+
+            connection.execute("ROLLBACK TO SAVEPOINT pqo_index_trial")
+            after, _ = self._measure(connection, query)
+
+            baseline = median((*before, *after))
+            candidate = median(candidate_times)
+            improvement = (baseline - candidate) / max(baseline, 0.001)
+            complexity_penalty = (
+                0.01 * len(action.key_columns)
+                + 0.005 * len(action.include_columns)
+            )
+            plan_text = str(candidate_plan)
+            return IndexExperimentResult(
+                action=action,
+                baseline_time_ms=baseline,
+                candidate_time_ms=candidate,
+                improvement_ratio=improvement,
+                reward=improvement - complexity_penalty,
+                candidate_plan_cost=float(candidate_plan[0]["Plan"]["Total Cost"]),
+                candidate_uses_index="Index" in plan_text or "Bitmap" in plan_text,
+            )
+        finally:
+            connection.rollback()
 
     def _measure(self, connection, query: str) -> tuple[list[float], object]:
         times: list[float] = []

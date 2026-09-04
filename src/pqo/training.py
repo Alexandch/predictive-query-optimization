@@ -45,6 +45,12 @@ NUMERIC_FEATURES = [
     "nested_loop_count",
     "sort_node_count",
     "aggregate_node_count",
+    "relation_row_estimate_sum",
+    "largest_relation_rows",
+    "relation_size_bytes",
+    "index_size_bytes",
+    "existing_index_count",
+    "estimated_selectivity",
 ]
 MODEL_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
