@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict
 import json
 
+from .config import DatabaseSettings
 from .index_actions import generate_index_actions
 from .index_environment import IndexExperimentEnvironment
 
@@ -23,7 +24,11 @@ def main() -> None:
     parser.add_argument("--repetitions", type=int, default=3)
     args = parser.parse_args()
 
-    actions = generate_index_actions(args.sql)
+    settings = DatabaseSettings.from_env()
+    actions = generate_index_actions(
+        args.sql,
+        allowed_schemas=settings.allowed_schemas,
+    )
     if args.action_index is None:
         print(
             json.dumps(
@@ -37,7 +42,11 @@ def main() -> None:
     if args.action_index < 0 or args.action_index >= len(actions):
         parser.error(f"action index must be between 0 and {len(actions) - 1}")
 
-    environment = IndexExperimentEnvironment(repetitions=args.repetitions)
+    environment = IndexExperimentEnvironment(
+        settings=settings,
+        repetitions=args.repetitions,
+        allowed_schemas=settings.allowed_schemas,
+    )
     result = environment.evaluate(args.sql, actions[args.action_index])
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
 

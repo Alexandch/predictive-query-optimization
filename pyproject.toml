@@ -54,9 +54,12 @@ pqo-dqn-collect = "pqo.dqn_collect_cli:main"
 pqo-dqn-train = "pqo.dqn_train_cli:main"
 pqo-recommend = "pqo.recommend_cli:main"
 pqo-merge = "pqo.merge_cli:main"
+pqo-merge-dqn = "pqo.merge_dqn_cli:main"
 pqo-analyze = "pqo.analyze_cli:main"
 pqo-desktop = "pqo.desktop:main"
 pqo-production-benchmark = "pqo.production_benchmark_cli:main"
+pqo-retail = "pqo.retail_cli:main"
+pqo-retail-control = "pqo.retail_control_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -3,6 +3,8 @@ import unittest
 from pqo.dqn_features import (
     ACTION_FEATURE_NAMES,
     COLUMN_HASH_BUCKETS,
+    GENERIC_ACTION_ENCODING,
+    LEGACY_ACTION_ENCODING,
     encode_action,
 )
 from pqo.index_actions import IndexAction
@@ -46,6 +48,22 @@ class DQNFeatureTests(unittest.TestCase):
         self.assertEqual(context[2], 1.0)
         self.assertEqual(context[4], 1.0)
         self.assertEqual(context[7], 1.0)
+
+    def test_generic_encoding_represents_non_aviation_table(self):
+        action = IndexAction.create("retail", "products", ("category_id",))
+        generic = encode_action(
+            action,
+            encoding_version=GENERIC_ACTION_ENCODING,
+        )
+        legacy = encode_action(
+            action,
+            encoding_version=LEGACY_ACTION_ENCODING,
+        )
+
+        self.assertEqual(sum(generic[6:14]), 1.0)
+        self.assertEqual(generic[14], 0.0)
+        self.assertEqual(legacy[14], 1.0)
+        self.assertNotEqual(generic, legacy)
 
 
 if __name__ == "__main__":

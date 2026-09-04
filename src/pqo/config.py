@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
+
+
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +19,13 @@ class DatabaseSettings:
     port: int = 55432
     connect_timeout: int = 5
     statement_timeout_ms: int = 30_000
+    allowed_schemas: frozenset[str] = frozenset({"aviation", "retail"})
+
+    def __post_init__(self) -> None:
+        if not self.allowed_schemas:
+            raise ValueError("At least one allowed schema is required")
+        if any(not _IDENTIFIER.fullmatch(schema) for schema in self.allowed_schemas):
+            raise ValueError("Allowed schemas must be safe PostgreSQL identifiers")
 
     @classmethod
     def from_env(cls) -> "DatabaseSettings":
@@ -33,6 +44,14 @@ class DatabaseSettings:
                     "POSTGRES_STATEMENT_TIMEOUT_MS",
                     str(defaults.statement_timeout_ms),
                 )
+            ),
+            allowed_schemas=frozenset(
+                schema.strip()
+                for schema in os.getenv(
+                    "PQO_ALLOWED_SCHEMAS",
+                    ",".join(sorted(defaults.allowed_schemas)),
+                ).split(",")
+                if schema.strip()
             ),
         )
 

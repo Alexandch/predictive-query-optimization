@@ -1,9 +1,11 @@
 import csv
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from pqo.merge import merge_datasets
+from pqo.dqn_features import GENERIC_ACTION_ENCODING
+from pqo.merge import merge_datasets, merge_dqn_experience
 
 
 class DatasetMergeTests(unittest.TestCase):
@@ -32,6 +34,61 @@ class DatasetMergeTests(unittest.TestCase):
             second.write_text("b\n2\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 merge_datasets([first, second], root / "output.csv")
+
+    def test_merges_and_reencodes_dqn_experience(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = [root / "one.jsonl", root / "two.jsonl"]
+            records = [
+                {
+                    "template_id": "one",
+                    "query_id": "q1",
+                    "sql_text": "SELECT * FROM retail.products WHERE category_id = 1",
+                    "state": [0.0],
+                    "action": {
+                        "kind": "create",
+                        "schema_name": "retail",
+                        "table_name": "products",
+                        "key_columns": ["category_id"],
+                        "include_columns": [],
+                    },
+                    "action_features": [99.0],
+                    "reward": 0.2,
+                },
+                {
+                    "template_id": "two",
+                    "query_id": "q2",
+                    "sql_text": "SELECT 1",
+                    "state": [0.0],
+                    "action": {
+                        "kind": "noop",
+                        "schema_name": None,
+                        "table_name": None,
+                        "key_columns": [],
+                        "include_columns": [],
+                    },
+                    "action_features": [99.0],
+                    "reward": 0.0,
+                },
+            ]
+            for path, record in zip(inputs, records, strict=True):
+                path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            output = root / "merged.jsonl"
+
+            count = merge_dqn_experience(inputs, output)
+            merged = [
+                json.loads(line)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            ]
+
+            self.assertEqual(count, 2)
+            self.assertTrue(all(len(record["action_features"]) > 1 for record in merged))
+            self.assertTrue(
+                all(
+                    record["action_encoding_version"] == GENERIC_ACTION_ENCODING
+                    for record in merged
+                )
+            )
 
 
 if __name__ == "__main__":

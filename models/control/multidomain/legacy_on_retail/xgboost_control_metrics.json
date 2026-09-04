@@ -1,0 +1,15 @@
+{
+  "sample_count": 150,
+  "unique_query_count": 54,
+  "template_count": 15,
+  "mae_ms": 320.8348651654279,
+  "median_ae_ms": 93.39276275634765,
+  "p90_ae_ms": 1088.204998046875,
+  "rmse_ms": 577.5090320076954,
+  "r2": -0.6775396318417557,
+  "mape_percent": 211.61965096127483,
+  "within_20_percent": 25.925925925925924,
+  "actual_min_ms": 0.174,
+  "actual_median_ms": 140.57350000000002,
+  "actual_max_ms": 1760.7215
+}

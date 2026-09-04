@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Iterable
+
+from .dqn_features import DEFAULT_ACTION_ENCODING, encode_action
+from .index_actions import IndexAction, IndexActionKind
 
 
 def merge_datasets(
@@ -35,3 +39,45 @@ def merge_datasets(
         writer.writeheader()
         writer.writerows(rows)
     return len(rows)
+
+
+def merge_dqn_experience(
+    input_paths: Iterable[str | Path],
+    output_path: str | Path,
+    *,
+    encoding_version: str = DEFAULT_ACTION_ENCODING,
+) -> int:
+    """Merge JSONL experience and deterministically re-encode every action."""
+    sources = [Path(path) for path in input_paths]
+    if len(sources) < 2:
+        raise ValueError("At least two input experience files are required")
+    destination = Path(output_path)
+    if destination.resolve() in {source.resolve() for source in sources}:
+        raise ValueError("Output must not overwrite an input experience file")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    count = 0
+    with destination.open("w", encoding="utf-8", newline="\n") as target:
+        for source in sources:
+            with source.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    data = record["action"]
+                    action = IndexAction(
+                        kind=IndexActionKind(data["kind"]),
+                        schema_name=data.get("schema_name"),
+                        table_name=data.get("table_name"),
+                        key_columns=tuple(data.get("key_columns") or ()),
+                        include_columns=tuple(data.get("include_columns") or ()),
+                    )
+                    record["action_features"] = encode_action(
+                        action,
+                        record.get("sql_text"),
+                        encoding_version=encoding_version,
+                    )
+                    record["action_encoding_version"] = encoding_version
+                    target.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    count += 1
+    return count

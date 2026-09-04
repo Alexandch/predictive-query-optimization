@@ -9,7 +9,9 @@ from pathlib import Path
 import random
 from typing import Any
 
-from .dqn import predict_action_values
+from .dqn import dqn_action_encoding_version, predict_action_values
+from .dqn_features import LEGACY_ACTION_ENCODING, encode_action
+from .index_actions import IndexAction, IndexActionKind
 from .training import GROUP_COLUMN, MODEL_FEATURES, TARGET_COLUMN
 
 
@@ -127,6 +129,29 @@ def evaluate_xgboost_control(
     return metrics
 
 
+def _control_action_features(record: dict[str, Any], model_encoding: str) -> list[float]:
+    record_encoding = record.get(
+        "action_encoding_version",
+        LEGACY_ACTION_ENCODING,
+    )
+    if record_encoding == model_encoding:
+        return record["action_features"]
+
+    data = record["action"]
+    action = IndexAction(
+        kind=IndexActionKind(data["kind"]),
+        schema_name=data.get("schema_name"),
+        table_name=data.get("table_name"),
+        key_columns=tuple(data.get("key_columns") or ()),
+        include_columns=tuple(data.get("include_columns") or ()),
+    )
+    return encode_action(
+        action,
+        record.get("sql_text"),
+        encoding_version=model_encoding,
+    )
+
+
 def evaluate_dqn_control(
     experience_path: str | Path,
     model_path: str | Path,
@@ -151,6 +176,7 @@ def evaluate_dqn_control(
     random_regrets: list[float] = []
     absolute_errors: list[float] = []
     randomizer = random.Random(seed)
+    model_encoding = dqn_action_encoding_version(model_path)
     action_count = 0
     templates: set[str] = set()
     decision_rows: list[dict[str, Any]] = []
@@ -158,7 +184,10 @@ def evaluate_dqn_control(
         values = predict_action_values(
             model_path,
             candidates[0]["state"],
-            [candidate["action_features"] for candidate in candidates],
+            [
+                _control_action_features(candidate, model_encoding)
+                for candidate in candidates
+            ],
         )
         rewards = [float(candidate["reward"]) for candidate in candidates]
         predicted_index = int(np.argmax(values))

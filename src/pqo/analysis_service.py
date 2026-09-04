@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import DatabaseSettings
 from .database_features import collect_database_features
-from .dqn import predict_action_values
+from .dqn import dqn_action_encoding_version, predict_action_values
 from .dqn_features import encode_action, encode_query_state
 from .explain import collect_explain
 from .index_actions import IndexAction, generate_index_actions
@@ -63,11 +63,21 @@ def analyze_query(
 
     recommendation = None
     if predicted_time >= recommendation_threshold_ms:
-        actions = generate_index_actions(normalized_sql)
+        actions = generate_index_actions(
+            normalized_sql,
+            allowed_schemas=settings.allowed_schemas,
+        )
         values = predict_action_values(
             dqn_model_path,
             encode_query_state(feature_values),
-            [encode_action(action, normalized_sql) for action in actions],
+            [
+                encode_action(
+                    action,
+                    normalized_sql,
+                    encoding_version=dqn_action_encoding_version(dqn_model_path),
+                )
+                for action in actions
+            ],
         )
         best_index = max(range(len(actions)), key=values.__getitem__)
         if best_index != 0 and values[best_index] <= 0:

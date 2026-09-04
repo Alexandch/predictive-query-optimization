@@ -217,6 +217,14 @@ class MainWindow(QMainWindow):
             str(self.preferences.value("db_name", defaults.dbname))
         )
         self.user_edit = QLineEdit(str(self.preferences.value("db_user", defaults.user)))
+        self.allowed_schemas_edit = QLineEdit(
+            str(
+                self.preferences.value(
+                    "allowed_schemas",
+                    ",".join(sorted(defaults.allowed_schemas)),
+                )
+            )
+        )
         self.password_edit = QLineEdit(defaults.password)
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.xgb_model_edit = QLineEdit(
@@ -229,6 +237,7 @@ class MainWindow(QMainWindow):
         form.addRow("Порт", self.port_spin)
         form.addRow("База данных", self.database_edit)
         form.addRow("Пользователь", self.user_edit)
+        form.addRow("Разрешённые схемы", self.allowed_schemas_edit)
         form.addRow("Пароль", self.password_edit)
         form.addRow("Модель XGBoost", self._path_row(self.xgb_model_edit, False))
         form.addRow("Модель DQN", self._path_row(self.dqn_model_edit, False))
@@ -396,6 +405,11 @@ class MainWindow(QMainWindow):
             password=self.password_edit.text(),
             host=self.host_edit.text().strip(),
             port=self.port_spin.value(),
+            allowed_schemas=frozenset(
+                schema.strip()
+                for schema in self.allowed_schemas_edit.text().split(",")
+                if schema.strip()
+            ),
         )
 
     def _start_analysis(self) -> None:
@@ -631,6 +645,9 @@ class MainWindow(QMainWindow):
         self.preferences.setValue("db_port", self.port_spin.value())
         self.preferences.setValue("db_name", self.database_edit.text().strip())
         self.preferences.setValue("db_user", self.user_edit.text().strip())
+        self.preferences.setValue(
+            "allowed_schemas", self.allowed_schemas_edit.text().strip()
+        )
         self.preferences.setValue("xgb_model", self.xgb_model_edit.text().strip())
         self.preferences.setValue("dqn_model", self.dqn_model_edit.text().strip())
         self.preferences.setValue("threshold_ms", self.threshold_spin.value())

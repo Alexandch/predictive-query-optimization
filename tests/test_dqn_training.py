@@ -3,8 +3,16 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from pqo.dqn import predict_action_values, train_dqn
-from pqo.dqn_features import ACTION_FEATURE_NAMES, STATE_FEATURE_NAMES
+from pqo.dqn import (
+    dqn_action_encoding_version,
+    predict_action_values,
+    train_dqn,
+)
+from pqo.dqn_features import (
+    ACTION_FEATURE_NAMES,
+    LEGACY_ACTION_ENCODING,
+    STATE_FEATURE_NAMES,
+)
 
 
 class DQNTrainingTests(unittest.TestCase):
@@ -43,6 +51,13 @@ class DQNTrainingTests(unittest.TestCase):
             )
 
             self.assertEqual(metrics.experience_count, 40)
+            self.assertEqual(metrics.action_encoding_version, LEGACY_ACTION_ENCODING)
+            self.assertEqual(
+                dqn_action_encoding_version(
+                    root / "model" / "dqn_index_advisor.pt"
+                ),
+                LEGACY_ACTION_ENCODING,
+            )
             self.assertEqual(len(values), 2)
             self.assertTrue((root / "model" / "metrics.json").exists())
 

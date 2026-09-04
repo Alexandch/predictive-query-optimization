@@ -28,3 +28,24 @@
 SHA-256: `BC2A5A79E65DFE88C76D6619DCE948008060AA703CAAAF84B684C9ABC35A0870`.
 Оба контрольных набора изолированы от обучения.
 
+## Розничная предметная область
+
+`retail_training.csv` содержит 360 измерений 18 обучающих шаблонов, а
+`retail_dqn_experience.jsonl` — 940 записей реального опыта. Объединённые файлы
+`multidomain_training.csv` и `multidomain_dqn_experience.jsonl` содержат
+соответственно 10 760 измерений и 4 880 действий. Весь объединённый DQN-набор
+использует универсальное кодирование `generic-v2`.
+
+`retail_control.csv` (150 измерений, 15 новых шаблонов) и
+`retail_dqn_control.jsonl` (80 действий для 26 решений) являются независимым
+контролем и не должны использоваться для обучения.
+
+SHA-256 новых наборов:
+
+- `retail_training.csv`: `269E2DDD109BDDB8AA3AF0554E781332EA30EA16E358CCF1EEF9CD645FDB00A7`;
+- `retail_dqn_experience.jsonl`: `8F8CE7572857BF8DF3811CC2972D4A846C5B45A57AC7457651486216C0F449E8`;
+- `multidomain_training.csv`: `C0D41C2D6484930FC5C575441FBEBE31E32FED559557359CC7C1C5C7057C3955`;
+- `multidomain_dqn_experience.jsonl`: `9F4BAE370FE790932C97BCB3106FDB68879D7F5A8B2C4C1710D0200E9934F4EA`;
+- `retail_control.csv`: `5EEF579F25156B62CB21AB0258631CF744F82FF430B34E9ABAFB9EFDD613AF8F`;
+- `retail_dqn_control.jsonl`: `0946D18BF120B84D028312169864E68BB797809B3CBB5A081F10CF45F3A561A3`.
+

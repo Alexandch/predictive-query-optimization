@@ -9,7 +9,11 @@ from pathlib import Path
 import random
 from typing import Callable, Iterable
 
-from .dqn_features import build_query_state, encode_action
+from .dqn_features import (
+    DEFAULT_ACTION_ENCODING,
+    build_query_state,
+    encode_action,
+)
 from .config import DatabaseSettings
 from .index_actions import IndexAction, IndexActionKind, generate_index_actions
 from .index_environment import IndexExperimentEnvironment
@@ -27,6 +31,7 @@ def collect_dqn_experience(
     resume: bool = False,
     progress: Callable[[int, int, str], None] | None = None,
     connection=None,
+    allowed_schemas: frozenset[str] | None = None,
 ) -> int:
     if count <= 0 or actions_per_query <= 0:
         raise ValueError("count and actions_per_query must be positive")
@@ -35,6 +40,7 @@ def collect_dqn_experience(
         import psycopg
 
         settings = DatabaseSettings.from_env()
+        effective_schemas = allowed_schemas or settings.allowed_schemas
         with psycopg.connect(**settings.connection_kwargs()) as owned_connection:
             return collect_dqn_experience(
                 count,
@@ -45,10 +51,15 @@ def collect_dqn_experience(
                 resume=resume,
                 progress=progress,
                 connection=owned_connection,
+                allowed_schemas=effective_schemas,
             )
 
+    allowed_schemas = allowed_schemas or DatabaseSettings.from_env().allowed_schemas
     generator = AviationQueryGenerator(seed=seed)
-    environment = IndexExperimentEnvironment(repetitions=repetitions)
+    environment = IndexExperimentEnvironment(
+        repetitions=repetitions,
+        allowed_schemas=allowed_schemas,
+    )
     randomizer = random.Random(seed)
     cases = generator.generate(count)
     destination = Path(output_path)
@@ -68,7 +79,10 @@ def collect_dqn_experience(
     new_count = 0
     with destination.open(mode, encoding="utf-8", newline="\n") as stream:
         for position, case in enumerate(cases, start=1):
-            actions = generate_index_actions(case.sql_text)
+            actions = generate_index_actions(
+                case.sql_text,
+                allowed_schemas=allowed_schemas,
+            )
             query_id = hashlib.sha256(case.sql_text.encode()).hexdigest()
             candidates = list(actions[1:])
             selected = randomizer.sample(
@@ -126,6 +140,7 @@ def collect_dqn_case_experience(
     resume: bool = False,
     progress: Callable[[int, int, str], None] | None = None,
     connection=None,
+    allowed_schemas: frozenset[str] | None = None,
 ) -> int:
     """Collect rewards for an explicit holdout workload, optionally testing all actions."""
     cases = list(cases)
@@ -137,6 +152,7 @@ def collect_dqn_case_experience(
         import psycopg
 
         settings = DatabaseSettings.from_env()
+        effective_schemas = allowed_schemas or settings.allowed_schemas
         with psycopg.connect(**settings.connection_kwargs()) as owned_connection:
             return collect_dqn_case_experience(
                 cases,
@@ -147,9 +163,14 @@ def collect_dqn_case_experience(
                 resume=resume,
                 progress=progress,
                 connection=owned_connection,
+                allowed_schemas=effective_schemas,
             )
 
-    environment = IndexExperimentEnvironment(repetitions=repetitions)
+    allowed_schemas = allowed_schemas or DatabaseSettings.from_env().allowed_schemas
+    environment = IndexExperimentEnvironment(
+        repetitions=repetitions,
+        allowed_schemas=allowed_schemas,
+    )
     randomizer = random.Random(seed)
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -168,7 +189,10 @@ def collect_dqn_case_experience(
     new_count = 0
     with destination.open(mode, encoding="utf-8", newline="\n") as stream:
         for position, case in enumerate(cases, start=1):
-            actions = generate_index_actions(case.sql_text)
+            actions = generate_index_actions(
+                case.sql_text,
+                allowed_schemas=allowed_schemas,
+            )
             query_id = hashlib.sha256(case.sql_text.encode()).hexdigest()
             if (case.template_id, query_id) in completed:
                 if progress:
@@ -225,12 +249,17 @@ def _record(template_id, query_id, sql_text, state, action: IndexAction, result)
         "state": state,
         "action": action_data,
         "action_features": encode_action(action, sql_text),
+        "action_encoding_version": DEFAULT_ACTION_ENCODING,
         "done": True,
         **outcome,
     }
 
 
-def refresh_action_features(path: str | Path) -> int:
+def refresh_action_features(
+    path: str | Path,
+    *,
+    encoding_version: str = DEFAULT_ACTION_ENCODING,
+) -> int:
     """Rebuild deterministic action vectors after feature-schema changes."""
     destination = Path(path)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
@@ -250,7 +279,12 @@ def refresh_action_features(path: str | Path) -> int:
                 key_columns=tuple(data.get("key_columns") or ()),
                 include_columns=tuple(data.get("include_columns") or ()),
             )
-            record["action_features"] = encode_action(action, record["sql_text"])
+            record["action_features"] = encode_action(
+                action,
+                record["sql_text"],
+                encoding_version=encoding_version,
+            )
+            record["action_encoding_version"] = encoding_version
             target.write(json.dumps(record, ensure_ascii=False) + "\n")
             count += 1
     temporary.replace(destination)

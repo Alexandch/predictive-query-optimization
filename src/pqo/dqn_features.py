@@ -38,19 +38,24 @@ AVIATION_TABLES = (
     "boarding_passes",
     "other",
 )
+LEGACY_ACTION_ENCODING = "aviation-v1"
+GENERIC_ACTION_ENCODING = "generic-v2"
+DEFAULT_ACTION_ENCODING = GENERIC_ACTION_ENCODING
+TABLE_HASH_BUCKETS = len(AVIATION_TABLES) - 1
 COLUMN_HASH_BUCKETS = 24
 
 STATE_FEATURE_NAMES = tuple(NUMERIC_FEATURES) + tuple(
     f"root_node_{name}" for name in ROOT_NODE_TYPES
 )
-ACTION_FEATURE_NAMES = (
+_ACTION_PREFIX_NAMES = (
     "is_noop",
     "is_create",
     "key_count",
     "include_count",
     "is_composite",
     "is_covering",
-    *(f"table_{name}" for name in AVIATION_TABLES),
+)
+_ACTION_SUFFIX_NAMES = (
     *(f"key_column_bucket_{index}" for index in range(COLUMN_HASH_BUCKETS)),
     *(f"include_column_bucket_{index}" for index in range(COLUMN_HASH_BUCKETS)),
     "key_in_where_count",
@@ -61,6 +66,17 @@ ACTION_FEATURE_NAMES = (
     "leading_key_in_join",
     "leading_key_in_order",
     "target_table_reference_count",
+)
+LEGACY_ACTION_FEATURE_NAMES = (
+    *_ACTION_PREFIX_NAMES,
+    *(f"table_{name}" for name in AVIATION_TABLES),
+    *_ACTION_SUFFIX_NAMES,
+)
+ACTION_FEATURE_NAMES = (
+    *_ACTION_PREFIX_NAMES,
+    *(f"table_name_bucket_{index}" for index in range(TABLE_HASH_BUCKETS)),
+    "is_public_schema",
+    *_ACTION_SUFFIX_NAMES,
 )
 
 
@@ -96,11 +112,12 @@ def encode_query_state(values: dict) -> list[float]:
     return [*numeric, *root_encoding]
 
 
-def encode_action(action: IndexAction, sql_text: str | None = None) -> list[float]:
-    table_name = action.table_name or "other"
-    if table_name not in AVIATION_TABLES:
-        table_name = "other"
-
+def encode_action(
+    action: IndexAction,
+    sql_text: str | None = None,
+    *,
+    encoding_version: str = DEFAULT_ACTION_ENCODING,
+) -> list[float]:
     prefix = [
         float(action.kind is IndexActionKind.NOOP),
         float(action.kind is IndexActionKind.CREATE),
@@ -109,11 +126,28 @@ def encode_action(action: IndexAction, sql_text: str | None = None) -> list[floa
         float(len(action.key_columns) > 1),
         float(bool(action.include_columns)),
     ]
-    tables = [float(table_name == name) for name in AVIATION_TABLES]
+    if encoding_version == LEGACY_ACTION_ENCODING:
+        table_name = action.table_name or "other"
+        if table_name not in AVIATION_TABLES:
+            table_name = "other"
+        tables = [float(table_name == name) for name in AVIATION_TABLES]
+    elif encoding_version == GENERIC_ACTION_ENCODING:
+        tables = _hashed_table(action.table_name)
+        tables.append(float(action.schema_name == "public"))
+    else:
+        raise ValueError(f"Unsupported action encoding: {encoding_version}")
     keys = _hashed_columns(action.key_columns)
     includes = _hashed_columns(action.include_columns)
     context = _action_query_context(action, sql_text)
     return [*prefix, *tables, *keys, *includes, *context]
+
+
+def action_feature_names(encoding_version: str) -> tuple[str, ...]:
+    if encoding_version == LEGACY_ACTION_ENCODING:
+        return LEGACY_ACTION_FEATURE_NAMES
+    if encoding_version == GENERIC_ACTION_ENCODING:
+        return ACTION_FEATURE_NAMES
+    raise ValueError(f"Unsupported action encoding: {encoding_version}")
 
 
 def _action_query_context(
@@ -184,4 +218,13 @@ def _hashed_columns(columns: tuple[str, ...]) -> list[float]:
         digest = hashlib.sha256(column.encode("utf-8")).digest()
         bucket = int.from_bytes(digest[:4], "big") % COLUMN_HASH_BUCKETS
         result[bucket] += 1.0 / position
+    return result
+
+
+def _hashed_table(table_name: str | None) -> list[float]:
+    result = [0.0] * TABLE_HASH_BUCKETS
+    if table_name:
+        digest = hashlib.sha256(table_name.encode("utf-8")).digest()
+        bucket = int.from_bytes(digest[:4], "big") % TABLE_HASH_BUCKETS
+        result[bucket] = 1.0
     return result

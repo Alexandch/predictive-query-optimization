@@ -12,6 +12,7 @@ import random
 
 @dataclass(frozen=True, slots=True)
 class DQNTrainingMetrics:
+    action_encoding_version: str
     split_mode: str
     experience_count: int
     train_count: int
@@ -54,6 +55,15 @@ def train_dqn(
     from torch import nn
 
     records = _read_experience(experience_path)
+    from .dqn_features import LEGACY_ACTION_ENCODING
+
+    encoding_versions = {
+        record.get("action_encoding_version", LEGACY_ACTION_ENCODING)
+        for record in records
+    }
+    if len(encoding_versions) != 1:
+        raise ValueError("DQN experience mixes incompatible action encodings")
+    action_encoding_version = encoding_versions.pop()
     if ranking_weight < 0:
         raise ValueError("ranking_weight must be non-negative")
     templates = sorted({record["template_id"] for record in records})
@@ -202,6 +212,7 @@ def train_dqn(
     )
 
     metrics = DQNTrainingMetrics(
+        action_encoding_version=action_encoding_version,
         split_mode=split_mode,
         experience_count=len(records),
         train_count=len(train_records),
@@ -242,6 +253,7 @@ def train_dqn(
             "tau": tau,
             "ranking_weight": ranking_weight,
             "seed": seed,
+            "action_encoding_version": action_encoding_version,
         },
         destination / "dqn_index_advisor.pt",
     )
@@ -270,6 +282,21 @@ def predict_action_values(
     with torch.no_grad():
         values = model(torch.tensor(normalized, dtype=torch.float32)).squeeze(1)
     return [float(value) for value in values]
+
+
+@lru_cache(maxsize=8)
+def dqn_action_encoding_version(model_path: str | Path) -> str:
+    """Return artifact encoding, treating pre-versioned models as aviation-v1."""
+    import torch
+
+    from .dqn_features import LEGACY_ACTION_ENCODING
+
+    artifact = torch.load(
+        str(Path(model_path).resolve()),
+        map_location="cpu",
+        weights_only=True,
+    )
+    return str(artifact.get("action_encoding_version", LEGACY_ACTION_ENCODING))
 
 
 @lru_cache(maxsize=4)
