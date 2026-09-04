@@ -132,7 +132,9 @@ class RetailQueryGenerator:
         """)
 
     def _low_inventory(self) -> QueryCase:
-        region, threshold = self.random.choice(self.REGIONS), self.random.choice((5, 10, 20))
+        region = self.random.choice(self.REGIONS)
+        threshold = self.random.randint(3, 30)
+        category_id = self.random.randint(1, 60)
         return self._case("retail_low_inventory", f"""
             SELECT w.warehouse_name, p.sku, p.product_name,
                    i.quantity - i.reserved_quantity AS available
@@ -141,6 +143,7 @@ class RetailQueryGenerator:
             JOIN retail.products p ON p.product_id = i.product_id
             WHERE w.region = '{region}'
               AND i.quantity - i.reserved_quantity < {threshold}
+              AND p.category_id = {category_id}
               AND p.is_active
             ORDER BY available, p.sku LIMIT 300
         """)
@@ -158,21 +161,27 @@ class RetailQueryGenerator:
 
     def _failed_payments(self) -> QueryCase:
         method = self.random.choice(("card", "cash", "bank_transfer", "wallet"))
+        day = self._day()
         return self._case("retail_failed_payments", f"""
             SELECT p.payment_id, p.order_id, p.amount, o.customer_id, o.ordered_at
             FROM retail.payments p
             JOIN retail.customer_orders o ON o.order_id = p.order_id
             WHERE p.payment_status = 'failed' AND p.payment_method = '{method}'
+              AND o.ordered_at >= DATE '{day}' - INTERVAL '120 days'
+              AND o.ordered_at < DATE '{day}' + INTERVAL '120 days'
             ORDER BY o.ordered_at DESC LIMIT 500
         """)
 
     def _shipment_sla(self) -> QueryCase:
         carrier, hours = self.random.choice(("DHL", "DPD", "FedEx", "LocalPost")), self.random.choice((24, 48, 72))
+        day = self._day()
         return self._case("retail_shipment_sla", f"""
             SELECT carrier, shipment_status, COUNT(*) AS shipments,
                    AVG(delivered_at - shipped_at) AS avg_delivery_time
             FROM retail.shipments
             WHERE carrier = '{carrier}' AND shipped_at IS NOT NULL
+              AND shipped_at >= DATE '{day}' - INTERVAL '180 days'
+              AND shipped_at < DATE '{day}' + INTERVAL '180 days'
               AND (delivered_at IS NULL OR delivered_at - shipped_at > INTERVAL '{hours} hours')
             GROUP BY carrier, shipment_status ORDER BY shipments DESC
         """)
@@ -193,6 +202,7 @@ class RetailQueryGenerator:
 
     def _customer_lifetime_value(self) -> QueryCase:
         segment, minimum = self.random.choice(("consumer", "business", "vip")), self.random.choice((2, 4, 6))
+        day = self._day()
         return self._case("retail_customer_lifetime_value", f"""
             SELECT c.customer_id, c.full_name, COUNT(o.order_id) AS orders,
                    SUM(o.total_amount - o.discount_amount) AS lifetime_value,
@@ -200,6 +210,7 @@ class RetailQueryGenerator:
             FROM retail.customers c
             JOIN retail.customer_orders o ON o.customer_id = c.customer_id
             WHERE c.segment = '{segment}' AND o.order_status <> 'cancelled'
+              AND o.ordered_at < DATE '{day}' + INTERVAL '1 day'
             GROUP BY c.customer_id HAVING COUNT(o.order_id) >= {minimum}
             ORDER BY lifetime_value DESC LIMIT 200
         """)
@@ -218,18 +229,20 @@ class RetailQueryGenerator:
 
     def _stock_by_region(self) -> QueryCase:
         category_id = self.random.randint(1, 60)
+        region = self.random.choice(self.REGIONS)
         return self._case("retail_stock_by_region", f"""
             SELECT w.region, SUM(i.quantity) AS stock,
                    SUM(i.reserved_quantity) AS reserved
             FROM retail.inventory i
             JOIN retail.warehouses w ON w.warehouse_id = i.warehouse_id
             JOIN retail.products p ON p.product_id = i.product_id
-            WHERE p.category_id = {category_id}
+            WHERE p.category_id = {category_id} AND w.region = '{region}'
             GROUP BY w.region ORDER BY stock DESC
         """)
 
     def _brand_performance(self) -> QueryCase:
         brand = f"Brand {self.random.randrange(250)}"
+        day = self._day()
         return self._case("retail_brand_performance", f"""
             SELECT p.brand, o.sales_channel, COUNT(DISTINCT o.order_id) AS orders,
                    SUM(i.quantity) AS units, AVG(i.unit_price) AS avg_price
@@ -237,6 +250,7 @@ class RetailQueryGenerator:
             JOIN retail.order_items i ON i.product_id = p.product_id
             JOIN retail.customer_orders o ON o.order_id = i.order_id
             WHERE p.brand = '{brand}' AND o.order_status <> 'cancelled'
+              AND o.ordered_at >= DATE '{day}' - INTERVAL '365 days'
             GROUP BY p.brand, o.sales_channel ORDER BY units DESC
         """)
 
@@ -254,6 +268,7 @@ class RetailQueryGenerator:
 
     def _basket_statistics(self) -> QueryCase:
         channel = self.random.choice(self.CHANNELS)
+        day = self._day()
         return self._case("retail_basket_statistics", f"""
             SELECT o.sales_channel, COUNT(DISTINCT o.order_id) AS orders,
                    AVG(b.units) AS avg_units, AVG(b.lines) AS avg_lines
@@ -261,6 +276,8 @@ class RetailQueryGenerator:
             JOIN (SELECT order_id, SUM(quantity) AS units, COUNT(*) AS lines
                   FROM retail.order_items GROUP BY order_id) b ON b.order_id = o.order_id
             WHERE o.sales_channel = '{channel}' AND o.order_status <> 'cancelled'
+              AND o.ordered_at >= DATE '{day}' - INTERVAL '180 days'
+              AND o.ordered_at < DATE '{day}' + INTERVAL '180 days'
             GROUP BY o.sales_channel
         """)
 
@@ -290,12 +307,13 @@ class RetailQueryGenerator:
         """)
 
     def _inventory_imbalance(self) -> QueryCase:
-        threshold = self.random.choice((100, 150, 200))
+        threshold = self.random.randint(80, 300)
+        minimum_stock = self.random.randint(10, 150)
         return self._case("retail_inventory_imbalance", f"""
             SELECT product_id, MAX(quantity) - MIN(quantity) AS stock_spread,
                    AVG(quantity) AS avg_stock, SUM(reserved_quantity) AS reserved
             FROM retail.inventory GROUP BY product_id
             HAVING MAX(quantity) - MIN(quantity) > {threshold}
+               AND AVG(quantity) >= {minimum_stock}
             ORDER BY stock_spread DESC LIMIT 200
         """)
-
