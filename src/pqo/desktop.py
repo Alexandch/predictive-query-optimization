@@ -13,6 +13,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -35,8 +37,17 @@ from PyQt6.QtWidgets import (
 )
 
 from .analysis_service import QueryAnalysis, analyze_query
+from .charts import AccuracyBarChart, ScatterChart
 from .config import DatabaseSettings
 from .dqn import train_dqn
+from .experiments import (
+    ExperimentReport,
+    assess_candidate,
+    build_experiment_report,
+    export_experiment_report,
+    export_history_records,
+    promote_candidate_model,
+)
 from .history import check_database_connection, load_analysis_history
 from .index_actions import IndexActionKind
 from .training import train_xgboost
@@ -45,6 +56,7 @@ from .training import train_xgboost
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_XGB_MODEL = PROJECT_ROOT / "models" / "xgboost" / "xgboost_query_time.joblib"
 DEFAULT_DQN_MODEL = PROJECT_ROOT / "models" / "dqn" / "dqn_index_advisor.pt"
+DEFAULT_DATASET = PROJECT_ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"
 
 
 class WorkerSignals(QObject):
@@ -75,6 +87,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.preferences = QSettings("PQO", "PredictiveQueryOptimization")
         self.thread_pool = QThreadPool.globalInstance()
+        self.history_records = []
+        self.experiment_report: ExperimentReport | None = None
+        self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
         self.resize(1180, 760)
 
@@ -83,6 +98,7 @@ class MainWindow(QMainWindow):
         self._build_analysis_tab()
         self._build_history_tab()
         self._build_settings_tab()
+        self._build_experiments_tab()
         self._build_training_tab()
         self._apply_style()
         self.statusBar().showMessage("Готово")
@@ -163,6 +179,10 @@ class MainWindow(QMainWindow):
         refresh = QPushButton("Обновить")
         refresh.clicked.connect(self._refresh_history)
         header.addWidget(refresh)
+        self.history_export_button = QPushButton("Экспорт CSV/JSON")
+        self.history_export_button.setEnabled(False)
+        self.history_export_button.clicked.connect(self._export_history)
+        header.addWidget(self.history_export_button)
         layout.addLayout(header)
 
         self.history_table = QTableWidget(0, 7)
@@ -232,6 +252,51 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         self.tabs.addTab(page, "Настройки")
 
+    def _build_experiments_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QHBoxLayout()
+        title = QLabel("Эксперименты")
+        title.setObjectName("pageTitle")
+        header.addWidget(title)
+        header.addStretch()
+        self.load_experiments_button = QPushButton("Загрузить и пересчитать")
+        self.load_experiments_button.setObjectName("primaryButton")
+        self.load_experiments_button.clicked.connect(self._load_experiments)
+        header.addWidget(self.load_experiments_button)
+        self.experiment_export_button = QPushButton("Экспорт CSV/JSON")
+        self.experiment_export_button.setEnabled(False)
+        self.experiment_export_button.clicked.connect(self._export_experiments)
+        header.addWidget(self.experiment_export_button)
+        layout.addLayout(header)
+
+        cards = QGridLayout()
+        self.xgb_parameter_value = self._metric_card(cards, 0, "XGBoost parameter", "—")
+        self.xgb_stress_value = self._metric_card(cards, 1, "XGBoost stress", "—")
+        self.dqn_parameter_value = self._metric_card(cards, 2, "DQN parameter", "—")
+        self.dqn_stress_value = self._metric_card(cards, 3, "DQN stress", "—")
+        layout.addLayout(cards)
+
+        charts = QHBoxLayout()
+        self.prediction_chart = ScatterChart()
+        self.accuracy_chart = AccuracyBarChart()
+        charts.addWidget(self.prediction_chart, 3)
+        charts.addWidget(self.accuracy_chart, 2)
+        layout.addLayout(charts)
+
+        self.experiment_table = QTableWidget(0, 2)
+        self.experiment_table.setHorizontalHeaderLabels(["Метрика", "Значение"])
+        self.experiment_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.experiment_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.experiment_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.experiment_table.setMaximumHeight(190)
+        layout.addWidget(self.experiment_table)
+        self.tabs.insertTab(2, page, "Эксперименты")
+
     def _build_training_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -242,7 +307,7 @@ class MainWindow(QMainWindow):
         xgb_group = QGroupBox("XGBoost")
         xgb_form = QFormLayout(xgb_group)
         self.xgb_dataset_edit = QLineEdit(
-            str(PROJECT_ROOT / "dataset" / "postgresql" / "aviation_dataset.csv")
+            str(DEFAULT_DATASET)
         )
         self.xgb_output_edit = QLineEdit(
             str(PROJECT_ROOT / "artifacts" / "models" / "desktop_xgboost")
@@ -255,6 +320,16 @@ class MainWindow(QMainWindow):
         self.xgb_train_button = QPushButton("Обучить XGBoost")
         self.xgb_train_button.clicked.connect(self._start_xgb_training)
         xgb_form.addRow("", self.xgb_train_button)
+        self.xgb_progress = QProgressBar()
+        self.xgb_progress.setRange(0, 100)
+        self.xgb_progress.setValue(0)
+        xgb_form.addRow("Прогресс", self.xgb_progress)
+        self.promote_xgb_button = QPushButton("Назначить кандидата основным")
+        self.promote_xgb_button.setEnabled(False)
+        self.promote_xgb_button.clicked.connect(
+            lambda: self._promote_candidate("xgboost")
+        )
+        xgb_form.addRow("", self.promote_xgb_button)
         layout.addWidget(xgb_group)
 
         dqn_group = QGroupBox("DQN")
@@ -268,12 +343,26 @@ class MainWindow(QMainWindow):
         self.dqn_epochs_spin = QSpinBox()
         self.dqn_epochs_spin.setRange(50, 20_000)
         self.dqn_epochs_spin.setValue(2000)
+        self.dqn_split_combo = QComboBox()
+        self.dqn_split_combo.addItem("Parameter holdout", "parameter")
+        self.dqn_split_combo.addItem("Stress: новые шаблоны", "unseen-template")
         dqn_form.addRow("Опыт JSONL", self._path_row(self.dqn_dataset_edit, False))
         dqn_form.addRow("Каталог результата", self._path_row(self.dqn_output_edit, True))
         dqn_form.addRow("Эпохи", self.dqn_epochs_spin)
+        dqn_form.addRow("Режим оценки", self.dqn_split_combo)
         self.dqn_train_button = QPushButton("Обучить DQN")
         self.dqn_train_button.clicked.connect(self._start_dqn_training)
         dqn_form.addRow("", self.dqn_train_button)
+        self.dqn_progress = QProgressBar()
+        self.dqn_progress.setRange(0, 100)
+        self.dqn_progress.setValue(0)
+        dqn_form.addRow("Прогресс", self.dqn_progress)
+        self.promote_dqn_button = QPushButton("Назначить кандидата основным")
+        self.promote_dqn_button.setEnabled(False)
+        self.promote_dqn_button.clicked.connect(
+            lambda: self._promote_candidate("dqn")
+        )
+        dqn_form.addRow("", self.promote_dqn_button)
         layout.addWidget(dqn_group)
 
         self.training_log = QPlainTextEdit()
@@ -381,6 +470,8 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def _show_history(self, records) -> None:
+        self.history_records = list(records)
+        self.history_export_button.setEnabled(bool(records))
         self.history_table.setRowCount(len(records))
         for row_index, record in enumerate(records):
             sql_preview = " ".join(record.sql_text.split())
@@ -401,6 +492,111 @@ class MainWindow(QMainWindow):
                 item.setToolTip(record.sql_text if column == 2 else value)
                 self.history_table.setItem(row_index, column, item)
         self.statusBar().showMessage(f"Загружено записей: {len(records)}")
+
+    def _export_history(self) -> None:
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспорт истории",
+            str(PROJECT_ROOT / "artifacts" / "analysis_history.csv"),
+            "CSV (*.csv);;JSON (*.json)",
+        )
+        if not selected:
+            return
+        try:
+            export_history_records(self.history_records, selected)
+        except Exception as exc:
+            self._task_failed(f"{type(exc).__name__}: {exc}")
+        else:
+            self.statusBar().showMessage(f"История экспортирована: {selected}")
+
+    def _load_experiments(self) -> None:
+        xgb_model = Path(self.xgb_model_edit.text())
+        dqn_model = Path(self.dqn_model_edit.text())
+        dqn_stress = dqn_model.parent / "stress_metrics.json"
+        if not dqn_stress.is_file():
+            dqn_stress = DEFAULT_DQN_MODEL.parent / "stress_metrics.json"
+        self.load_experiments_button.setEnabled(False)
+        self.statusBar().showMessage("Расчёт эксеримента на уникальных SQL…")
+        worker = Worker(
+            build_experiment_report,
+            xgb_model.parent / "metrics.json",
+            dqn_model.parent / "metrics.json",
+            dqn_stress,
+            xgb_model,
+            Path(self.xgb_dataset_edit.text()),
+        )
+        worker.signals.succeeded.connect(self._show_experiment_report)
+        worker.signals.failed.connect(
+            lambda message: self._task_failed(message, self.load_experiments_button)
+        )
+        self.thread_pool.start(worker)
+
+    def _show_experiment_report(self, report: ExperimentReport) -> None:
+        self.experiment_report = report
+        self.load_experiments_button.setEnabled(True)
+        self.experiment_export_button.setEnabled(True)
+        parameter = report.xgboost_metrics["parameter_holdout"]
+        stress = report.xgboost_metrics["unseen_template_stress"]
+        dqn = report.dqn_metrics
+        dqn_stress = report.dqn_stress_metrics
+        self.xgb_parameter_value.setText(
+            f"R² {parameter['r2']:.4f}\nMAE {parameter['mae_ms']:.2f} мс"
+        )
+        self.xgb_stress_value.setText(
+            f"R² {stress['r2']:.4f}\nMAE {stress['mae_ms']:.2f} мс"
+        )
+        self.dqn_parameter_value.setText(
+            f"Accuracy {dqn['recommendation_accuracy'] * 100:.1f}%\n"
+            f"Regret {dqn['mean_regret']:.4f}"
+        )
+        self.dqn_stress_value.setText(
+            f"Accuracy {dqn_stress['recommendation_accuracy'] * 100:.1f}%\n"
+            f"Regret {dqn_stress['mean_regret']:.4f}"
+        )
+        self.prediction_chart.set_points(report.prediction_points)
+        self.accuracy_chart.set_bars(
+            (
+                ("DQN", dqn["recommendation_accuracy"], "#2563eb"),
+                ("Случ.", dqn["random_accuracy"], "#64748b"),
+                ("NOOP", dqn["noop_accuracy"], "#0f766e"),
+                ("DQN stress", dqn_stress["recommendation_accuracy"], "#8b5cf6"),
+                ("Случ. stress", dqn_stress["random_accuracy"], "#475569"),
+                ("NOOP stress", dqn_stress["noop_accuracy"], "#115e59"),
+            )
+        )
+        rows = (
+            ("Точек «факт → прогноз»", len(report.prediction_points)),
+            ("MAE на полном датасете, мс", f"{report.dataset_mae_ms:.4f}"),
+            ("RMSE на полном датасете, мс", f"{report.dataset_rmse_ms:.4f}"),
+            ("R² на полном датасете", f"{report.dataset_r2:.6f}"),
+            ("XGBoost within 20%, parameter", f"{parameter['within_20_percent']:.2f}%"),
+            ("DQN accuracy / random", f"{dqn['recommendation_accuracy']:.4f} / {dqn['random_accuracy']:.4f}"),
+        )
+        self.experiment_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            for column, value in enumerate(row):
+                self.experiment_table.setItem(row_index, column, QTableWidgetItem(str(value)))
+        self.statusBar().showMessage(
+            f"Эксперимент загружен: {len(report.prediction_points)} уникальных SQL"
+        )
+
+    def _export_experiments(self) -> None:
+        if self.experiment_report is None:
+            return
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспорт эксперимента",
+            str(PROJECT_ROOT / "artifacts" / "experiment_report.json"),
+            "JSON (*.json);;CSV (*.csv)",
+        )
+        if not selected:
+            return
+        try:
+            export_experiment_report(self.experiment_report, selected)
+        except Exception as exc:
+            self._task_failed(f"{type(exc).__name__}: {exc}")
+        else:
+            self.statusBar().showMessage(f"Эксперимент экспортирован: {selected}")
 
     def _test_connection(self) -> None:
         self.statusBar().showMessage("Проверка PostgreSQL…")
@@ -423,48 +619,136 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Настройки сохранены (пароль не сохранялся)")
 
     def _start_xgb_training(self) -> None:
+        output_directory = Path(self.xgb_output_edit.text())
         self.xgb_train_button.setEnabled(False)
+        self.promote_xgb_button.setEnabled(False)
+        self.xgb_progress.setRange(0, 0)
         self.training_log.setPlainText("Обучение XGBoost…")
         worker = Worker(
             train_xgboost,
             Path(self.xgb_dataset_edit.text()),
-            Path(self.xgb_output_edit.text()),
+            output_directory,
             tune=self.xgb_tune_check.isChecked(),
         )
         worker.signals.succeeded.connect(
-            lambda metrics: self._training_finished(metrics, self.xgb_train_button)
+            lambda metrics: self._training_finished(
+                "xgboost",
+                metrics,
+                output_directory,
+                self.xgb_train_button,
+                self.xgb_progress,
+                self.promote_xgb_button,
+            )
         )
         worker.signals.failed.connect(
-            lambda message: self._task_failed(message, self.xgb_train_button)
+            lambda message: self._training_failed(
+                message, self.xgb_train_button, self.xgb_progress
+            )
         )
         self.thread_pool.start(worker)
 
     def _start_dqn_training(self) -> None:
+        output_directory = Path(self.dqn_output_edit.text())
         self.dqn_train_button.setEnabled(False)
+        self.promote_dqn_button.setEnabled(False)
+        self.dqn_progress.setRange(0, 0)
         self.training_log.setPlainText("Обучение DQN…")
         worker = Worker(
             train_dqn,
             Path(self.dqn_dataset_edit.text()),
-            Path(self.dqn_output_edit.text()),
+            output_directory,
             epochs=self.dqn_epochs_spin.value(),
             batch_size=128,
             learning_rate=0.001,
+            split_mode=self.dqn_split_combo.currentData(),
             ranking_weight=0.10,
         )
         worker.signals.succeeded.connect(
-            lambda metrics: self._training_finished(metrics, self.dqn_train_button)
+            lambda metrics: self._training_finished(
+                "dqn",
+                metrics,
+                output_directory,
+                self.dqn_train_button,
+                self.dqn_progress,
+                self.promote_dqn_button,
+            )
         )
         worker.signals.failed.connect(
-            lambda message: self._task_failed(message, self.dqn_train_button)
+            lambda message: self._training_failed(
+                message, self.dqn_train_button, self.dqn_progress
+            )
         )
         self.thread_pool.start(worker)
 
-    def _training_finished(self, metrics, button: QPushButton) -> None:
+    def _training_finished(
+        self,
+        model_kind: str,
+        metrics,
+        output_directory: Path,
+        button: QPushButton,
+        progress: QProgressBar,
+        promote_button: QPushButton,
+    ) -> None:
         button.setEnabled(True)
+        progress.setRange(0, 100)
+        progress.setValue(100)
+        metrics_dict = asdict(metrics)
         self.training_log.setPlainText(
-            json.dumps(asdict(metrics), ensure_ascii=False, indent=2)
+            json.dumps(metrics_dict, ensure_ascii=False, indent=2)
         )
-        self.statusBar().showMessage("Обучение завершено")
+        primary_directory = (
+            DEFAULT_XGB_MODEL.parent if model_kind == "xgboost" else DEFAULT_DQN_MODEL.parent
+        )
+        try:
+            baseline = json.loads(
+                (primary_directory / "metrics.json").read_text(encoding="utf-8")
+            )
+            decision = assess_candidate(model_kind, metrics_dict, baseline)
+        except Exception as exc:
+            decision_text = f"Не удалось сравнить модели: {exc}"
+            promote_button.setEnabled(False)
+        else:
+            decision_text = decision.explanation
+            promote_button.setEnabled(decision.allowed)
+            promote_button.setToolTip(decision.explanation)
+            self.candidate_directories[model_kind] = output_directory
+        self.training_log.appendPlainText(f"\nВердикт: {decision_text}")
+        self.statusBar().showMessage("Обучение завершено; кандидат сравнён с основной моделью")
+
+    def _training_failed(
+        self, message: str, button: QPushButton, progress: QProgressBar
+    ) -> None:
+        progress.setRange(0, 100)
+        progress.setValue(0)
+        self._task_failed(message, button)
+
+    def _promote_candidate(self, model_kind: str) -> None:
+        candidate = self.candidate_directories.get(model_kind)
+        if candidate is None:
+            return
+        primary = (
+            DEFAULT_XGB_MODEL.parent if model_kind == "xgboost" else DEFAULT_DQN_MODEL.parent
+        )
+        try:
+            decision = promote_candidate_model(model_kind, candidate, primary)
+        except Exception as exc:
+            self._task_failed(f"{type(exc).__name__}: {exc}")
+            return
+        if not decision.allowed:
+            QMessageBox.warning(self, "Замена запрещена", decision.explanation)
+            return
+        if model_kind == "xgboost":
+            self.xgb_model_edit.setText(str(DEFAULT_XGB_MODEL))
+            self.promote_xgb_button.setEnabled(False)
+        else:
+            self.dqn_model_edit.setText(str(DEFAULT_DQN_MODEL))
+            self.promote_dqn_button.setEnabled(False)
+        self._save_settings()
+        QMessageBox.information(
+            self,
+            "Модель обновлена",
+            f"{decision.explanation}\nПредыдущая версия сохранена в {primary / 'previous'}.",
+        )
 
     def _task_failed(self, message: str, button: QPushButton | None = None) -> None:
         if button is not None:

@@ -16,10 +16,10 @@ class DesktopTests(unittest.TestCase):
     def test_main_window_contains_complete_workflow(self):
         window = MainWindow()
         try:
-            self.assertEqual(window.tabs.count(), 4)
+            self.assertEqual(window.tabs.count(), 5)
             self.assertEqual(
                 [window.tabs.tabText(index) for index in range(window.tabs.count())],
-                ["Анализ", "История", "Настройки", "Обучение"],
+                ["Анализ", "История", "Эксперименты", "Настройки", "Обучение"],
             )
             self.assertTrue(window.analyze_button.isEnabled())
             self.assertIn("SELECT", window.sql_editor.toPlainText())
