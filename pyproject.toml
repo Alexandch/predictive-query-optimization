@@ -30,6 +30,10 @@ desktop = [
     "torch>=2.10,<3",
     "PyQt6>=6.7,<7",
 ]
+build = [
+    "pyinstaller>=6.11,<7",
+    "pillow>=11,<13",
+]
 dev = [
     "pytest>=8.3,<9",
     "joblib>=1.6,<2",

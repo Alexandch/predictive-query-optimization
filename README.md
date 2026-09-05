@@ -63,6 +63,17 @@ PostgreSQL доступен на порту `55432`, чтобы не конфл�
 Отдельная установка только компонентов приложения доступна командой
 `.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"`.
 
+Для Windows также подготовлен автономный установщик. Его сборка включает
+Python, PyQt6, XGBoost, DQN-модель и необходимые библиотеки:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+```
+
+После установки приложение запускается ярлыком «Predictive Query Optimization»
+на рабочем столе или из меню «Пуск». Python для обычного запуска не требуется;
+PostgreSQL по-прежнему должен быть доступен по параметрам на вкладке «Настройки».
+
 ## Работа с данными и моделью
 
 Сгенерировать и измерить сбалансированную выборку:
@@ -103,6 +114,7 @@ PostgreSQL доступен на порту `55432`, чтобы не конфл�
 - [Среда индексных рекомендаций](docs/index-recommendation-environment.md)
 - [Самостоятельное обучение и проверка моделей](docs/training-guide.md)
 - [Десктопное PyQt6-приложение](docs/desktop-application.md)
+- [Сборка и установка в Windows](docs/windows-packaging.md)
 - [Production-like контрольный benchmark](docs/production-control-benchmark.md)
 - [Многодоменное обучение и проверка переносимости](docs/multidomain-experiment.md)
 - [Строгая проверка leave-one-database-out](docs/leave-one-database-out.md)
@@ -110,5 +122,4 @@ PostgreSQL доступен на порту `55432`, чтобы не конфл�
 
 ## Следующие этапы
 
-1. Упаковка приложения и создание установщика для Windows.
-2. Подготовка текста, диаграмм и приложений курсовой работы.
+1. Подготовка текста, диаграмм и приложений курсовой работы.

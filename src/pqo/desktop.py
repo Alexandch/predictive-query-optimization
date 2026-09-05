@@ -9,7 +9,7 @@ import sys
 import traceback
 
 from PyQt6.QtCore import QObject, QRunnable, QSettings, Qt, QThreadPool, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .analysis_service import QueryAnalysis, analyze_query
+from .app_paths import resource_root, writable_root
 from .charts import AccuracyBarChart, ScatterChart
 from .config import DatabaseSettings
 from .dqn import train_dqn
@@ -53,10 +54,16 @@ from .index_actions import IndexActionKind
 from .training import train_xgboost
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = resource_root()
+WRITABLE_ROOT = writable_root()
+ARTIFACT_ROOT = WRITABLE_ROOT / "artifacts"
+APP_ICON = PROJECT_ROOT / "assets" / "pqo.ico"
 DEFAULT_XGB_MODEL = PROJECT_ROOT / "models" / "xgboost" / "xgboost_query_time.joblib"
 DEFAULT_DQN_MODEL = PROJECT_ROOT / "models" / "dqn" / "dqn_index_advisor.pt"
 DEFAULT_DATASET = PROJECT_ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"
+DEFAULT_DQN_DATASET = (
+    PROJECT_ROOT / "dataset" / "postgresql" / "multidomain_dqn_augmented.jsonl"
+)
 
 
 class WorkerSignals(QObject):
@@ -85,12 +92,15 @@ class Worker(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
         self.preferences = QSettings("PQO", "PredictiveQueryOptimization")
         self.thread_pool = QThreadPool.globalInstance()
         self.history_records = []
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
+        if APP_ICON.is_file():
+            self.setWindowIcon(QIcon(str(APP_ICON)))
         self.resize(1180, 760)
 
         self.tabs = QTabWidget()
@@ -319,7 +329,7 @@ class MainWindow(QMainWindow):
             str(DEFAULT_DATASET)
         )
         self.xgb_output_edit = QLineEdit(
-            str(PROJECT_ROOT / "artifacts" / "models" / "desktop_xgboost")
+            str(ARTIFACT_ROOT / "models" / "desktop_xgboost")
         )
         self.xgb_tune_check = QCheckBox("Подбирать гиперпараметры")
         self.xgb_tune_check.setChecked(True)
@@ -344,10 +354,10 @@ class MainWindow(QMainWindow):
         dqn_group = QGroupBox("DQN")
         dqn_form = QFormLayout(dqn_group)
         self.dqn_dataset_edit = QLineEdit(
-            str(PROJECT_ROOT / "dataset" / "postgresql" / "dqn_experience.jsonl")
+            str(DEFAULT_DQN_DATASET)
         )
         self.dqn_output_edit = QLineEdit(
-            str(PROJECT_ROOT / "artifacts" / "models" / "desktop_dqn")
+            str(ARTIFACT_ROOT / "models" / "desktop_dqn")
         )
         self.dqn_epochs_spin = QSpinBox()
         self.dqn_epochs_spin.setRange(50, 20_000)
@@ -511,7 +521,7 @@ class MainWindow(QMainWindow):
         selected, _ = QFileDialog.getSaveFileName(
             self,
             "Экспорт истории",
-            str(PROJECT_ROOT / "artifacts" / "analysis_history.csv"),
+            str(ARTIFACT_ROOT / "analysis_history.csv"),
             "CSV (*.csv);;JSON (*.json)",
         )
         if not selected:
@@ -619,7 +629,7 @@ class MainWindow(QMainWindow):
         selected, _ = QFileDialog.getSaveFileName(
             self,
             "Экспорт эксперимента",
-            str(PROJECT_ROOT / "artifacts" / "experiment_report.json"),
+            str(ARTIFACT_ROOT / "experiment_report.json"),
             "JSON (*.json);;CSV (*.csv)",
         )
         if not selected:
@@ -821,10 +831,45 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    smoke_test = "--smoke-test" in sys.argv
+    if smoke_test:
+        sys.argv.remove("--smoke-test")
     application = QApplication(sys.argv)
     application.setApplicationName("Predictive Query Optimization")
     application.setOrganizationName("PQO")
+    if APP_ICON.is_file():
+        application.setWindowIcon(QIcon(str(APP_ICON)))
     window = MainWindow()
+    if smoke_test:
+        ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+        smoke_log = ARTIFACT_ROOT / "smoke-test.log"
+        required = (DEFAULT_XGB_MODEL, DEFAULT_DQN_MODEL, DEFAULT_DATASET)
+        if not all(path.is_file() for path in required):
+            missing = [str(path) for path in required if not path.is_file()]
+            smoke_log.write_text(
+                "Missing packaged resources:\n" + "\n".join(missing),
+                encoding="utf-8",
+            )
+            return 2
+        try:
+            import joblib
+
+            from .dqn import dqn_action_encoding_version
+
+            xgboost_artifact = joblib.load(DEFAULT_XGB_MODEL)
+            if "pipeline" not in xgboost_artifact:
+                smoke_log.write_text(
+                    "XGBoost artifact has no pipeline.", encoding="utf-8"
+                )
+                return 3
+            dqn_action_encoding_version(DEFAULT_DQN_MODEL)
+        except Exception:
+            smoke_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
+        smoke_log.write_text(
+            "OK: GUI, XGBoost artifact and DQN artifact loaded.", encoding="utf-8"
+        )
+        return 0
     window.show()
     return application.exec()
 

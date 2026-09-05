@@ -6,6 +6,18 @@
 
 ## Запуск
 
+Если Windows-установщик уже выполнен, используйте ярлык
+«Predictive Query Optimization» на рабочем столе или в меню «Пуск».
+Установленная программа находится в
+`%LOCALAPPDATA%\Programs\PredictiveQueryOptimization` и не требует отдельной
+установки Python. PostgreSQL можно запустить из каталога проекта:
+
+```powershell
+docker compose up -d --wait
+```
+
+Запуск непосредственно из исходного кода нужен только для разработки:
+
 ```powershell
 docker compose up -d --wait
 py -m venv .venv
@@ -17,6 +29,10 @@ py -m venv .venv
 из каталога `models`. Параметры можно изменить на вкладке «Настройки».
 Пароль PostgreSQL не записывается в `QSettings` и существует только в памяти
 текущего процесса.
+
+В установленной версии результаты обучения и экспорта записываются в
+`%LOCALAPPDATA%\PredictiveQueryOptimization\artifacts`, поэтому программа не
+пытается изменять защищённые файлы внутри своего каталога установки.
 
 ## Вкладки
 
