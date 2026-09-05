@@ -64,6 +64,14 @@ DEFAULT_DATASET = PROJECT_ROOT / "dataset" / "postgresql" / "aviation_dataset.cs
 DEFAULT_DQN_DATASET = (
     PROJECT_ROOT / "dataset" / "postgresql" / "multidomain_dqn_augmented.jsonl"
 )
+DEFAULT_DQN_STRESS_METRICS = (
+    PROJECT_ROOT
+    / "models"
+    / "control"
+    / "negative_augmented"
+    / "logistics"
+    / "dqn_control_metrics.json"
+)
 
 
 class WorkerSignals(QObject):
@@ -138,6 +146,15 @@ class MainWindow(QMainWindow):
         self.analyze_button.setObjectName("primaryButton")
         self.analyze_button.clicked.connect(self._start_analysis)
         controls.addWidget(self.analyze_button)
+        self.persist_check = QCheckBox("Сохранять в историю pqo")
+        self.persist_check.setChecked(
+            str(self.preferences.value("persist_analysis", "false")).lower()
+            in {"1", "true", "yes"}
+        )
+        self.persist_check.setToolTip(
+            "Включайте только если в подключённой БД установлена служебная схема pqo."
+        )
+        controls.addWidget(self.persist_check)
         controls.addStretch()
         controls.addWidget(QLabel("Порог рекомендации, мс:"))
         self.threshold_spin = QDoubleSpinBox()
@@ -444,6 +461,7 @@ class MainWindow(QMainWindow):
             dqn_path,
             self._database_settings(),
             recommendation_threshold_ms=self.threshold_spin.value(),
+            persist=self.persist_check.isChecked(),
         )
         worker.signals.succeeded.connect(self._show_analysis)
         worker.signals.failed.connect(
@@ -538,9 +556,9 @@ class MainWindow(QMainWindow):
         dqn_model = Path(self.dqn_model_edit.text())
         dqn_stress = dqn_model.parent / "stress_metrics.json"
         if not dqn_stress.is_file():
-            dqn_stress = DEFAULT_DQN_MODEL.parent / "stress_metrics.json"
+            dqn_stress = DEFAULT_DQN_STRESS_METRICS
         self.load_experiments_button.setEnabled(False)
-        self.statusBar().showMessage("Расчёт эксеримента на уникальных SQL…")
+        self.statusBar().showMessage("Расчёт эксперимента на уникальных SQL…")
         worker = Worker(
             build_experiment_report,
             xgb_model.parent / "metrics.json",
@@ -661,6 +679,7 @@ class MainWindow(QMainWindow):
         self.preferences.setValue("xgb_model", self.xgb_model_edit.text().strip())
         self.preferences.setValue("dqn_model", self.dqn_model_edit.text().strip())
         self.preferences.setValue("threshold_ms", self.threshold_spin.value())
+        self.preferences.setValue("persist_analysis", self.persist_check.isChecked())
         self.preferences.sync()
         self.statusBar().showMessage("Настройки сохранены (пароль не сохранялся)")
 

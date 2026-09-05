@@ -88,7 +88,13 @@ def check_database_connection(settings: DatabaseSettings) -> str:
     import psycopg
 
     with psycopg.connect(**settings.connection_kwargs()) as connection:
-        version, database = connection.execute(
-            "SELECT version(), current_database()"
+        version, database, history_ready = connection.execute(
+            "SELECT version(), current_database(), "
+            "to_regclass('pqo.query_run') IS NOT NULL"
         ).fetchone()
-    return f"{database} · {version.split(',')[0]}"
+    history_status = (
+        "история pqo доступна"
+        if history_ready
+        else "анализ доступен, история pqo не установлена"
+    )
+    return f"{database} · {version.split(',')[0]} · {history_status}"
