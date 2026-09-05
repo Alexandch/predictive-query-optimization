@@ -49,3 +49,13 @@ SHA-256 новых наборов:
 - `retail_control.csv`: `5EEF579F25156B62CB21AB0258631CF744F82FF430B34E9ABAFB9EFDD613AF8F`;
 - `retail_dqn_control.jsonl`: `0946D18BF120B84D028312169864E68BB797809B3CBB5A081F10CF45F3A561A3`.
 
+## Leave-one-database-out: логистика
+
+`logistics_zero_shot.csv` содержит 150 измерений, 58 уникальных SQL и 15 новых
+шаблонов. `logistics_dqn_zero_shot.jsonl` содержит 84 действия для 28 решений.
+Основные модели обучены только на `aviation` и `retail`; оба logistics-набора
+запрещено объединять с обучающими данными.
+
+- `logistics_zero_shot.csv`: `D9E54F56C95ADC9B77478C5863711C644218A73F128932D664ABD91A1A74CE2C`;
+- `logistics_dqn_zero_shot.jsonl`: `DEAEA35BCBB5BBF7CFED5CDBBC17FB2BF3A2F92340F538C50EB6513FBE589197`.
+

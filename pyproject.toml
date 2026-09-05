@@ -60,6 +60,7 @@ pqo-desktop = "pqo.desktop:main"
 pqo-production-benchmark = "pqo.production_benchmark_cli:main"
 pqo-retail = "pqo.retail_cli:main"
 pqo-retail-control = "pqo.retail_control_cli:main"
+pqo-logistics-control = "pqo.logistics_control_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

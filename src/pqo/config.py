@@ -19,7 +19,7 @@ class DatabaseSettings:
     port: int = 55432
     connect_timeout: int = 5
     statement_timeout_ms: int = 30_000
-    allowed_schemas: frozenset[str] = frozenset({"aviation", "retail"})
+    allowed_schemas: frozenset[str] = frozenset({"aviation", "retail", "logistics"})
 
     def __post_init__(self) -> None:
         if not self.allowed_schemas:

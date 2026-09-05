@@ -21,3 +21,7 @@
 Полные внутренние метрики находятся в `metrics.json`, ранжирование признаков —
 в `feature_importance.json`, протокол внешнего сравнения — в
 `docs/multidomain-experiment.md`.
+
+На строгом leave-one-database-out контроле `logistics`, полностью исключённом
+из обучения, модель получила R² 0,8636 и MAE 114,85 мс на 150 измерениях.
+Протокол приведён в `docs/leave-one-database-out.md`.

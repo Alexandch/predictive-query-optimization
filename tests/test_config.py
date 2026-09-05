@@ -6,6 +6,14 @@ from pqo.config import DatabaseSettings
 
 
 class DatabaseSettingsTests(unittest.TestCase):
+    def test_default_allowlist_contains_all_benchmark_schemas(self):
+        settings = DatabaseSettings()
+
+        self.assertEqual(
+            settings.allowed_schemas,
+            frozenset({"aviation", "retail", "logistics"}),
+        )
+
     def test_reads_comma_separated_schema_allowlist(self):
         with patch.dict(
             os.environ,
