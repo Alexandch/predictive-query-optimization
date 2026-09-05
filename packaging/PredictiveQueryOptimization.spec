@@ -27,6 +27,7 @@ hiddenimports = [
     "sklearn.compose._column_transformer",
     "sklearn.pipeline",
     "sklearn.preprocessing._encoders",
+    "sqlglot.dialects.postgres",
     "xgboost.sklearn",
 ]
 

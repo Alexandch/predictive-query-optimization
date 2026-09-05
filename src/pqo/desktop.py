@@ -855,7 +855,18 @@ def main() -> int:
             import joblib
 
             from .dqn import dqn_action_encoding_version
+            from .sql_features import extract_sql_features
 
+            sql_features = extract_sql_features(
+                "SELECT f.flight_id FROM aviation.flights AS f "
+                "WHERE f.departure_airport = 'MSQ'"
+            )
+            if sql_features.where_condition_count != 1:
+                smoke_log.write_text(
+                    "PostgreSQL SQLGlot smoke query produced invalid features.",
+                    encoding="utf-8",
+                )
+                return 3
             xgboost_artifact = joblib.load(DEFAULT_XGB_MODEL)
             if "pipeline" not in xgboost_artifact:
                 smoke_log.write_text(
@@ -867,7 +878,8 @@ def main() -> int:
             smoke_log.write_text(traceback.format_exc(), encoding="utf-8")
             return 3
         smoke_log.write_text(
-            "OK: GUI, XGBoost artifact and DQN artifact loaded.", encoding="utf-8"
+            "OK: GUI, PostgreSQL SQL parser, XGBoost artifact and DQN artifact loaded.",
+            encoding="utf-8",
         )
         return 0
     window.show()
