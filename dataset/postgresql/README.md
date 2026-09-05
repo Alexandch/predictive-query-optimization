@@ -59,3 +59,14 @@ SHA-256 новых наборов:
 - `logistics_zero_shot.csv`: `D9E54F56C95ADC9B77478C5863711C644218A73F128932D664ABD91A1A74CE2C`;
 - `logistics_dqn_zero_shot.jsonl`: `DEAEA35BCBB5BBF7CFED5CDBBC17FB2BF3A2F92340F538C50EB6513FBE589197`.
 
+## Отрицательные обучающие примеры DQN
+
+`dqn_negative_experience.jsonl` содержит 470 записей, 92 уникальных запроса и
+16 обучающих шаблонов `aviation`/`retail`. Для индекса, отсутствующего в плане,
+измерительный шум заменён штрафом сложности; исходная награда сохранена в
+`measured_reward`. `multidomain_dqn_augmented.jsonl` объединяет 5 350 записей и
+86 шаблонов. Ни один контрольный набор в объединение не входит.
+
+- `dqn_negative_experience.jsonl`: `35673C1A880799262CFE4033706AAB4D5E0F35FEDA223941CF288F08334F03BC`;
+- `multidomain_dqn_augmented.jsonl`: `F1074CBBAFD92169FAC6D622CFA30C00EC8FEC7F9F4632622712B2DD1F009D96`.
+

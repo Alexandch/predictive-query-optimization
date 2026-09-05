@@ -1,0 +1,12 @@
+{
+  "query_count": 26,
+  "action_count": 80,
+  "template_count": 15,
+  "reward_mae": 0.13505423561182522,
+  "recommendation_accuracy": 0.6153846153846154,
+  "mean_regret": 0.0607364535503459,
+  "noop_accuracy": 0.19230769230769232,
+  "noop_mean_regret": 0.21294889355406438,
+  "random_accuracy": 0.34615384615384615,
+  "random_mean_regret": 0.1722801952522658
+}

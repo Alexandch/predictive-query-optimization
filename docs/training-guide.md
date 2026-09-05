@@ -104,6 +104,16 @@ $env:PQO_INTEGRATION_TESTS = "1"
 .\.venv\Scripts\pqo-dqn-collect.exe 1040 artifacts\dqn.jsonl --actions-per-query 3 --repetitions 1 --seed 2027 --resume
 ```
 
+Отдельно собрать обучающие случаи, где индекс чаще не нужен:
+
+```powershell
+.\.venv\Scripts\pqo-dqn-negative.exe 160 artifacts\dqn_negative_raw.jsonl --actions-per-query 2 --repetitions 2 --seed 12001 --normalized-output artifacts\dqn_negative_training.jsonl
+```
+
+Если пробный индекс не присутствует в плане PostgreSQL, нормализованная копия
+заменяет случайную разницу времени штрафом сложности. Исходный reward остаётся
+в `measured_reward`. Не используйте для этого control/zero-shot наборы.
+
 `--resume` продолжает незавершённый запуск. Для более надёжного итогового
 эксперимента используйте 1 000–2 000 запросов, 3–5 действий и 3 повтора. Это
 обычно даст 4 000–10 000 записей опыта; время определяется размером таблиц и

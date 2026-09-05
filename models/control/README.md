@@ -11,3 +11,7 @@
 - `manifest.json` — условия прогона и SHA-256 выборок/моделей.
 
 Полная методика описана в `docs/production-control-benchmark.md`.
+
+Каталог `negative_augmented` содержит итоговые DQN-метрики после расширения
+отрицательными примерами для aviation, retail и logistics. Методика и сравнение
+описаны в `docs/dqn-negative-augmentation.md`.
