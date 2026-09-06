@@ -35,6 +35,7 @@ class DQNTrainingMetrics:
     best_epoch: int
     seed: int
     ranking_weight: float
+    sampling_mode: str
 
 
 def train_dqn(
@@ -49,6 +50,7 @@ def train_dqn(
     seed: int = 42,
     split_mode: str = "parameter",
     ranking_weight: float = 0.10,
+    sampling_mode: str = "group",
 ) -> DQNTrainingMetrics:
     import numpy as np
     import torch
@@ -66,6 +68,8 @@ def train_dqn(
     action_encoding_version = encoding_versions.pop()
     if ranking_weight < 0:
         raise ValueError("ranking_weight must be non-negative")
+    if sampling_mode not in {"group", "template-balanced"}:
+        raise ValueError("sampling_mode must be 'group' or 'template-balanced'")
     templates = sorted({record["template_id"] for record in records})
     if len(records) < 40 or len(templates) < 4:
         raise ValueError("DQN training requires at least 40 experiences and 4 templates")
@@ -105,6 +109,11 @@ def train_dqn(
     optimizer = torch.optim.AdamW(online.parameters(), lr=learning_rate)
     loss_function = nn.SmoothL1Loss()
     train_groups = _query_index_groups(train_records)
+    groups_by_template: dict[str, list[list[int]]] = {}
+    for group in train_groups:
+        groups_by_template.setdefault(
+            str(train_records[group[0]]["template_id"]), []
+        ).append(group)
     validation_groups = _query_index_groups(validation_records)
 
     train_x = torch.tensor(x_train, dtype=torch.float32)
@@ -140,10 +149,17 @@ def train_dqn(
         return torch.stack(losses).mean()
 
     for epoch in range(1, epochs + 1):
-        selected_groups = randomizer.sample(
-            train_groups,
-            min(max(1, batch_size // 4), len(train_groups)),
-        )
+        group_count = min(max(1, batch_size // 4), len(train_groups))
+        if sampling_mode == "template-balanced":
+            template_ids = list(groups_by_template)
+            selected_groups = [
+                randomizer.choice(groups_by_template[template_id])
+                for template_id in randomizer.sample(
+                    template_ids, min(group_count, len(template_ids))
+                )
+            ]
+        else:
+            selected_groups = randomizer.sample(train_groups, group_count)
         indices = [index for group in selected_groups for index in group]
         local_groups = []
         offset = 0
@@ -237,6 +253,7 @@ def train_dqn(
         best_epoch=best_epoch,
         seed=seed,
         ranking_weight=ranking_weight,
+        sampling_mode=sampling_mode,
     )
 
     destination = Path(output_dir)
@@ -254,6 +271,7 @@ def train_dqn(
             "ranking_weight": ranking_weight,
             "seed": seed,
             "action_encoding_version": action_encoding_version,
+            "sampling_mode": sampling_mode,
         },
         destination / "dqn_index_advisor.pt",
     )

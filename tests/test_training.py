@@ -92,10 +92,24 @@ class TrainingTests(unittest.TestCase):
 
             self.assertEqual(metrics.sample_count, 160)
             self.assertEqual(metrics.modeled_sample_count, 160)
+            self.assertFalse(metrics.template_balanced)
             self.assertTrue(math.isfinite(metrics.mae_ms))
             self.assertGreaterEqual(prediction, 0)
             self.assertTrue((output_dir / "metrics.json").exists())
             self.assertTrue((output_dir / "feature_importance.json").exists())
+
+    def test_template_balanced_training(self):
+        frame = self._synthetic_frame()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_path = Path(temp_dir) / "dataset.csv"
+            frame.to_csv(dataset_path, index=False)
+            metrics = train_xgboost(
+                dataset_path,
+                Path(temp_dir) / "model",
+                tune=False,
+                template_balanced=True,
+            )
+        self.assertTrue(metrics.template_balanced)
 
     def test_rejects_too_small_dataset(self):
         frame = self._synthetic_frame().head(20)

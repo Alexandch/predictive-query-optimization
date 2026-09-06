@@ -20,6 +20,12 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ranking-weight", type=float, default=0.10)
     parser.add_argument(
+        "--sampling-mode",
+        choices=("group", "template-balanced"),
+        default="group",
+        help="Sample query groups normally or give templates equal batch probability",
+    )
+    parser.add_argument(
         "--split-mode",
         choices=("parameter", "unseen-template"),
         default="parameter",
@@ -35,6 +41,7 @@ def main() -> int:
         seed=args.seed,
         split_mode=args.split_mode,
         ranking_weight=args.ranking_weight,
+        sampling_mode=args.sampling_mode,
     )
     print(json.dumps(asdict(metrics), ensure_ascii=False, indent=2))
     return 0

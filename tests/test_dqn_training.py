@@ -43,7 +43,12 @@ class DQNTrainingTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            metrics = train_dqn(experience, root / "model", epochs=5)
+            metrics = train_dqn(
+                experience,
+                root / "model",
+                epochs=5,
+                sampling_mode="template-balanced",
+            )
             values = predict_action_values(
                 root / "model" / "dqn_index_advisor.pt",
                 [0.0] * state_size,
@@ -52,6 +57,7 @@ class DQNTrainingTests(unittest.TestCase):
 
             self.assertEqual(metrics.experience_count, 40)
             self.assertEqual(metrics.action_encoding_version, LEGACY_ACTION_ENCODING)
+            self.assertEqual(metrics.sampling_mode, "template-balanced")
             self.assertEqual(
                 dqn_action_encoding_version(
                     root / "model" / "dqn_index_advisor.pt"

@@ -11,7 +11,10 @@ from .chbenchmark_control_queries import CHBenchmarkControlQueryGenerator
 from .chbenchmark_queries import CHBenchmarkQueryGenerator
 from .control_benchmark import evaluate_dqn_control, evaluate_xgboost_control
 from .dataset import collect_to_csv
-from .dqn_experience import collect_dqn_case_experience
+from .dqn_experience import (
+    collect_dqn_case_experience,
+    normalize_unused_index_rewards,
+)
 
 
 def _add_collection_arguments(command, *, default_seed: int) -> None:
@@ -56,6 +59,12 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("output_dir", type=Path)
     evaluate.add_argument("--dqn-experience", type=Path)
     evaluate.add_argument("--dqn-model", type=Path)
+    normalize = commands.add_parser(
+        "normalize-dqn",
+        help="create a training copy with timing-noise rewards normalized",
+    )
+    normalize.add_argument("input", type=Path)
+    normalize.add_argument("output", type=Path)
     return parser
 
 
@@ -119,6 +128,10 @@ def main() -> int:
         return _collect_xgb(args, CHBenchmarkControlQueryGenerator(seed=args.seed))
     if args.command == "collect-control-dqn":
         return _collect_dqn(args, CHBenchmarkControlQueryGenerator(seed=args.seed))
+    if args.command == "normalize-dqn":
+        count = normalize_unused_index_rewards(args.input, args.output)
+        print(f"Normalized {count} CH DQN records into {args.output}")
+        return 0
 
     xgb_metrics = evaluate_xgboost_control(
         args.xgb_dataset, args.xgb_model, args.output_dir

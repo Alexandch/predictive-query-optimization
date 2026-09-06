@@ -289,3 +289,41 @@ def refresh_action_features(
             count += 1
     temporary.replace(destination)
     return count
+
+
+def normalize_unused_index_rewards(
+    source_path: str | Path,
+    output_path: str | Path,
+) -> int:
+    """Replace timing-noise gains for trial indexes absent from the plan."""
+    source = Path(source_path)
+    destination = Path(output_path)
+    if source.resolve() == destination.resolve():
+        raise ValueError("Normalized output must not overwrite raw measurements")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with source.open(encoding="utf-8") as stream, destination.open(
+        "w", encoding="utf-8", newline="\n"
+    ) as target:
+        for line in stream:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            action = record["action"]
+            if (
+                action["kind"] == "create"
+                and record.get("candidate_uses_index") is False
+            ):
+                record["measured_reward"] = record.get(
+                    "measured_reward", record["reward"]
+                )
+                record["reward"] = -(
+                    0.01 * len(action.get("key_columns") or ())
+                    + 0.005 * len(action.get("include_columns") or ())
+                )
+                record["reward_label_policy"] = (
+                    "unused-index-complexity-penalty-v1"
+                )
+            target.write(json.dumps(record, ensure_ascii=False) + "\n")
+            count += 1
+    return count

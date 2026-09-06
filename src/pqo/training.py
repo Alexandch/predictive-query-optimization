@@ -79,6 +79,7 @@ class TrainingMetrics:
     tuning_cv_mae_ms: float | None
     parameter_holdout: EvaluationMetrics
     unseen_template_stress: EvaluationMetrics
+    template_balanced: bool
 
     @property
     def mae_ms(self) -> float:
@@ -106,6 +107,7 @@ def train_xgboost(
     random_state: int = 42,
     tune: bool = True,
     target_transform: str = "log1p",
+    template_balanced: bool = False,
 ) -> TrainingMetrics:
     import joblib
     import numpy as np
@@ -144,6 +146,16 @@ def train_xgboost(
     y = frame[TARGET_COLUMN].astype(float).to_numpy()
     template_groups = frame[GROUP_COLUMN].astype(str)
     query_groups = frame["sql_text"].astype(str)
+    template_counts = template_groups.value_counts()
+    sample_weights = template_groups.map(
+        lambda template: len(frame) / (len(template_counts) * template_counts[template])
+    ).to_numpy(dtype=float)
+
+    def fit_parameters(indices=None) -> dict[str, Any]:
+        if not template_balanced:
+            return {}
+        weights = sample_weights if indices is None else sample_weights[indices]
+        return {"regressor__sample_weight": weights}
 
     preprocessor = ColumnTransformer(
         transformers=[
@@ -222,6 +234,7 @@ def train_xgboost(
             x.iloc[parameter_train],
             transform_target(y[parameter_train]),
             groups=query_groups.iloc[parameter_train],
+            **fit_parameters(parameter_train),
         )
         selected_template = search.best_estimator_
         tuning_cv_mae_ms = float(-search.best_score_)
@@ -234,7 +247,11 @@ def train_xgboost(
         evaluation_pipeline = clone(selected_template)
         x_train, x_test = x.iloc[train_indices], x.iloc[test_indices]
         y_train, y_test = y[train_indices], y[test_indices]
-        evaluation_pipeline.fit(x_train, transform_target(y_train))
+        evaluation_pipeline.fit(
+            x_train,
+            transform_target(y_train),
+            **fit_parameters(train_indices),
+        )
         predictions = np.maximum(
             0.0,
             inverse_target(evaluation_pipeline.predict(x_test)),
@@ -275,10 +292,11 @@ def train_xgboost(
         tuning_cv_mae_ms=tuning_cv_mae_ms,
         parameter_holdout=evaluate(parameter_train, parameter_test),
         unseen_template_stress=evaluate(template_train, template_test),
+        template_balanced=template_balanced,
     )
 
     pipeline = clone(selected_template)
-    pipeline.fit(x, transform_target(y))
+    pipeline.fit(x, transform_target(y), **fit_parameters())
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
@@ -289,6 +307,7 @@ def train_xgboost(
         "target_transform": target_transform,
         "requires_query_execution": False,
         "random_state": random_state,
+        "template_balanced": template_balanced,
     }
     joblib.dump(artifact, destination / "xgboost_query_time.joblib")
     (destination / "metrics.json").write_text(

@@ -124,6 +124,7 @@ PostgreSQL по-прежнему должен быть доступен по п�
 - [Строгая проверка leave-one-database-out](docs/leave-one-database-out.md)
 - [Расширение DQN отрицательными примерами](docs/dqn-negative-augmentation.md)
 - [Расширение нагрузки на основе CH-benCHmark](docs/chbenchmark-experiment.md)
+- [Эксперимент с балансировкой шаблонов](docs/chbenchmark-balanced-experiment.md)
 
 ## Следующие этапы
 
