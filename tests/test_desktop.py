@@ -30,7 +30,7 @@ class DesktopTests(unittest.TestCase):
             self.assertIn("SELECT", window.sql_editor.toPlainText())
             self.assertIsNotNone(window.persist_check)
             self.assertIsNotNone(window.calibrate_button)
-            self.assertTrue(window.use_calibration_check.isChecked())
+            self.assertFalse(window.use_calibration_check.isChecked())
         finally:
             window.close()
 

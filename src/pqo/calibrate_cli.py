@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from .calibration import calibrate_query, load_profile
+from .calibration_evaluation import run_calibration_experiment
 
 
 def main() -> int:
@@ -21,9 +22,34 @@ def main() -> int:
     add.add_argument("sql")
     status = commands.add_parser("status", help="show a calibration profile")
     status.add_argument("profile", type=Path)
+    experiment = commands.add_parser(
+        "experiment",
+        help="fit and evaluate on structurally disjoint templates from a measured CSV",
+    )
+    experiment.add_argument("dataset", type=Path)
+    experiment.add_argument("model", type=Path)
+    experiment.add_argument("output_dir", type=Path)
+    experiment.add_argument("--calibration-fraction", type=float, default=0.20)
+    experiment.add_argument("--seed", type=int, default=1701)
+    experiment.add_argument(
+        "--split-mode",
+        choices=("parameter", "unseen-template"),
+        default="parameter",
+    )
     args = parser.parse_args()
 
-    if args.command == "status":
+    if args.command == "experiment":
+        result = asdict(
+            run_calibration_experiment(
+                args.dataset,
+                args.model,
+                args.output_dir,
+                calibration_fraction=args.calibration_fraction,
+                seed=args.seed,
+                split_mode=args.split_mode,
+            )
+        )
+    elif args.command == "status":
         profile = load_profile(args.profile)
         result = {
             **asdict(profile),

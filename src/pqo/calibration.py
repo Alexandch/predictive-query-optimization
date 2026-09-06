@@ -14,7 +14,7 @@ from .config import DatabaseSettings
 
 
 PROFILE_VERSION = 1
-MINIMUM_ACTIVE_SAMPLES = 3
+MINIMUM_ACTIVE_SAMPLES = 10
 MINIMUM_FACTOR = 0.05
 MAXIMUM_FACTOR = 20.0
 
@@ -50,16 +50,34 @@ class CalibrationProfile:
     def factor(self) -> float:
         if not self.observations:
             return 1.0
-        ratios_by_query: dict[str, list[float]] = {}
+        observations_by_query: dict[str, list[CalibrationObservation]] = {}
         for item in self.observations:
-            ratios_by_query.setdefault(item.sql_hash, []).append(
-                math.log1p(item.actual_time_ms)
-                - math.log1p(item.predicted_time_ms)
+            observations_by_query.setdefault(item.sql_hash, []).append(item)
+        ratios = []
+        weights = []
+        for observations in observations_by_query.values():
+            ratios.append(
+                median(
+                    (item.actual_time_ms + 1.0)
+                    / (item.predicted_time_ms + 1.0)
+                    for item in observations
+                )
             )
-        query_medians = [median(values) for values in ratios_by_query.values()]
+            weights.append(
+                median(item.predicted_time_ms + 1.0 for item in observations)
+            )
+        ordered = sorted(zip(ratios, weights, strict=True))
+        midpoint = sum(weights) / 2.0
+        cumulative = 0.0
+        factor = ordered[-1][0]
+        for ratio, weight in ordered:
+            cumulative += weight
+            if cumulative >= midpoint:
+                factor = ratio
+                break
         return min(
             MAXIMUM_FACTOR,
-            max(MINIMUM_FACTOR, math.exp(median(query_medians))),
+            max(MINIMUM_FACTOR, factor),
         )
 
     @property

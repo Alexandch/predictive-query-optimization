@@ -24,23 +24,22 @@ class CalibrationTests(unittest.TestCase):
             allowed_schemas=frozenset({"public"}),
         )
 
-    def test_three_unique_queries_activate_robust_factor(self):
+    def test_ten_unique_queries_activate_robust_factor(self):
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory) / "model.joblib"
             model.write_bytes(b"model-a")
             profile = new_profile(self.settings, model)
-            for sql, predicted, actual in (
-                ("SELECT 1", 100.0, 200.0),
-                ("SELECT 2", 200.0, 400.0),
-                ("SELECT 3", 50.0, 100.0),
-            ):
+            for number in range(1, 11):
                 profile, _ = add_observation(
-                    profile, sql, predicted, actual
+                    profile,
+                    f"SELECT {number}",
+                    100.0 + number,
+                    200.0 + 2 * number,
                 )
 
             self.assertTrue(profile.ready)
-            self.assertEqual(profile.unique_query_count, 3)
-            self.assertTrue(math.isclose(profile.factor, 201 / 101, rel_tol=0.02))
+            self.assertEqual(profile.unique_query_count, 10)
+            self.assertTrue(math.isclose(profile.factor, 2.0, rel_tol=0.02))
             self.assertTrue(
                 math.isclose(apply_calibration(100.0, profile), 200.0, rel_tol=0.02)
             )
@@ -50,7 +49,7 @@ class CalibrationTests(unittest.TestCase):
             model = Path(directory) / "model.joblib"
             model.write_bytes(b"model-a")
             profile = new_profile(self.settings, model)
-            for _ in range(3):
+            for _ in range(10):
                 profile, _ = add_observation(profile, "SELECT 1", 10.0, 20.0)
 
             self.assertFalse(profile.ready)

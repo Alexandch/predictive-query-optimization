@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 from .analysis_service import QueryAnalysis, analyze_query
 from .app_paths import resource_root, writable_root
 from .calibration import (
+    MINIMUM_ACTIVE_SAMPLES,
     calibrate_query,
     load_profile,
     suggested_profile_path,
@@ -175,7 +176,7 @@ class MainWindow(QMainWindow):
         calibration_controls = QHBoxLayout()
         self.use_calibration_check = QCheckBox("Использовать калибровку этой БД")
         self.use_calibration_check.setChecked(
-            str(self.preferences.value("use_calibration", "true")).lower()
+            str(self.preferences.value("use_calibration", "false")).lower()
             in {"1", "true", "yes"}
         )
         calibration_controls.addWidget(self.use_calibration_check)
@@ -472,13 +473,19 @@ class MainWindow(QMainWindow):
         try:
             path = self._calibration_path()
             if not path.is_file():
-                self.calibration_status.setText("Калибровка: 0/3 измерений")
+                self.calibration_status.setText(
+                    f"Калибровка: 0/{MINIMUM_ACTIVE_SAMPLES} разных SQL"
+                )
                 return
             profile = load_profile(path)
         except Exception as exc:
             self.calibration_status.setText(f"Калибровка недоступна: {exc}")
             return
-        state = "активна" if profile.ready else "нужно 3 разных SQL"
+        state = (
+            "готова"
+            if profile.ready
+            else f"нужно {MINIMUM_ACTIVE_SAMPLES} разных SQL"
+        )
         self.calibration_status.setText(
             f"Калибровка: {profile.unique_query_count} SQL / "
             f"{profile.sample_count} измер., ×{profile.factor:.3f} ({state})"
@@ -568,7 +575,7 @@ class MainWindow(QMainWindow):
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
         prediction = analysis.prediction
         prediction_text = f"{prediction.predicted_time_ms:.2f} мс"
-        if prediction.calibration_sample_count >= 3:
+        if prediction.calibration_sample_count >= MINIMUM_ACTIVE_SAMPLES:
             prediction_text += (
                 f"\nбазовый {prediction.uncalibrated_time_ms:.2f} мс"
             )
