@@ -34,6 +34,7 @@ def analyze_query(
     *,
     recommendation_threshold_ms: float = 50.0,
     persist: bool = True,
+    calibration_profile_path: str | Path | None = None,
 ) -> QueryAnalysis:
     if recommendation_threshold_ms < 0:
         raise ValueError("recommendation_threshold_ms must be non-negative")
@@ -52,6 +53,20 @@ def analyze_query(
         **database_features.as_dict(),
     }
     predicted_time = predict_query_time(xgboost_model_path, feature_values)
+    uncalibrated_time = predicted_time
+    calibration_factor = 1.0
+    calibration_sample_count = 0
+    if (
+        calibration_profile_path is not None
+        and Path(calibration_profile_path).is_file()
+    ):
+        from .calibration import apply_calibration, load_profile, validate_profile
+
+        profile = load_profile(calibration_profile_path)
+        validate_profile(profile, settings, xgboost_model_path)
+        predicted_time = apply_calibration(predicted_time, profile)
+        calibration_factor = profile.factor if profile.ready else 1.0
+        calibration_sample_count = profile.sample_count
     prediction = QueryTimePrediction(
         sql_text=normalized_sql,
         predicted_time_ms=predicted_time,
@@ -59,6 +74,9 @@ def analyze_query(
         estimated_plan_rows=estimated_plan.features.estimated_plan_rows,
         root_node_type=estimated_plan.features.root_node_type,
         plan_node_count=estimated_plan.features.node_count,
+        uncalibrated_time_ms=uncalibrated_time,
+        calibration_factor=calibration_factor,
+        calibration_sample_count=calibration_sample_count,
     )
 
     recommendation = None

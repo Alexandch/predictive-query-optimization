@@ -14,9 +14,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Predict PostgreSQL query time.")
     parser.add_argument("model", type=Path, help="XGBoost joblib artifact")
     parser.add_argument("sql", help="One SELECT/WITH query")
+    parser.add_argument("--calibration", type=Path, help="Compatible calibration JSON")
     args = parser.parse_args()
 
-    result = predict_sql_query(args.sql, args.model)
+    result = predict_sql_query(
+        args.sql,
+        args.model,
+        calibration_profile_path=args.calibration,
+    )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0
 

@@ -38,6 +38,11 @@ from PyQt6.QtWidgets import (
 
 from .analysis_service import QueryAnalysis, analyze_query
 from .app_paths import resource_root, writable_root
+from .calibration import (
+    calibrate_query,
+    load_profile,
+    suggested_profile_path,
+)
 from .charts import AccuracyBarChart, ScatterChart
 from .config import DatabaseSettings
 from .dqn import train_dqn
@@ -118,6 +123,7 @@ class MainWindow(QMainWindow):
         self._build_settings_tab()
         self._build_experiments_tab()
         self._build_training_tab()
+        self._refresh_calibration_status()
         self._apply_style()
         self.statusBar().showMessage("Готово")
 
@@ -165,6 +171,22 @@ class MainWindow(QMainWindow):
         )
         controls.addWidget(self.threshold_spin)
         layout.addLayout(controls)
+
+        calibration_controls = QHBoxLayout()
+        self.use_calibration_check = QCheckBox("Использовать калибровку этой БД")
+        self.use_calibration_check.setChecked(
+            str(self.preferences.value("use_calibration", "true")).lower()
+            in {"1", "true", "yes"}
+        )
+        calibration_controls.addWidget(self.use_calibration_check)
+        self.calibrate_button = QPushButton("Добавить текущий SQL в калибровку")
+        self.calibrate_button.clicked.connect(self._start_calibration)
+        calibration_controls.addWidget(self.calibrate_button)
+        self.calibration_status = QLabel("Калибровка: профиль не создан")
+        self.calibration_status.setObjectName("mutedLabel")
+        calibration_controls.addWidget(self.calibration_status)
+        calibration_controls.addStretch()
+        layout.addLayout(calibration_controls)
 
         metrics = QGridLayout()
         self.predicted_value = self._metric_card(metrics, 0, "Прогноз", "—")
@@ -439,6 +461,75 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _calibration_path(self) -> Path:
+        return suggested_profile_path(
+            ARTIFACT_ROOT / "calibration",
+            self._database_settings(),
+            Path(self.xgb_model_edit.text()),
+        )
+
+    def _refresh_calibration_status(self) -> None:
+        try:
+            path = self._calibration_path()
+            if not path.is_file():
+                self.calibration_status.setText("Калибровка: 0/3 измерений")
+                return
+            profile = load_profile(path)
+        except Exception as exc:
+            self.calibration_status.setText(f"Калибровка недоступна: {exc}")
+            return
+        state = "активна" if profile.ready else "нужно 3 разных SQL"
+        self.calibration_status.setText(
+            f"Калибровка: {profile.unique_query_count} SQL / "
+            f"{profile.sample_count} измер., ×{profile.factor:.3f} ({state})"
+        )
+
+    def _start_calibration(self) -> None:
+        sql_text = self.sql_editor.toPlainText().strip()
+        model_path = Path(self.xgb_model_edit.text())
+        if not sql_text:
+            QMessageBox.warning(self, "Нет SQL", "Введите SELECT или WITH-запрос.")
+            return
+        if not model_path.is_file():
+            QMessageBox.warning(
+                self,
+                "Модель не найдена",
+                "Проверьте путь к XGBoost-модели.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Выполнить запрос для калибровки?",
+            "Будет выполнен EXPLAIN ANALYZE: PostgreSQL реально запустит этот "
+            "SELECT в read-only-транзакции с заданным таймаутом. Продолжить?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        profile_path = self._calibration_path()
+        self.calibrate_button.setEnabled(False)
+        self.statusBar().showMessage("Измерение запроса для калибровки…")
+        worker = Worker(
+            calibrate_query,
+            sql_text,
+            model_path,
+            profile_path,
+            self._database_settings(),
+        )
+        worker.signals.succeeded.connect(self._calibration_finished)
+        worker.signals.failed.connect(
+            lambda message: self._task_failed(message, self.calibrate_button)
+        )
+        self.thread_pool.start(worker)
+
+    def _calibration_finished(self, result) -> None:
+        self.calibrate_button.setEnabled(True)
+        self._refresh_calibration_status()
+        self.statusBar().showMessage(
+            "Калибровочное измерение добавлено: "
+            f"прогноз {result.observation.predicted_time_ms:.2f} мс, "
+            f"факт {result.observation.actual_time_ms:.2f} мс"
+        )
+
     def _start_analysis(self) -> None:
         sql_text = self.sql_editor.toPlainText().strip()
         if not sql_text:
@@ -462,6 +553,11 @@ class MainWindow(QMainWindow):
             self._database_settings(),
             recommendation_threshold_ms=self.threshold_spin.value(),
             persist=self.persist_check.isChecked(),
+            calibration_profile_path=(
+                self._calibration_path()
+                if self.use_calibration_check.isChecked()
+                else None
+            ),
         )
         worker.signals.succeeded.connect(self._show_analysis)
         worker.signals.failed.connect(
@@ -471,7 +567,12 @@ class MainWindow(QMainWindow):
 
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
         prediction = analysis.prediction
-        self.predicted_value.setText(f"{prediction.predicted_time_ms:.2f} мс")
+        prediction_text = f"{prediction.predicted_time_ms:.2f} мс"
+        if prediction.calibration_sample_count >= 3:
+            prediction_text += (
+                f"\nбазовый {prediction.uncalibrated_time_ms:.2f} мс"
+            )
+        self.predicted_value.setText(prediction_text)
         self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
         self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
         self.node_value.setText(
@@ -680,7 +781,11 @@ class MainWindow(QMainWindow):
         self.preferences.setValue("dqn_model", self.dqn_model_edit.text().strip())
         self.preferences.setValue("threshold_ms", self.threshold_spin.value())
         self.preferences.setValue("persist_analysis", self.persist_check.isChecked())
+        self.preferences.setValue(
+            "use_calibration", self.use_calibration_check.isChecked()
+        )
         self.preferences.sync()
+        self._refresh_calibration_status()
         self.statusBar().showMessage("Настройки сохранены (пароль не сохранялся)")
 
     def _start_xgb_training(self) -> None:

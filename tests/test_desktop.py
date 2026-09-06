@@ -29,6 +29,8 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(window.analyze_button.isEnabled())
             self.assertIn("SELECT", window.sql_editor.toPlainText())
             self.assertIsNotNone(window.persist_check)
+            self.assertIsNotNone(window.calibrate_button)
+            self.assertTrue(window.use_calibration_check.isChecked())
         finally:
             window.close()
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predictive-query-optimization"
-version = "0.1.2"
+version = "0.1.3"
 description = "PostgreSQL query-time prediction and index recommendation system"
 requires-python = ">=3.11"
 dependencies = [
@@ -60,6 +60,7 @@ pqo-recommend = "pqo.recommend_cli:main"
 pqo-merge = "pqo.merge_cli:main"
 pqo-merge-dqn = "pqo.merge_dqn_cli:main"
 pqo-analyze = "pqo.analyze_cli:main"
+pqo-calibrate = "pqo.calibrate_cli:main"
 pqo-desktop = "pqo.desktop:main"
 pqo-production-benchmark = "pqo.production_benchmark_cli:main"
 pqo-retail = "pqo.retail_cli:main"

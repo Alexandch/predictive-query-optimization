@@ -17,6 +17,7 @@ def main() -> int:
     parser.add_argument("sql")
     parser.add_argument("--threshold-ms", type=float, default=50.0)
     parser.add_argument("--no-persist", action="store_true")
+    parser.add_argument("--calibration", type=Path, help="Compatible calibration JSON")
     args = parser.parse_args()
     result = analyze_query(
         args.sql,
@@ -24,6 +25,7 @@ def main() -> int:
         args.dqn_model,
         recommendation_threshold_ms=args.threshold_ms,
         persist=not args.no_persist,
+        calibration_profile_path=args.calibration,
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0
