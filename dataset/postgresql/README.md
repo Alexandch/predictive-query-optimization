@@ -70,3 +70,25 @@ SHA-256 новых наборов:
 - `dqn_negative_experience.jsonl`: `35673C1A880799262CFE4033706AAB4D5E0F35FEDA223941CF288F08334F03BC`;
 - `multidomain_dqn_augmented.jsonl`: `F1074CBBAFD92169FAC6D622CFA30C00EC8FEC7F9F4632622712B2DD1F009D96`.
 
+## CH-benCHmark-совместимая предметная область
+
+Схема `chbenchmark` содержит 12 сущностей заказов, складов и поставщиков.
+Обучающие и контрольные структуры реализованы разными генераторами и не
+пересекаются по `template_id`.
+
+- `chbenchmark_training.csv`: 800 измерений, 242 уникальных SQL, 20 шаблонов;
+- `chbenchmark_control.csv`: 200 измерений, 60 уникальных SQL, 10 шаблонов;
+- `chbenchmark_dqn_experience.jsonl`: 300 действий, 86 решений, 20 шаблонов;
+- `chbenchmark_dqn_control.jsonl`: 90 действий, 26 решений, 10 шаблонов.
+
+SHA-256:
+
+- `chbenchmark_training.csv`: `1700ED6B21D1C2FFD753F92931AED5FC357375F1312284589B57F644610BA418`;
+- `chbenchmark_control.csv`: `187EE469FC7252C3508FBA0BCECBDBF3335FB90F101EE30B9D2DE040A433A1B2`;
+- `chbenchmark_dqn_experience.jsonl`: `22ECCEE78306BB3C7C9913C21F5805E3B4E50F520E8ABF4E4686CBB18F9CF9EF`;
+- `chbenchmark_dqn_control.jsonl`: `0A16DD5BE0191EEAA49F83C2CD149F5FF3EF31C6A23132597A5AED31910D5DD2`.
+
+Контрольные `chbenchmark_control.csv` и `chbenchmark_dqn_control.jsonl`
+запрещено объединять с обучающими данными. Протокол и результаты приведены в
+`docs/chbenchmark-experiment.md`.
+

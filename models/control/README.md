@@ -15,3 +15,7 @@
 Каталог `negative_augmented` содержит итоговые DQN-метрики после расширения
 отрицательными примерами для aviation, retail и logistics. Методика и сравнение
 описаны в `docs/dqn-negative-augmentation.md`.
+
+Каталог `chbenchmark` содержит сравнение выбранных моделей и отклонённых
+кандидатов на отдельной гибридной схеме заказов. Методика описана в
+`docs/chbenchmark-experiment.md`.

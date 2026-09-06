@@ -1,0 +1,31 @@
+{
+  "evaluated_at": "2026-09-06",
+  "postgresql_version": "17.11",
+  "benchbase_source_commit": "33c00473807ebd49304d114a6d769d2d2b2bbb34",
+  "decision": "rejected",
+  "reason": "XGBoost regressed on logistics and CH R2; DQN regressed on CH accuracy and regret",
+  "datasets": {
+    "xgboost_training": {
+      "path": "dataset/postgresql/chbenchmark_training.csv",
+      "sha256": "1700ED6B21D1C2FFD753F92931AED5FC357375F1312284589B57F644610BA418"
+    },
+    "xgboost_control": {
+      "path": "dataset/postgresql/chbenchmark_control.csv",
+      "sha256": "187EE469FC7252C3508FBA0BCECBDBF3335FB90F101EE30B9D2DE040A433A1B2"
+    },
+    "dqn_training": {
+      "path": "dataset/postgresql/chbenchmark_dqn_experience.jsonl",
+      "sha256": "22ECCEE78306BB3C7C9913C21F5805E3B4E50F520E8ABF4E4686CBB18F9CF9EF"
+    },
+    "dqn_control": {
+      "path": "dataset/postgresql/chbenchmark_dqn_control.jsonl",
+      "sha256": "0A16DD5BE0191EEAA49F83C2CD149F5FF3EF31C6A23132597A5AED31910D5DD2"
+    }
+  },
+  "models": {
+    "primary_xgboost_sha256": "737ACD01B6D52890CE3B3CB0C7179BA88B47481A05AA83CE35D09656C3A44065",
+    "candidate_xgboost_sha256": "7F0004F094F2DE03F6D77561C1132C4831A6E104789CCF4A8624A96693FCAC61",
+    "primary_dqn_sha256": "800BA0D35D1C6229D680BA90BFC3D532E39A007DB3B58BCFD667E803BE01152F",
+    "candidate_dqn_sha256": "AF4E872ACC5C325AA0889198A69001D62E4A46C674E5D6D322D9B3154D24E325"
+  }
+}

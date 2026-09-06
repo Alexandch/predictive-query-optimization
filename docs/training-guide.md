@@ -158,3 +158,25 @@ $env:PQO_INTEGRATION_TESTS = "1"
 `random_accuracy`, `random_mean_regret`, `noop_accuracy` и
 `noop_mean_regret`. Высокая accuracy полезна, но низкий regret важнее: он
 показывает, сколько ускорения теряется из-за выбранного действия.
+
+## 5. CH-benCHmark-совместимая нагрузка
+
+Установить четвёртую предметную схему в уже существующий Docker volume:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_chbenchmark.ps1
+$env:PQO_ALLOWED_SCHEMAS = "chbenchmark"
+```
+
+Собрать дополнительные обучающие данные:
+
+```powershell
+.\.venv\Scripts\pqo-chbenchmark.exe collect-xgb 400 artifacts\ch_xgb.csv --repetitions 2 --seed 15101
+.\.venv\Scripts\pqo-chbenchmark.exe collect-dqn 100 artifacts\ch_dqn.jsonl --actions-per-query 2 --repetitions 1 --seed 15101
+```
+
+Команды `collect-control-xgb` и `collect-control-dqn` используют отдельные,
+неизвестные обучаемым моделям структурные шаблоны. Их результаты нельзя объединять с
+train-файлами.
+Полный воспроизводимый протокол, хеши и результаты отклонённых кандидатов
+приведены в `docs/chbenchmark-experiment.md`.
