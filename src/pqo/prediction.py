@@ -53,12 +53,21 @@ def predict_sql_query(
         calibration_profile_path is not None
         and Path(calibration_profile_path).is_file()
     ):
-        from .calibration import apply_calibration, load_profile, validate_profile
+        from .calibration import (
+            apply_calibration,
+            factor_for_query,
+            load_profile,
+            validate_profile,
+        )
 
         profile = load_profile(calibration_profile_path)
         validate_profile(profile, settings, model_path)
-        predicted_time_ms = apply_calibration(uncalibrated_time_ms, profile)
-        calibration_factor = profile.factor if profile.ready else 1.0
+        predicted_time_ms = apply_calibration(
+            uncalibrated_time_ms, profile, sql_text
+        )
+        calibration_factor = factor_for_query(
+            profile, sql_text, uncalibrated_time_ms
+        )
         calibration_sample_count = profile.sample_count
 
     return QueryTimePrediction(

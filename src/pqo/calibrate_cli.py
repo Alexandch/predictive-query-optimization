@@ -57,6 +57,8 @@ def main() -> int:
             "unique_query_count": profile.unique_query_count,
             "ready": profile.ready,
             "factor": profile.factor,
+            "active_segment_count": profile.active_segment_count,
+            "segment_sample_counts": profile.segment_sample_counts,
             "base_mae_ms": profile.base_mae_ms,
             "calibrated_mae_ms": profile.calibrated_mae_ms,
         }
@@ -68,6 +70,8 @@ def main() -> int:
             "unique_query_count": calibration.profile.unique_query_count,
             "ready": calibration.profile.ready,
             "factor": calibration.profile.factor,
+            "active_segment_count": calibration.profile.active_segment_count,
+            "segment_sample_counts": calibration.profile.segment_sample_counts,
             "base_mae_ms": calibration.profile.base_mae_ms,
             "calibrated_mae_ms": calibration.profile.calibrated_mae_ms,
         }

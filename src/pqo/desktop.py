@@ -488,7 +488,8 @@ class MainWindow(QMainWindow):
         )
         self.calibration_status.setText(
             f"Калибровка: {profile.unique_query_count} SQL / "
-            f"{profile.sample_count} измер., ×{profile.factor:.3f} ({state})"
+            f"{profile.sample_count} измер., "
+            f"{profile.active_segment_count} активн. групп ({state})"
         )
 
     def _start_calibration(self) -> None:
@@ -575,7 +576,7 @@ class MainWindow(QMainWindow):
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
         prediction = analysis.prediction
         prediction_text = f"{prediction.predicted_time_ms:.2f} мс"
-        if prediction.calibration_sample_count >= MINIMUM_ACTIVE_SAMPLES:
+        if abs(prediction.calibration_factor - 1.0) > 1e-12:
             prediction_text += (
                 f"\nбазовый {prediction.uncalibrated_time_ms:.2f} мс"
             )

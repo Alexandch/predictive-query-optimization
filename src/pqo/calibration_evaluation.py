@@ -41,6 +41,7 @@ class CalibrationEvaluation:
     holdout_templates: list[str]
     sql_overlap_count: int
     factor: float
+    active_segment_count: int
     baseline: PredictionMetrics
     calibrated: PredictionMetrics
     mae_improvement_percent: float
@@ -175,7 +176,10 @@ def run_calibration_experiment(
     actual = holdout_rows[TARGET_COLUMN].astype(float).to_numpy()
     baseline_predictions = holdout_rows["baseline_prediction_ms"].to_numpy()
     calibrated_predictions = [
-        apply_calibration(value, profile) for value in baseline_predictions
+        apply_calibration(value, profile, str(row["sql_text"]))
+        for value, (_, row) in zip(
+            baseline_predictions, holdout_rows.iterrows(), strict=True
+        )
     ]
     baseline = _metrics(actual, baseline_predictions)
     calibrated = _metrics(actual, calibrated_predictions)
@@ -195,6 +199,7 @@ def run_calibration_experiment(
         holdout_templates=holdout_templates,
         sql_overlap_count=len(overlap),
         factor=profile.factor,
+        active_segment_count=profile.active_segment_count,
         baseline=baseline,
         calibrated=calibrated,
         mae_improvement_percent=improvement(

@@ -15,6 +15,8 @@ from .config import DatabaseSettings
 
 PROFILE_VERSION = 1
 MINIMUM_ACTIVE_SAMPLES = 10
+MINIMUM_SEGMENT_SAMPLES = 3
+SEGMENT_SHRINKAGE = 5.0
 MINIMUM_FACTOR = 0.05
 MAXIMUM_FACTOR = 20.0
 
@@ -25,6 +27,7 @@ class CalibrationObservation:
     predicted_time_ms: float
     actual_time_ms: float
     measured_at: str
+    segment: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,36 +51,28 @@ class CalibrationProfile:
 
     @property
     def factor(self) -> float:
-        if not self.observations:
-            return 1.0
-        observations_by_query: dict[str, list[CalibrationObservation]] = {}
-        for item in self.observations:
-            observations_by_query.setdefault(item.sql_hash, []).append(item)
-        ratios = []
-        weights = []
-        for observations in observations_by_query.values():
-            ratios.append(
-                median(
-                    (item.actual_time_ms + 1.0)
-                    / (item.predicted_time_ms + 1.0)
-                    for item in observations
-                )
+        return _weighted_factor(self.observations)
+
+    @property
+    def segment_sample_counts(self) -> dict[str, int]:
+        return {
+            segment: len(
+                {
+                    item.sql_hash
+                    for item in self.observations
+                    if item.segment == segment
+                }
             )
-            weights.append(
-                median(item.predicted_time_ms + 1.0 for item in observations)
+            for segment in sorted(
+                {item.segment for item in self.observations if item.segment}
             )
-        ordered = sorted(zip(ratios, weights, strict=True))
-        midpoint = sum(weights) / 2.0
-        cumulative = 0.0
-        factor = ordered[-1][0]
-        for ratio, weight in ordered:
-            cumulative += weight
-            if cumulative >= midpoint:
-                factor = ratio
-                break
-        return min(
-            MAXIMUM_FACTOR,
-            max(MINIMUM_FACTOR, factor),
+        }
+
+    @property
+    def active_segment_count(self) -> int:
+        return sum(
+            count >= MINIMUM_SEGMENT_SAMPLES
+            for count in self.segment_sample_counts.values()
         )
 
     @property
@@ -94,7 +89,13 @@ class CalibrationProfile:
         if not self.observations:
             return None
         return sum(
-            abs(item.actual_time_ms - apply_calibration(item.predicted_time_ms, self))
+            abs(
+                item.actual_time_ms
+                - _apply_factor(
+                    item.predicted_time_ms,
+                    factor_for_segment(self, item.segment),
+                )
+            )
             for item in self.observations
         ) / self.sample_count
 
@@ -166,6 +167,7 @@ def load_profile(path: str | Path) -> CalibrationProfile:
             predicted_time_ms=float(item["predicted_time_ms"]),
             actual_time_ms=float(item["actual_time_ms"]),
             measured_at=str(item["measured_at"]),
+            segment=str(item.get("segment", "")),
         )
         for item in data.get("observations", ())
     )
@@ -211,6 +213,7 @@ def add_observation(
         predicted_time_ms=float(predicted_time_ms),
         actual_time_ms=float(actual_time_ms),
         measured_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        segment=query_segment(sql_text, predicted_time_ms),
     )
     return (
         CalibrationProfile(
@@ -223,10 +226,97 @@ def add_observation(
     )
 
 
-def apply_calibration(predicted_time_ms: float, profile: CalibrationProfile) -> float:
+def _weighted_factor(observations: tuple[CalibrationObservation, ...]) -> float:
+    if not observations:
+        return 1.0
+    observations_by_query: dict[str, list[CalibrationObservation]] = {}
+    for item in observations:
+        observations_by_query.setdefault(item.sql_hash, []).append(item)
+    ratios = []
+    weights = []
+    for repeated in observations_by_query.values():
+        ratios.append(
+            median(
+                (item.actual_time_ms + 1.0) / (item.predicted_time_ms + 1.0)
+                for item in repeated
+            )
+        )
+        weights.append(median(item.predicted_time_ms + 1.0 for item in repeated))
+    ordered = sorted(zip(ratios, weights, strict=True))
+    midpoint = sum(weights) / 2.0
+    cumulative = 0.0
+    factor = ordered[-1][0]
+    for ratio, weight in ordered:
+        cumulative += weight
+        if cumulative >= midpoint:
+            factor = ratio
+            break
+    return min(MAXIMUM_FACTOR, max(MINIMUM_FACTOR, factor))
+
+
+def query_segment(sql_text: str, predicted_time_ms: float) -> str:
+    """Return a deliberately coarse structural and predicted-latency segment."""
+    from .sql_features import extract_sql_features
+
+    features = extract_sql_features(sql_text)
+    join_band = min(features.join_count, 3)
+    has_subquery = int(features.subquery_count > 0)
+    has_aggregate = int(
+        features.aggregate_function_count > 0 or features.has_group_by
+    )
+    has_order = int(features.has_order_by)
+    if predicted_time_ms < 100.0:
+        latency_band = "fast"
+    elif predicted_time_ms < 1000.0:
+        latency_band = "medium"
+    else:
+        latency_band = "heavy"
+    return (
+        f"j{join_band}-s{has_subquery}-a{has_aggregate}-o{has_order}"
+        f"-{latency_band}"
+    )
+
+
+def factor_for_segment(profile: CalibrationProfile, segment: str) -> float:
+    """Return a shrinkage-adjusted factor, or identity for sparse segments."""
+    if not profile.ready or not segment:
+        return 1.0
+    observations = tuple(
+        item for item in profile.observations if item.segment == segment
+    )
+    unique_count = len({item.sql_hash for item in observations})
+    if unique_count < MINIMUM_SEGMENT_SAMPLES:
+        return 1.0
+    raw_factor = _weighted_factor(observations)
+    confidence = unique_count / (unique_count + SEGMENT_SHRINKAGE)
+    return raw_factor**confidence
+
+
+def factor_for_query(
+    profile: CalibrationProfile,
+    sql_text: str,
+    predicted_time_ms: float,
+) -> float:
+    return factor_for_segment(profile, query_segment(sql_text, predicted_time_ms))
+
+
+def _apply_factor(predicted_time_ms: float, factor: float) -> float:
+    return max(0.0, (float(predicted_time_ms) + 1.0) * factor - 1.0)
+
+
+def apply_calibration(
+    predicted_time_ms: float,
+    profile: CalibrationProfile,
+    sql_text: str | None = None,
+) -> float:
     if not profile.ready:
         return float(predicted_time_ms)
-    return max(0.0, (float(predicted_time_ms) + 1.0) * profile.factor - 1.0)
+    factor = (
+        factor_for_query(profile, sql_text, predicted_time_ms)
+        if sql_text is not None
+        else profile.factor
+    )
+    return _apply_factor(predicted_time_ms, factor)
 
 
 def calibrate_query(
