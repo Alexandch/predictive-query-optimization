@@ -489,6 +489,7 @@ class MainWindow(QMainWindow):
         self.calibration_status.setText(
             f"Калибровка: {profile.unique_query_count} SQL / "
             f"{profile.sample_count} измер., "
+            f"{profile.seen_shape_count} шабл., "
             f"{profile.active_segment_count} активн. групп ({state})"
         )
 
@@ -971,10 +972,10 @@ def main() -> int:
     application.setOrganizationName("PQO")
     if APP_ICON.is_file():
         application.setWindowIcon(QIcon(str(APP_ICON)))
-    window = MainWindow()
     if smoke_test:
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
         smoke_log = ARTIFACT_ROOT / "smoke-test.log"
+        smoke_log.write_text("Starting resource check...", encoding="utf-8")
         required = (DEFAULT_XGB_MODEL, DEFAULT_DQN_MODEL, DEFAULT_DATASET)
         if not all(path.is_file() for path in required):
             missing = [str(path) for path in required if not path.is_file()]
@@ -984,11 +985,13 @@ def main() -> int:
             )
             return 2
         try:
+            smoke_log.write_text("Loading Python dependencies...", encoding="utf-8")
             import joblib
 
             from .dqn import dqn_action_encoding_version
             from .sql_features import extract_sql_features
 
+            smoke_log.write_text("Checking PostgreSQL SQL parser...", encoding="utf-8")
             sql_features = extract_sql_features(
                 "SELECT f.flight_id FROM aviation.flights AS f "
                 "WHERE f.departure_airport = 'MSQ'"
@@ -999,13 +1002,17 @@ def main() -> int:
                     encoding="utf-8",
                 )
                 return 3
+            smoke_log.write_text("Loading XGBoost artifact...", encoding="utf-8")
             xgboost_artifact = joblib.load(DEFAULT_XGB_MODEL)
             if "pipeline" not in xgboost_artifact:
                 smoke_log.write_text(
                     "XGBoost artifact has no pipeline.", encoding="utf-8"
                 )
                 return 3
+            smoke_log.write_text("Loading DQN artifact...", encoding="utf-8")
             dqn_action_encoding_version(DEFAULT_DQN_MODEL)
+            smoke_log.write_text("Constructing the main window...", encoding="utf-8")
+            MainWindow()
         except Exception:
             smoke_log.write_text(traceback.format_exc(), encoding="utf-8")
             return 3
@@ -1014,6 +1021,7 @@ def main() -> int:
             encoding="utf-8",
         )
         return 0
+    window = MainWindow()
     window.show()
     return application.exec()
 

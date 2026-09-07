@@ -8,7 +8,10 @@ import json
 from pathlib import Path
 
 from .calibration import calibrate_query, load_profile
-from .calibration_evaluation import run_calibration_experiment
+from .calibration_evaluation import (
+    run_calibration_cross_validation,
+    run_calibration_experiment,
+)
 
 
 def main() -> int:
@@ -36,9 +39,44 @@ def main() -> int:
         choices=("parameter", "unseen-template"),
         default="parameter",
     )
+    cross_validate = commands.add_parser(
+        "cross-validate",
+        help="evaluate calibration stability over multiple leakage-safe splits",
+    )
+    cross_validate.add_argument("dataset", type=Path)
+    cross_validate.add_argument("model", type=Path)
+    cross_validate.add_argument("output_dir", type=Path)
+    cross_validate.add_argument("--calibration-fraction", type=float, default=0.20)
+    cross_validate.add_argument("--seed-start", type=int, default=1)
+    cross_validate.add_argument("--runs", type=int, default=20)
+    cross_validate.add_argument(
+        "--split-mode",
+        choices=("parameter", "unseen-template", "both"),
+        default="both",
+    )
+    cross_validate.add_argument("--minimum-win-rate", type=float, default=70.0)
     args = parser.parse_args()
 
-    if args.command == "experiment":
+    if args.command == "cross-validate":
+        if args.runs < 1:
+            parser.error("--runs must be at least one")
+        split_modes = (
+            ("parameter", "unseen-template")
+            if args.split_mode == "both"
+            else (args.split_mode,)
+        )
+        result = asdict(
+            run_calibration_cross_validation(
+                args.dataset,
+                args.model,
+                args.output_dir,
+                calibration_fraction=args.calibration_fraction,
+                seeds=list(range(args.seed_start, args.seed_start + args.runs)),
+                split_modes=split_modes,
+                minimum_win_rate_percent=args.minimum_win_rate,
+            )
+        )
+    elif args.command == "experiment":
         result = asdict(
             run_calibration_experiment(
                 args.dataset,
@@ -58,6 +96,7 @@ def main() -> int:
             "ready": profile.ready,
             "factor": profile.factor,
             "active_segment_count": profile.active_segment_count,
+            "seen_shape_count": profile.seen_shape_count,
             "segment_sample_counts": profile.segment_sample_counts,
             "base_mae_ms": profile.base_mae_ms,
             "calibrated_mae_ms": profile.calibrated_mae_ms,
@@ -71,6 +110,7 @@ def main() -> int:
             "ready": calibration.profile.ready,
             "factor": calibration.profile.factor,
             "active_segment_count": calibration.profile.active_segment_count,
+            "seen_shape_count": calibration.profile.seen_shape_count,
             "segment_sample_counts": calibration.profile.segment_sample_counts,
             "base_mae_ms": calibration.profile.base_mae_ms,
             "calibrated_mae_ms": calibration.profile.calibrated_mae_ms,

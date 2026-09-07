@@ -102,11 +102,35 @@ class CalibrationTests(unittest.TestCase):
 
             fast = apply_calibration(10.0, profile, "SELECT 999")
             joined = apply_calibration(
-                500.0, profile, "SELECT * FROM a JOIN b ON b.id = a.id"
+                500.0,
+                profile,
+                "SELECT * FROM a JOIN b ON b.id = a.id WHERE a.id = 999",
             )
             self.assertGreater(fast, 10.0)
             self.assertLess(joined, 500.0)
             self.assertEqual(profile.active_segment_count, 2)
+
+    def test_unseen_shape_keeps_the_base_prediction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "model.joblib"
+            model.write_bytes(b"model-a")
+            profile = new_profile(self.settings, model)
+            for number in range(10):
+                profile, _ = add_observation(
+                    profile,
+                    f"SELECT {number} WHERE {number} >= 0",
+                    10.0,
+                    20.0,
+                )
+
+            self.assertEqual(
+                apply_calibration(
+                    10.0,
+                    profile,
+                    "SELECT 100 WHERE 100 BETWEEN 0 AND 200",
+                ),
+                10.0,
+            )
 
     def test_round_trip_and_compatibility_checks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,9 +152,11 @@ class CalibrationTests(unittest.TestCase):
 
             legacy_data = json.loads(path.read_text(encoding="utf-8"))
             legacy_data["observations"][0].pop("segment")
+            legacy_data["observations"][0].pop("shape_hash")
             path.write_text(json.dumps(legacy_data), encoding="utf-8")
             legacy = load_profile(path)
             self.assertEqual(legacy.observations[0].segment, "")
+            self.assertEqual(legacy.observations[0].shape_hash, "")
 
 
 if __name__ == "__main__":

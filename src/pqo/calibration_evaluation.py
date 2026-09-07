@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+from statistics import fmean, pstdev
 
 from .calibration import (
     CalibrationProfile,
@@ -42,10 +43,53 @@ class CalibrationEvaluation:
     sql_overlap_count: int
     factor: float
     active_segment_count: int
+    calibrated_holdout_query_count: int
     baseline: PredictionMetrics
     calibrated: PredictionMetrics
     mae_improvement_percent: float
     rmse_improvement_percent: float
+
+
+@dataclass(frozen=True, slots=True)
+class ImprovementDistribution:
+    mean: float
+    standard_deviation: float
+    minimum: float
+    maximum: float
+    improved_rate_percent: float
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationRunSummary:
+    seed: int
+    active_segment_count: int
+    calibrated_holdout_query_count: int
+    mae_improvement_percent: float
+    rmse_improvement_percent: float
+    r2_delta: float
+    within_20_percent_delta: float
+
+
+@dataclass(frozen=True, slots=True)
+class SplitRobustness:
+    split_mode: str
+    run_count: int
+    passes_stability_gate: bool
+    mae_improvement_percent: ImprovementDistribution
+    rmse_improvement_percent: ImprovementDistribution
+    r2_delta: ImprovementDistribution
+    within_20_percent_delta: ImprovementDistribution
+    runs: list[CalibrationRunSummary]
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationCrossValidation:
+    dataset_path: str
+    calibration_fraction: float
+    seeds: list[int]
+    sql_overlap_count: int
+    stability_gate_minimum_win_rate_percent: float
+    splits: dict[str, SplitRobustness]
 
 
 def _load_unique_predictions(dataset_path: str | Path, model_path: str | Path):
@@ -110,12 +154,18 @@ def run_calibration_experiment(
     calibration_fraction: float = 0.20,
     seed: int = 1701,
     split_mode: str = "parameter",
+    _unique=None,
+    _write_files: bool = True,
 ) -> CalibrationEvaluation:
     """Fit calibration and evaluate it on a disjoint SQL holdout."""
     if not 0 < calibration_fraction < 1:
         raise ValueError("calibration_fraction must be between zero and one")
     settings = settings or DatabaseSettings.from_env()
-    unique = _load_unique_predictions(dataset_path, model_path)
+    unique = (
+        _load_unique_predictions(dataset_path, model_path)
+        if _unique is None
+        else _unique
+    )
     templates = sorted(unique[GROUP_COLUMN].astype(str).unique().tolist())
     if len(templates) < 4:
         raise ValueError("Calibration experiment requires at least four templates")
@@ -181,6 +231,14 @@ def run_calibration_experiment(
             baseline_predictions, holdout_rows.iterrows(), strict=True
         )
     ]
+    calibrated_holdout_query_count = int(
+        sum(
+            calibrated_value != baseline_value
+            for calibrated_value, baseline_value in zip(
+                calibrated_predictions, baseline_predictions, strict=True
+            )
+        )
+    )
     baseline = _metrics(actual, baseline_predictions)
     calibrated = _metrics(actual, calibrated_predictions)
 
@@ -200,6 +258,7 @@ def run_calibration_experiment(
         sql_overlap_count=len(overlap),
         factor=profile.factor,
         active_segment_count=profile.active_segment_count,
+        calibrated_holdout_query_count=calibrated_holdout_query_count,
         baseline=baseline,
         calibrated=calibrated,
         mae_improvement_percent=improvement(
@@ -209,14 +268,120 @@ def run_calibration_experiment(
             baseline.rmse_ms, calibrated.rmse_ms
         ),
     )
-    _write_outputs(
-        output_directory,
-        profile,
-        result,
-        holdout_rows,
-        actual,
-        baseline_predictions,
-        calibrated_predictions,
+    if _write_files:
+        _write_outputs(
+            output_directory,
+            profile,
+            result,
+            holdout_rows,
+            actual,
+            baseline_predictions,
+            calibrated_predictions,
+        )
+    return result
+
+
+def _distribution(values: list[float]) -> ImprovementDistribution:
+    return ImprovementDistribution(
+        mean=fmean(values),
+        standard_deviation=pstdev(values),
+        minimum=min(values),
+        maximum=max(values),
+        improved_rate_percent=100.0 * sum(value > 0 for value in values) / len(values),
+    )
+
+
+def run_calibration_cross_validation(
+    dataset_path: str | Path,
+    model_path: str | Path,
+    output_directory: str | Path,
+    settings: DatabaseSettings | None = None,
+    *,
+    calibration_fraction: float = 0.20,
+    seeds: list[int] | None = None,
+    split_modes: tuple[str, ...] = ("parameter", "unseen-template"),
+    minimum_win_rate_percent: float = 70.0,
+) -> CalibrationCrossValidation:
+    """Evaluate calibration stability over repeated leakage-safe splits."""
+    seeds = list(range(1, 21)) if seeds is None else list(seeds)
+    if not seeds:
+        raise ValueError("At least one cross-validation seed is required")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError("Cross-validation seeds must be unique")
+    if not 0 <= minimum_win_rate_percent <= 100:
+        raise ValueError("minimum_win_rate_percent must be between 0 and 100")
+    invalid_modes = set(split_modes).difference({"parameter", "unseen-template"})
+    if invalid_modes or not split_modes:
+        raise ValueError("split_modes must contain parameter and/or unseen-template")
+
+    settings = settings or DatabaseSettings.from_env()
+    unique = _load_unique_predictions(dataset_path, model_path)
+    split_results: dict[str, SplitRobustness] = {}
+    total_overlap = 0
+    for split_mode in split_modes:
+        evaluations = [
+            run_calibration_experiment(
+                dataset_path,
+                model_path,
+                output_directory,
+                settings,
+                calibration_fraction=calibration_fraction,
+                seed=seed,
+                split_mode=split_mode,
+                _unique=unique,
+                _write_files=False,
+            )
+            for seed in seeds
+        ]
+        total_overlap += sum(item.sql_overlap_count for item in evaluations)
+        runs = [
+            CalibrationRunSummary(
+                seed=item.seed,
+                active_segment_count=item.active_segment_count,
+                calibrated_holdout_query_count=item.calibrated_holdout_query_count,
+                mae_improvement_percent=item.mae_improvement_percent,
+                rmse_improvement_percent=item.rmse_improvement_percent,
+                r2_delta=item.calibrated.r2 - item.baseline.r2,
+                within_20_percent_delta=(
+                    item.calibrated.within_20_percent
+                    - item.baseline.within_20_percent
+                ),
+            )
+            for item in evaluations
+        ]
+        mae = _distribution([item.mae_improvement_percent for item in runs])
+        rmse = _distribution([item.rmse_improvement_percent for item in runs])
+        split_results[split_mode] = SplitRobustness(
+            split_mode=split_mode,
+            run_count=len(runs),
+            passes_stability_gate=(
+                mae.mean > 0
+                and rmse.mean > 0
+                and mae.improved_rate_percent >= minimum_win_rate_percent
+                and rmse.improved_rate_percent >= minimum_win_rate_percent
+            ),
+            mae_improvement_percent=mae,
+            rmse_improvement_percent=rmse,
+            r2_delta=_distribution([item.r2_delta for item in runs]),
+            within_20_percent_delta=_distribution(
+                [item.within_20_percent_delta for item in runs]
+            ),
+            runs=runs,
+        )
+
+    result = CalibrationCrossValidation(
+        dataset_path=str(Path(dataset_path)),
+        calibration_fraction=calibration_fraction,
+        seeds=seeds,
+        sql_overlap_count=total_overlap,
+        stability_gate_minimum_win_rate_percent=minimum_win_rate_percent,
+        splits=split_results,
+    )
+    destination = Path(output_directory)
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "calibration_cross_validation.json").write_text(
+        json.dumps(asdict(result), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     return result
 

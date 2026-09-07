@@ -9,6 +9,7 @@ $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $icon = Join-Path $projectRoot "assets\pqo.ico"
 $spec = Join-Path $projectRoot "packaging\PredictiveQueryOptimization.spec"
 $executable = Join-Path $projectRoot "dist\PredictiveQueryOptimization\PredictiveQueryOptimization.exe"
+$pyinstallerRunner = Join-Path $projectRoot "packaging\build_support\run_pyinstaller.py"
 
 if (-not (Test-Path -LiteralPath $python)) {
     throw "Virtual environment .venv is missing."
@@ -24,7 +25,7 @@ try {
     & $python scripts\generate_app_icon.py $icon
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    & $python -m PyInstaller --noconfirm --clean $spec
+    & $python $pyinstallerRunner --noconfirm --clean $spec
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not (Test-Path -LiteralPath $executable)) {
         throw "PyInstaller did not create $executable"

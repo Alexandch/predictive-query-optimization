@@ -28,6 +28,7 @@ class CalibrationObservation:
     actual_time_ms: float
     measured_at: str
     segment: str = ""
+    shape_hash: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +75,10 @@ class CalibrationProfile:
             count >= MINIMUM_SEGMENT_SAMPLES
             for count in self.segment_sample_counts.values()
         )
+
+    @property
+    def seen_shape_count(self) -> int:
+        return len({item.shape_hash for item in self.observations if item.shape_hash})
 
     @property
     def base_mae_ms(self) -> float | None:
@@ -168,6 +173,7 @@ def load_profile(path: str | Path) -> CalibrationProfile:
             actual_time_ms=float(item["actual_time_ms"]),
             measured_at=str(item["measured_at"]),
             segment=str(item.get("segment", "")),
+            shape_hash=str(item.get("shape_hash", "")),
         )
         for item in data.get("observations", ())
     )
@@ -214,6 +220,7 @@ def add_observation(
         actual_time_ms=float(actual_time_ms),
         measured_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         segment=query_segment(sql_text, predicted_time_ms),
+        shape_hash=query_shape_hash(sql_text),
     )
     return (
         CalibrationProfile(
@@ -277,6 +284,21 @@ def query_segment(sql_text: str, predicted_time_ms: float) -> str:
     )
 
 
+def query_shape_hash(sql_text: str) -> str:
+    """Hash a PostgreSQL AST after replacing literal parameter values."""
+    from sqlglot import exp, parse_one
+
+    tree = parse_one(sql_text.strip(), read="postgres")
+
+    def anonymize(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.Literal):
+            return exp.Literal.string("__value__")
+        return node
+
+    normalized = tree.transform(anonymize).sql(dialect="postgres", pretty=False)
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
 def factor_for_segment(profile: CalibrationProfile, segment: str) -> float:
     """Return a shrinkage-adjusted factor, or identity for sparse segments."""
     if not profile.ready or not segment:
@@ -297,6 +319,9 @@ def factor_for_query(
     sql_text: str,
     predicted_time_ms: float,
 ) -> float:
+    shape_hash = query_shape_hash(sql_text)
+    if not any(item.shape_hash == shape_hash for item in profile.observations):
+        return 1.0
     return factor_for_segment(profile, query_segment(sql_text, predicted_time_ms))
 
 
