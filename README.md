@@ -129,6 +129,7 @@ PostgreSQL по-прежнему должен быть доступен по п�
 - [Эксперимент с балансировкой шаблонов](docs/chbenchmark-balanced-experiment.md)
 - [Калибровка прогноза для пользовательской БД](docs/database-calibration.md)
 - [Экспериментальная проверка калибровки](docs/calibration-experiment.md)
+- [Резервное копирование и восстановление](docs/backup-and-recovery.md)
 
 ## Следующие этапы
 
