@@ -7,7 +7,12 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from .dqn_features import DEFAULT_ACTION_ENCODING, encode_action
+from .dqn_features import (
+    collect_action_database_context,
+    DEFAULT_ACTION_ENCODING,
+    encode_action,
+    GENERIC_V3_ACTION_ENCODING,
+)
 from .index_actions import IndexAction, IndexActionKind
 
 
@@ -46,6 +51,7 @@ def merge_dqn_experience(
     output_path: str | Path,
     *,
     encoding_version: str = DEFAULT_ACTION_ENCODING,
+    connection=None,
 ) -> int:
     """Merge JSONL experience and deterministically re-encode every action."""
     sources = [Path(path) for path in input_paths]
@@ -60,6 +66,7 @@ def merge_dqn_experience(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     count = 0
+    context_cache: dict[tuple, dict] = {}
     with destination.open("w", encoding="utf-8", newline="\n") as target:
         for source in sources:
             with source.open(encoding="utf-8") as stream:
@@ -75,10 +82,30 @@ def merge_dqn_experience(
                         key_columns=tuple(data.get("key_columns") or ()),
                         include_columns=tuple(data.get("include_columns") or ()),
                     )
+                    database_context = record.get("action_database_context")
+                    if (
+                        encoding_version == GENERIC_V3_ACTION_ENCODING
+                        and database_context is None
+                    ):
+                        context_key = (
+                            action.kind,
+                            action.schema_name,
+                            action.table_name,
+                            action.key_columns,
+                            action.include_columns,
+                        )
+                        if context_key not in context_cache:
+                            context_cache[context_key] = collect_action_database_context(
+                                action,
+                                connection=connection,
+                            )
+                        database_context = context_cache[context_key]
+                        record["action_database_context"] = database_context
                     record["action_features"] = encode_action(
                         action,
                         record.get("sql_text"),
                         encoding_version=encoding_version,
+                        database_context=database_context,
                     )
                     record["action_encoding_version"] = encoding_version
                     target.write(json.dumps(record, ensure_ascii=False) + "\n")

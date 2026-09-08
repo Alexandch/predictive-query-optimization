@@ -11,7 +11,7 @@ class DatabaseSettingsTests(unittest.TestCase):
 
         self.assertEqual(
             settings.allowed_schemas,
-            frozenset({"aviation", "retail", "logistics", "chbenchmark"}),
+            frozenset({"aviation", "retail", "logistics", "chbenchmark", "pagila"}),
         )
 
     def test_reads_comma_separated_schema_allowlist(self):

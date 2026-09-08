@@ -7,7 +7,12 @@ from pathlib import Path
 
 from .config import DatabaseSettings
 from .dqn import dqn_action_encoding_version, predict_action_values
-from .dqn_features import build_query_state, encode_action
+from .dqn_features import (
+    build_query_state,
+    collect_action_database_context,
+    encode_action,
+    GENERIC_V3_ACTION_ENCODING,
+)
 from .index_actions import IndexAction, generate_index_actions
 
 
@@ -29,6 +34,7 @@ def recommend_index(
         sql_text,
         allowed_schemas=settings.allowed_schemas,
     )
+    encoding_version = dqn_action_encoding_version(model_path)
     values = predict_action_values(
         model_path,
         state,
@@ -36,7 +42,12 @@ def recommend_index(
             encode_action(
                 action,
                 sql_text,
-                encoding_version=dqn_action_encoding_version(model_path),
+                encoding_version=encoding_version,
+                database_context=(
+                    collect_action_database_context(action, settings=settings)
+                    if encoding_version == GENERIC_V3_ACTION_ENCODING
+                    else None
+                ),
             )
             for action in actions
         ],

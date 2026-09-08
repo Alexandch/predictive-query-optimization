@@ -10,7 +10,12 @@ import random
 from typing import Any
 
 from .dqn import dqn_action_encoding_version, predict_action_values
-from .dqn_features import LEGACY_ACTION_ENCODING, encode_action
+from .dqn_features import (
+    collect_action_database_context,
+    encode_action,
+    GENERIC_V3_ACTION_ENCODING,
+    LEGACY_ACTION_ENCODING,
+)
 from .index_actions import IndexAction, IndexActionKind
 from .training import GROUP_COLUMN, MODEL_FEATURES, TARGET_COLUMN
 
@@ -129,7 +134,13 @@ def evaluate_xgboost_control(
     return metrics
 
 
-def _control_action_features(record: dict[str, Any], model_encoding: str) -> list[float]:
+def _control_action_features(
+    record: dict[str, Any],
+    model_encoding: str,
+    *,
+    connection=None,
+    context_cache: dict[tuple, dict] | None = None,
+) -> list[float]:
     record_encoding = record.get(
         "action_encoding_version",
         LEGACY_ACTION_ENCODING,
@@ -145,10 +156,27 @@ def _control_action_features(record: dict[str, Any], model_encoding: str) -> lis
         key_columns=tuple(data.get("key_columns") or ()),
         include_columns=tuple(data.get("include_columns") or ()),
     )
+    database_context = record.get("action_database_context")
+    if database_context is None and model_encoding == GENERIC_V3_ACTION_ENCODING:
+        context_cache = context_cache if context_cache is not None else {}
+        context_key = (
+            action.kind,
+            action.schema_name,
+            action.table_name,
+            action.key_columns,
+            action.include_columns,
+        )
+        if context_key not in context_cache:
+            context_cache[context_key] = collect_action_database_context(
+                action,
+                connection=connection,
+            )
+        database_context = context_cache[context_key]
     return encode_action(
         action,
         record.get("sql_text"),
         encoding_version=model_encoding,
+        database_context=database_context,
     )
 
 
@@ -177,6 +205,15 @@ def evaluate_dqn_control(
     absolute_errors: list[float] = []
     randomizer = random.Random(seed)
     model_encoding = dqn_action_encoding_version(model_path)
+    context_connection = None
+    if model_encoding == GENERIC_V3_ACTION_ENCODING:
+        import psycopg
+
+        from .config import DatabaseSettings
+
+        settings = DatabaseSettings.from_env()
+        context_connection = psycopg.connect(**settings.connection_kwargs())
+    context_cache: dict[tuple, dict] = {}
     action_count = 0
     templates: set[str] = set()
     decision_rows: list[dict[str, Any]] = []
@@ -185,7 +222,12 @@ def evaluate_dqn_control(
             model_path,
             candidates[0]["state"],
             [
-                _control_action_features(candidate, model_encoding)
+                _control_action_features(
+                    candidate,
+                    model_encoding,
+                    connection=context_connection,
+                    context_cache=context_cache,
+                )
                 for candidate in candidates
             ],
         )
@@ -221,6 +263,8 @@ def evaluate_dqn_control(
                 "is_correct": predicted_index == actual_index,
             }
         )
+    if context_connection is not None:
+        context_connection.close()
     query_count = len(groups)
     metrics = ControlDQNMetrics(
         query_count=query_count,

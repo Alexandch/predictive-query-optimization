@@ -70,6 +70,7 @@ pqo-dqn-negative = "pqo.dqn_negative_cli:main"
 pqo-chbenchmark = "pqo.chbenchmark_cli:main"
 pqo-baseline = "pqo.baseline_cli:main"
 pqo-dqn-sample = "pqo.dqn_sample_cli:main"
+pqo-pagila = "pqo.pagila_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

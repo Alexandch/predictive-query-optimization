@@ -7,6 +7,7 @@ from pqo.analysis_service import analyze_query
 from pqo.config import DatabaseSettings
 from pqo.dataset import collect_sample
 from pqo.explain import collect_explain
+from pqo.dqn_features import collect_action_database_context
 from pqo.index_actions import IndexAction
 from pqo.index_environment import IndexExperimentEnvironment
 from pqo.query_generator import AviationQueryGenerator
@@ -26,6 +27,30 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(result.features.node_count, 1)
         self.assertGreaterEqual(result.features.estimated_total_cost, 0)
         self.assertIsNotNone(result.features.actual_total_time_ms)
+
+    def test_collects_action_specific_index_context(self):
+        action = IndexAction.create(
+            "aviation",
+            "flights",
+            ("flight_no", "scheduled_departure"),
+        )
+        context = collect_action_database_context(action)
+
+        self.assertGreater(context["target_relation_rows"], 0)
+        self.assertGreater(context["target_relation_size_bytes"], 0)
+        self.assertTrue(context["exact_index_exists"])
+        self.assertTrue(context["prefix_index_exists"])
+
+    def test_pagila_functions_resolve_isolated_schema(self):
+        import psycopg
+
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            result = connection.execute(
+                "SELECT count(*) FROM pagila.film_in_stock(1, 1)"
+            ).fetchone()[0]
+
+        self.assertGreaterEqual(result, 0)
 
     def test_collects_estimated_plan_without_executing_query(self):
         result = collect_explain(

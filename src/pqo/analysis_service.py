@@ -8,7 +8,12 @@ from pathlib import Path
 from .config import DatabaseSettings
 from .database_features import collect_database_features
 from .dqn import dqn_action_encoding_version, predict_action_values
-from .dqn_features import encode_action, encode_query_state
+from .dqn_features import (
+    collect_action_database_context,
+    encode_action,
+    encode_query_state,
+    GENERIC_V3_ACTION_ENCODING,
+)
 from .explain import collect_explain
 from .index_actions import IndexAction, generate_index_actions
 from .prediction import QueryTimePrediction
@@ -92,6 +97,7 @@ def analyze_query(
             normalized_sql,
             allowed_schemas=settings.allowed_schemas,
         )
+        encoding_version = dqn_action_encoding_version(dqn_model_path)
         values = predict_action_values(
             dqn_model_path,
             encode_query_state(feature_values),
@@ -99,7 +105,12 @@ def analyze_query(
                 encode_action(
                     action,
                     normalized_sql,
-                    encoding_version=dqn_action_encoding_version(dqn_model_path),
+                    encoding_version=encoding_version,
+                    database_context=(
+                        collect_action_database_context(action, settings=settings)
+                        if encoding_version == GENERIC_V3_ACTION_ENCODING
+                        else None
+                    ),
                 )
                 for action in actions
             ],

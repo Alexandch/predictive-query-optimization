@@ -5,15 +5,17 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import math
 from pathlib import Path
 import random
-import math
 from typing import Callable, Iterable
 
 from .dqn_features import (
     DEFAULT_ACTION_ENCODING,
     build_query_state,
+    collect_action_database_context,
     encode_action,
+    GENERIC_V3_ACTION_ENCODING,
 )
 from .config import DatabaseSettings
 from .index_actions import IndexAction, IndexActionKind, generate_index_actions
@@ -33,6 +35,7 @@ def collect_dqn_experience(
     progress: Callable[[int, int, str], None] | None = None,
     connection=None,
     allowed_schemas: frozenset[str] | None = None,
+    encoding_version: str = DEFAULT_ACTION_ENCODING,
 ) -> int:
     if count <= 0 or actions_per_query <= 0:
         raise ValueError("count and actions_per_query must be positive")
@@ -53,6 +56,7 @@ def collect_dqn_experience(
                 progress=progress,
                 connection=owned_connection,
                 allowed_schemas=effective_schemas,
+                encoding_version=encoding_version,
             )
 
     allowed_schemas = allowed_schemas or DatabaseSettings.from_env().allowed_schemas
@@ -103,6 +107,8 @@ def collect_dqn_experience(
                     state,
                     actions[0],
                     None,
+                    connection,
+                    encoding_version,
                 )
             ]
 
@@ -118,6 +124,8 @@ def collect_dqn_experience(
                         state,
                         action,
                         result,
+                        connection,
+                        encoding_version,
                     )
                 )
 
@@ -142,6 +150,7 @@ def collect_dqn_case_experience(
     progress: Callable[[int, int, str], None] | None = None,
     connection=None,
     allowed_schemas: frozenset[str] | None = None,
+    encoding_version: str = DEFAULT_ACTION_ENCODING,
 ) -> int:
     """Collect rewards for an explicit holdout workload, optionally testing all actions."""
     cases = list(cases)
@@ -165,6 +174,7 @@ def collect_dqn_case_experience(
                 progress=progress,
                 connection=owned_connection,
                 allowed_schemas=effective_schemas,
+                encoding_version=encoding_version,
             )
 
     allowed_schemas = allowed_schemas or DatabaseSettings.from_env().allowed_schemas
@@ -207,12 +217,30 @@ def collect_dqn_case_experience(
             )
             state = build_query_state(case.sql_text, connection=connection)
             records = [
-                _record(case.template_id, query_id, case.sql_text, state, actions[0], None)
+                _record(
+                    case.template_id,
+                    query_id,
+                    case.sql_text,
+                    state,
+                    actions[0],
+                    None,
+                    connection,
+                    encoding_version,
+                )
             ]
             for action in selected:
                 result = environment.evaluate(case.sql_text, action, connection=connection)
                 records.append(
-                    _record(case.template_id, query_id, case.sql_text, state, action, result)
+                    _record(
+                        case.template_id,
+                        query_id,
+                        case.sql_text,
+                        state,
+                        action,
+                        result,
+                        connection,
+                        encoding_version,
+                    )
                 )
             for record in records:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -223,7 +251,16 @@ def collect_dqn_case_experience(
     return existing_count + new_count
 
 
-def _record(template_id, query_id, sql_text, state, action: IndexAction, result):
+def _record(
+    template_id,
+    query_id,
+    sql_text,
+    state,
+    action: IndexAction,
+    result,
+    connection,
+    encoding_version: str,
+):
     action_data = asdict(action)
     if result is None:
         outcome = {
@@ -243,17 +280,30 @@ def _record(template_id, query_id, sql_text, state, action: IndexAction, result)
             "candidate_plan_cost": result.candidate_plan_cost,
             "candidate_uses_index": result.candidate_uses_index,
         }
-    return {
+    database_context = (
+        collect_action_database_context(action, connection=connection)
+        if encoding_version == GENERIC_V3_ACTION_ENCODING
+        else None
+    )
+    record = {
         "template_id": template_id,
         "query_id": query_id,
         "sql_text": sql_text,
         "state": state,
         "action": action_data,
-        "action_features": encode_action(action, sql_text),
-        "action_encoding_version": DEFAULT_ACTION_ENCODING,
+        "action_features": encode_action(
+            action,
+            sql_text,
+            encoding_version=encoding_version,
+            database_context=database_context,
+        ),
+        "action_encoding_version": encoding_version,
         "done": True,
         **outcome,
     }
+    if database_context is not None:
+        record["action_database_context"] = database_context
+    return record
 
 
 def refresh_action_features(
@@ -284,6 +334,7 @@ def refresh_action_features(
                 action,
                 record["sql_text"],
                 encoding_version=encoding_version,
+                database_context=record.get("action_database_context"),
             )
             record["action_encoding_version"] = encoding_version
             target.write(json.dumps(record, ensure_ascii=False) + "\n")

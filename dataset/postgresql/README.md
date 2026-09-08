@@ -98,3 +98,16 @@ SHA-256:
 запрещено объединять с обучающими данными. Протокол и результаты приведены в
 `docs/chbenchmark-experiment.md`.
 
+## Pagila development
+
+`pagila_training.csv` содержит 1 200 измерений, 295 уникальных SQL и 30 новых
+шаблонов. `pagila_dqn_experience_v3.jsonl` содержит 1 020 действий для 179
+решений; нормализованная копия находится в `pagila_dqn_training_v3.jsonl`.
+
+- `pagila_training.csv`: `948B6BDB47716632090DBA51E7B721B0701F9119AE7A81C2129EA23320BF7829`;
+- `pagila_dqn_experience_v3.jsonl`: `2E518745A48EEB3571397889707AA55259FF1F3D80974DF633061FB67A118EF4`;
+- `pagila_dqn_training_v3.jsonl`: `EB923CBF7A3E298596E12A6B8A86D9872353DEF9FAC7E94386475AD1EABF120B`.
+
+Это development-набор, а не новый запечатанный контроль. Первый цикл
+кандидатов отклонён; основные модели не перезаписаны.
+

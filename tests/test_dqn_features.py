@@ -2,8 +2,10 @@ import unittest
 
 from pqo.dqn_features import (
     ACTION_FEATURE_NAMES,
+    ACTION_V3_FEATURE_NAMES,
     COLUMN_HASH_BUCKETS,
     GENERIC_ACTION_ENCODING,
+    GENERIC_V3_ACTION_ENCODING,
     LEGACY_ACTION_ENCODING,
     encode_action,
 )
@@ -64,6 +66,33 @@ class DQNFeatureTests(unittest.TestCase):
         self.assertEqual(generic[14], 0.0)
         self.assertEqual(legacy[14], 1.0)
         self.assertNotEqual(generic, legacy)
+
+    def test_v3_marks_non_sargable_keys_and_adds_table_context(self):
+        action = IndexAction.create("retail", "products", ("price",))
+        direct = encode_action(
+            action,
+            "SELECT * FROM retail.products WHERE price >= 100",
+            encoding_version=GENERIC_V3_ACTION_ENCODING,
+            database_context={"target_relation_rows": 1000},
+        )
+        expression = encode_action(
+            action,
+            "SELECT * FROM retail.products WHERE ROUND(price) >= 100",
+            encoding_version=GENERIC_V3_ACTION_ENCODING,
+            database_context={
+                "target_relation_rows": 1000,
+                "target_relation_size_bytes": 8192,
+                "target_index_count": 3,
+                "exact_index_exists": True,
+                "prefix_index_exists": True,
+            },
+        )
+
+        self.assertEqual(len(expression), len(ACTION_V3_FEATURE_NAMES))
+        self.assertEqual(len(expression), len(ACTION_FEATURE_NAMES) + 7)
+        self.assertEqual(direct[-2:], [0.0, 0.0])
+        self.assertEqual(expression[-2:], [1.0, 1.0])
+        self.assertEqual(expression[-4:-2], [1.0, 1.0])
 
 
 if __name__ == "__main__":

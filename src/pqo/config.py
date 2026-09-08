@@ -20,7 +20,7 @@ class DatabaseSettings:
     connect_timeout: int = 5
     statement_timeout_ms: int = 30_000
     allowed_schemas: frozenset[str] = frozenset(
-        {"aviation", "retail", "logistics", "chbenchmark"}
+        {"aviation", "retail", "logistics", "chbenchmark", "pagila"}
     )
 
     def __post_init__(self) -> None:
