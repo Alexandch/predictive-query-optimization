@@ -10,7 +10,10 @@ from .dqn_experience import (
     collect_dqn_case_experience,
     normalize_unused_index_rewards,
 )
-from .dqn_negative_queries import DQNNegativeQueryGenerator
+from .dqn_negative_queries import (
+    DQNHardNegativeQueryGenerator,
+    DQNNegativeQueryGenerator,
+)
 
 
 def summarize(path: str | Path) -> dict[str, int | float]:
@@ -48,7 +51,18 @@ def main() -> int:
     parser.add_argument("count", type=int)
     parser.add_argument("output", type=Path)
     parser.add_argument("--seed", type=int, default=12001)
+    parser.add_argument(
+        "--workload",
+        choices=("v1", "hard-v2"),
+        default="v1",
+        help="Select the original workload or the disjoint hard-negative v2 workload",
+    )
     parser.add_argument("--actions-per-query", type=int, default=2)
+    parser.add_argument(
+        "--all-actions",
+        action="store_true",
+        help="Evaluate every generated index candidate instead of sampling",
+    )
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument(
         "--normalized-output",
@@ -57,11 +71,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    cases = DQNNegativeQueryGenerator(seed=args.seed).generate(args.count)
+    generator_class = (
+        DQNHardNegativeQueryGenerator
+        if args.workload == "hard-v2"
+        else DQNNegativeQueryGenerator
+    )
+    cases = generator_class(seed=args.seed).generate(args.count)
     collect_dqn_case_experience(
         cases,
         args.output,
-        actions_per_query=args.actions_per_query,
+        actions_per_query=None if args.all_actions else args.actions_per_query,
         repetitions=args.repetitions,
         seed=args.seed,
         allowed_schemas=frozenset({"aviation", "retail"}),

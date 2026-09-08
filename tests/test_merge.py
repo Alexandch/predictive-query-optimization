@@ -90,6 +90,20 @@ class DatasetMergeTests(unittest.TestCase):
                 )
             )
 
+    def test_missing_dqn_input_does_not_truncate_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid = root / "valid.jsonl"
+            missing = root / "missing.jsonl"
+            output = root / "existing.jsonl"
+            valid.write_text("{}\n", encoding="utf-8")
+            output.write_text("keep me\n", encoding="utf-8")
+
+            with self.assertRaises(FileNotFoundError):
+                merge_dqn_experience([valid, missing], output)
+
+            self.assertEqual(output.read_text(encoding="utf-8"), "keep me\n")
+
 
 if __name__ == "__main__":
     unittest.main()

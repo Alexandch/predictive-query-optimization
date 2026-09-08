@@ -54,6 +54,9 @@ def merge_dqn_experience(
     destination = Path(output_path)
     if destination.resolve() in {source.resolve() for source in sources}:
         raise ValueError("Output must not overwrite an input experience file")
+    missing = [str(source) for source in sources if not source.is_file()]
+    if missing:
+        raise FileNotFoundError(f"DQN input not found: {', '.join(missing)}")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     count = 0

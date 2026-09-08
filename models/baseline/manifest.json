@@ -1,0 +1,63 @@
+{
+  "format_version": 1,
+  "created_at_utc": "2026-09-08T10:44:05.272740+00:00",
+  "git_commit": "443bab3237088e3d209e979156a7d0de2d560355",
+  "files": {
+    "models/xgboost/xgboost_query_time.joblib": {
+      "size_bytes": 1375246,
+      "sha256": "737ACD01B6D52890CE3B3CB0C7179BA88B47481A05AA83CE35D09656C3A44065"
+    },
+    "models/xgboost/metrics.json": {
+      "size_bytes": 7706,
+      "sha256": "24093E13CB16B0108EEF67101246FFEBC9ADAAC46CC4FD39EF1B6E051DF45B44"
+    },
+    "models/dqn/dqn_index_advisor.pt": {
+      "size_bytes": 198977,
+      "sha256": "800BA0D35D1C6229D680BA90BFC3D532E39A007DB3B58BCFD667E803BE01152F"
+    },
+    "models/dqn/metrics.json": {
+      "size_bytes": 9410,
+      "sha256": "FEF2CDAF4EC3A2FC219BFB2FD5C28763EE03E12387F38B692782FF6463F0799A"
+    },
+    "dataset/postgresql/multidomain_training.csv": {
+      "size_bytes": 7636460,
+      "sha256": "E581A19D676D1119835C1496AC164C71ED14C49692FE534F12A69C4F91C4337D"
+    },
+    "dataset/postgresql/multidomain_dqn_augmented.jsonl": {
+      "size_bytes": 10082660,
+      "sha256": "F1074CBBAFD92169FAC6D622CFA30C00EC8FEC7F9F4632622712B2DD1F009D96"
+    },
+    "dataset/postgresql/production_control.csv": {
+      "size_bytes": 453216,
+      "sha256": "7C2D9E8EE72955462CFB1812E6E7F9AEDD9B4639EA12BAEFAE1F1F12851C65C3"
+    },
+    "dataset/postgresql/dqn_production_control.jsonl": {
+      "size_bytes": 175367,
+      "sha256": "BC2A5A79E65DFE88C76D6619DCE948008060AA703CAAAF84B684C9ABC35A0870"
+    },
+    "dataset/postgresql/retail_control.csv": {
+      "size_bytes": 108654,
+      "sha256": "5EEF579F25156B62CB21AB0258631CF744F82FF430B34E9ABAFB9EFDD613AF8F"
+    },
+    "dataset/postgresql/retail_dqn_control.jsonl": {
+      "size_bytes": 164582,
+      "sha256": "0946D18BF120B84D028312169864E68BB797809B3CBB5A081F10CF45F3A561A3"
+    },
+    "dataset/postgresql/logistics_zero_shot.csv": {
+      "size_bytes": 102365,
+      "sha256": "D9E54F56C95ADC9B77478C5863711C644218A73F128932D664ABD91A1A74CE2C"
+    },
+    "dataset/postgresql/logistics_dqn_zero_shot.jsonl": {
+      "size_bytes": 169258,
+      "sha256": "DEAEA35BCBB5BBF7CFED5CDBBC17FB2BF3A2F92340F538C50EB6513FBE589197"
+    },
+    "dataset/postgresql/chbenchmark_control.csv": {
+      "size_bytes": 159221,
+      "sha256": "187EE469FC7252C3508FBA0BCECBDBF3335FB90F101EE30B9D2DE040A433A1B2"
+    },
+    "dataset/postgresql/chbenchmark_dqn_control.jsonl": {
+      "size_bytes": 193940,
+      "sha256": "0A16DD5BE0191EEAA49F83C2CD149F5FF3EF31C6A23132597A5AED31910D5DD2"
+    }
+  }
+}

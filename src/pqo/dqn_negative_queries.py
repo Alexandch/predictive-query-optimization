@@ -213,3 +213,189 @@ class DQNNegativeQueryGenerator:
             WHERE COALESCE(delivered_at, shipped_at) - shipped_at >= INTERVAL '{days} days'
             GROUP BY shipment_status
         """)
+
+
+class DQNHardNegativeQueryGenerator:
+    """Second, disjoint training workload for difficult NOOP decisions.
+
+    The first negative workload mostly covers expressions on medium and large
+    tables.  This workload adds small tables, already-indexed columns, broad
+    predicates and multi-column candidates.  It deliberately uses only the
+    aviation and retail training schemas; sealed controls remain untouched.
+    """
+
+    TEMPLATE_IDS = (
+        "hard_negative_aviation_airport_timezone",
+        "hard_negative_aviation_aircraft_range_expression",
+        "hard_negative_aviation_existing_flight_prefix",
+        "hard_negative_aviation_route_concatenation",
+        "hard_negative_aviation_booking_date_cast",
+        "hard_negative_aviation_existing_booking_key",
+        "hard_negative_aviation_ticket_suffix",
+        "hard_negative_aviation_seat_number_expression",
+        "hard_negative_retail_warehouse_capacity_expression",
+        "hard_negative_retail_category_parent_presence",
+        "hard_negative_retail_existing_customer_email",
+        "hard_negative_retail_customer_id_modulo",
+        "hard_negative_retail_address_normalized_region",
+        "hard_negative_retail_product_rounded_price",
+        "hard_negative_retail_order_net_value_expression",
+        "hard_negative_retail_shipment_timestamp_expression",
+    )
+
+    def __init__(self, seed: int = 22001) -> None:
+        self.random = random.Random(seed)
+        self._templates: tuple[Callable[[], QueryCase], ...] = (
+            self._aviation_airport_timezone,
+            self._aviation_aircraft_range_expression,
+            self._aviation_existing_flight_prefix,
+            self._aviation_route_concatenation,
+            self._aviation_booking_date_cast,
+            self._aviation_existing_booking_key,
+            self._aviation_ticket_suffix,
+            self._aviation_seat_number_expression,
+            self._retail_warehouse_capacity_expression,
+            self._retail_category_parent_presence,
+            self._retail_existing_customer_email,
+            self._retail_customer_id_modulo,
+            self._retail_address_normalized_region,
+            self._retail_product_rounded_price,
+            self._retail_order_net_value_expression,
+            self._retail_shipment_timestamp_expression,
+        )
+
+    @property
+    def template_ids(self) -> tuple[str, ...]:
+        return self.TEMPLATE_IDS
+
+    def generate(self, count: int) -> list[QueryCase]:
+        if count <= 0:
+            raise ValueError("count must be greater than zero")
+        cases: list[QueryCase] = []
+        while len(cases) < count:
+            cycle = list(self._templates)
+            self.random.shuffle(cycle)
+            cases.extend(template() for template in cycle[: count - len(cases)])
+        return cases
+
+    def generate_one_per_template(self) -> list[QueryCase]:
+        return [template() for template in self._templates]
+
+    @staticmethod
+    def _case(template_id: str, sql_text: str) -> QueryCase:
+        return QueryCase(template_id, " ".join(sql_text.split()))
+
+    def _aviation_airport_timezone(self) -> QueryCase:
+        excluded = self.random.choice(("Europe/Moscow", "Europe/Samara", "Asia/Yekaterinburg"))
+        return self._case("hard_negative_aviation_airport_timezone", f"""
+            SELECT timezone, COUNT(*) AS airports
+            FROM aviation.airports WHERE timezone <> '{excluded}' GROUP BY timezone
+        """)
+
+    def _aviation_aircraft_range_expression(self) -> QueryCase:
+        threshold = self.random.choice((1500, 2500, 4000, 6000))
+        return self._case("hard_negative_aviation_aircraft_range_expression", f"""
+            SELECT model, range_km FROM aviation.aircrafts
+            WHERE ROUND(range_km / 100.0) * 100 >= {threshold}
+        """)
+
+    def _aviation_existing_flight_prefix(self) -> QueryCase:
+        prefix = self.random.choice(("PG", "SU", "S7"))
+        return self._case("hard_negative_aviation_existing_flight_prefix", f"""
+            SELECT flight_no, scheduled_departure, status FROM aviation.flights
+            WHERE flight_no LIKE '{prefix}%' ORDER BY scheduled_departure DESC
+        """)
+
+    def _aviation_route_concatenation(self) -> QueryCase:
+        suffix = self.random.choice(("SVO", "LED", "KZN", "DME"))
+        return self._case("hard_negative_aviation_route_concatenation", f"""
+            SELECT status, COUNT(*) AS flights FROM aviation.flights
+            WHERE departure_airport || '-' || arrival_airport LIKE '%-{suffix}'
+            GROUP BY status
+        """)
+
+    def _aviation_booking_date_cast(self) -> QueryCase:
+        month = self.random.randint(1, 12)
+        return self._case("hard_negative_aviation_booking_date_cast", f"""
+            SELECT COUNT(*) AS bookings, SUM(total_amount) AS revenue
+            FROM aviation.bookings WHERE EXTRACT(MONTH FROM book_date::date) <> {month}
+        """)
+
+    def _aviation_existing_booking_key(self) -> QueryCase:
+        prefix = self.random.choice(("0", "1", "A", "F"))
+        return self._case("hard_negative_aviation_existing_booking_key", f"""
+            SELECT book_ref, total_amount FROM aviation.bookings
+            WHERE book_ref LIKE '{prefix}%' ORDER BY book_ref
+        """)
+
+    def _aviation_ticket_suffix(self) -> QueryCase:
+        suffix = self.random.choice(("0", "1", "5", "9"))
+        return self._case("hard_negative_aviation_ticket_suffix", f"""
+            SELECT COUNT(*) AS tickets, COUNT(DISTINCT book_ref) AS bookings
+            FROM aviation.tickets WHERE RIGHT(ticket_no, 1) <> '{suffix}'
+        """)
+
+    def _aviation_seat_number_expression(self) -> QueryCase:
+        row_number = self.random.choice((5, 10, 15, 20))
+        return self._case("hard_negative_aviation_seat_number_expression", f"""
+            SELECT aircraft_code, COUNT(*) AS seats FROM aviation.seats
+            WHERE NULLIF(REGEXP_REPLACE(seat_no, '[^0-9]', '', 'g'), '')::integer >= {row_number}
+            GROUP BY aircraft_code
+        """)
+
+    def _retail_warehouse_capacity_expression(self) -> QueryCase:
+        threshold = self.random.choice((1000, 2500, 5000, 10000))
+        return self._case("hard_negative_retail_warehouse_capacity_expression", f"""
+            SELECT region, COUNT(*) AS warehouses FROM retail.warehouses
+            WHERE ROUND(capacity / 100.0) * 100 >= {threshold} GROUP BY region
+        """)
+
+    def _retail_category_parent_presence(self) -> QueryCase:
+        predicate = self.random.choice(("IS NULL", "IS NOT NULL"))
+        return self._case("hard_negative_retail_category_parent_presence", f"""
+            SELECT parent_category_id, COUNT(*) AS categories FROM retail.categories
+            WHERE parent_category_id {predicate} GROUP BY parent_category_id
+        """)
+
+    def _retail_existing_customer_email(self) -> QueryCase:
+        prefix = self.random.choice(("customer1", "customer2", "customer3", "customer4"))
+        return self._case("hard_negative_retail_existing_customer_email", f"""
+            SELECT customer_id, email, segment FROM retail.customers
+            WHERE email LIKE '{prefix}%' ORDER BY email
+        """)
+
+    def _retail_customer_id_modulo(self) -> QueryCase:
+        modulus = self.random.choice((2, 3, 5, 7))
+        return self._case("hard_negative_retail_customer_id_modulo", f"""
+            SELECT segment, COUNT(*) AS customers FROM retail.customers
+            WHERE customer_id % {modulus} <> 0 GROUP BY segment
+        """)
+
+    def _retail_address_normalized_region(self) -> QueryCase:
+        prefix = self.random.choice(("north", "south", "east", "west"))
+        return self._case("hard_negative_retail_address_normalized_region", f"""
+            SELECT city, COUNT(*) AS addresses FROM retail.addresses
+            WHERE LOWER(TRIM(region)) NOT LIKE '{prefix}%' GROUP BY city
+        """)
+
+    def _retail_product_rounded_price(self) -> QueryCase:
+        threshold = self.random.choice((25, 50, 100, 250))
+        return self._case("hard_negative_retail_product_rounded_price", f"""
+            SELECT brand, COUNT(*) AS products FROM retail.products
+            WHERE ROUND(price / 10.0) * 10 >= {threshold} GROUP BY brand
+        """)
+
+    def _retail_order_net_value_expression(self) -> QueryCase:
+        threshold = self.random.choice((25, 50, 100, 200))
+        return self._case("hard_negative_retail_order_net_value_expression", f"""
+            SELECT sales_channel, COUNT(*) AS orders FROM retail.customer_orders
+            WHERE total_amount - discount_amount >= {threshold} GROUP BY sales_channel
+        """)
+
+    def _retail_shipment_timestamp_expression(self) -> QueryCase:
+        days = self.random.choice((1, 2, 3, 5))
+        return self._case("hard_negative_retail_shipment_timestamp_expression", f"""
+            SELECT carrier, COUNT(*) AS shipments FROM retail.shipments
+            WHERE COALESCE(delivered_at, CURRENT_TIMESTAMP) - COALESCE(shipped_at, CURRENT_TIMESTAMP)
+                  >= INTERVAL '{days} days' GROUP BY carrier
+        """)

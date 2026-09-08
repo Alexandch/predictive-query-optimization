@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import math
 from typing import Callable, Iterable
 
 from .dqn_features import (
@@ -327,3 +328,50 @@ def normalize_unused_index_rewards(
             target.write(json.dumps(record, ensure_ascii=False) + "\n")
             count += 1
     return count
+
+
+def sample_dqn_query_groups(
+    source_path: str | Path,
+    output_path: str | Path,
+    *,
+    fraction: float,
+    seed: int = 42,
+) -> int:
+    """Sample complete query/action groups while retaining every template."""
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("fraction must be in the interval (0, 1]")
+    source = Path(source_path)
+    destination = Path(output_path)
+    if source.resolve() == destination.resolve():
+        raise ValueError("Sample output must not overwrite its source")
+
+    groups: dict[tuple[str, str], list[dict]] = {}
+    with source.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            key = (str(record["template_id"]), str(record["query_id"]))
+            groups.setdefault(key, []).append(record)
+    if not groups:
+        raise ValueError("Experience dataset is empty")
+
+    by_template: dict[str, list[tuple[str, str]]] = {}
+    for key in groups:
+        by_template.setdefault(key[0], []).append(key)
+    randomizer = random.Random(seed)
+    selected: set[tuple[str, str]] = set()
+    for keys in by_template.values():
+        count = max(1, math.ceil(len(keys) * fraction))
+        selected.update(randomizer.sample(sorted(keys), count))
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with destination.open("w", encoding="utf-8", newline="\n") as target:
+        for key, records in groups.items():
+            if key not in selected:
+                continue
+            for record in records:
+                target.write(json.dumps(record, ensure_ascii=False) + "\n")
+                written += 1
+    return written

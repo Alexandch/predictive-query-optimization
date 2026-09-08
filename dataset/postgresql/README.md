@@ -70,6 +70,12 @@ SHA-256 новых наборов:
 - `dqn_negative_experience.jsonl`: `35673C1A880799262CFE4033706AAB4D5E0F35FEDA223941CF288F08334F03BC`;
 - `multidomain_dqn_augmented.jsonl`: `F1074CBBAFD92169FAC6D622CFA30C00EC8FEC7F9F4632622712B2DD1F009D96`.
 
+Второй hard-negative набор `dqn_hard_negative_v2_experience.jsonl` содержит
+600 действий, 62 уникальных SQL и ещё 16 обучающих шаблонов. Его SHA-256:
+`DF8BFAA91B9936F085764B3A2BBA46046B1F3BD4E424DB13F178E4585351548E`.
+Он сохранён для следующего цикла признаков, но кандидаты `generic-v2` с добавкой
+25%, 50% и 100% отклонены внешним шлюзом; основная DQN не заменена.
+
 ## CH-benCHmark-совместимая предметная область
 
 Схема `chbenchmark` содержит 12 сущностей заказов, складов и поставщиков.

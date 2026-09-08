@@ -10,8 +10,8 @@
 - SHA-256: `737ACD01B6D52890CE3B3CB0C7179BA88B47481A05AA83CE35D09656C3A44065`;
 - преобразование цели: `identity`;
 - конфигурация: 500 деревьев, depth 6, learning rate 0,04;
-- parameter-holdout: R² 0,9710, MAE 13,81 мс, median AE 4,95 мс;
-- unseen-template stress: R² 0,8655, MAE 41,22 мс.
+- parameter-holdout: R² 0,9701, MAE 14,18 мс, median AE 5,29 мс;
+- unseen-template stress: R² 0,7761, MAE 47,75 мс.
 
 На независимом авиационном контроле MAE снизился с 637,76 до 602,60 мс, R²
 вырос с 0,376 до 0,442. На независимом розничном контроле MAE снизился с 320,83

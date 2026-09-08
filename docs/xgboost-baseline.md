@@ -7,8 +7,8 @@
 таблиц в двух доменах. Основная модель использует `identity`, 500 деревьев,
 `max_depth=6` и `learning_rate=0.04`.
 
-- parameter-holdout: R² 0,9710, MAE 13,81 мс;
-- unseen-template stress: R² 0,8655, MAE 41,22 мс;
+- parameter-holdout: R² 0,9701, MAE 14,18 мс;
+- unseen-template stress: R² 0,7761, MAE 47,75 мс;
 - независимая авиация: R² 0,442, MAE 602,60 мс;
 - независимая розница: R² −0,460, MAE 307,24 мс.
 
