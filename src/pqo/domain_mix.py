@@ -60,12 +60,211 @@ class DomainMixReport:
     selected_fraction: float
 
 
+@dataclass(frozen=True, slots=True)
+class DQNDomainMetric:
+    domain: str
+    query_count: int
+    recommendation_accuracy: float
+    mean_regret: float
+
+
+@dataclass(frozen=True, slots=True)
+class DQNMixRun:
+    fraction: float
+    seed: int
+    training_action_count: int
+    pagila_training_query_count: int
+    macro_accuracy: float
+    macro_mean_regret: float
+    domains: list[DQNDomainMetric]
+
+
+@dataclass(frozen=True, slots=True)
+class DQNFractionSummary:
+    fraction: float
+    mean_macro_accuracy: float
+    mean_macro_regret: float
+    worst_macro_regret: float
+
+
+@dataclass(frozen=True, slots=True)
+class DQNDomainMixReport:
+    selection_protocol: str
+    fractions: list[float]
+    seeds: list[int]
+    runs: list[DQNMixRun]
+    summaries: list[DQNFractionSummary]
+    selected_fraction: float
+
+
 def infer_development_domain(template_id: str) -> str:
     if template_id.startswith("pagila_"):
         return "pagila"
-    if template_id.startswith("retail_"):
+    if "retail" in template_id:
         return "retail"
     return "aviation"
+
+
+def evaluate_dqn_domain_mix(
+    combined_experience: str | Path,
+    output_directory: str | Path,
+    *,
+    fractions: Iterable[float] = (0.0, 0.1, 0.25, 0.5, 0.75, 1.0),
+    seeds: Iterable[int] = (21, 42, 84),
+    epochs: int = 700,
+    progress=None,
+) -> DQNDomainMixReport:
+    """Select a Pagila DQN fraction on disjoint development templates."""
+    import numpy as np
+
+    from .control_benchmark import evaluate_dqn_control
+    from .dqn import train_dqn
+    from .dqn_features import GENERIC_V3_ACTION_ENCODING, LEGACY_ACTION_ENCODING
+
+    fractions = sorted(set(float(value) for value in fractions))
+    seeds = list(dict.fromkeys(int(value) for value in seeds))
+    if not fractions or any(value < 0.0 or value > 1.0 for value in fractions):
+        raise ValueError("fractions must contain values in the interval [0, 1]")
+    if not seeds:
+        raise ValueError("at least one seed is required")
+    if epochs <= 0:
+        raise ValueError("epochs must be positive")
+    with Path(combined_experience).open(encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream if line.strip()]
+    encodings = {
+        record.get("action_encoding_version", LEGACY_ACTION_ENCODING)
+        for record in records
+    }
+    if encodings != {GENERIC_V3_ACTION_ENCODING}:
+        raise ValueError("DQN domain mix requires generic-v3 experience")
+    observed = {infer_development_domain(record[GROUP_COLUMN]) for record in records}
+    if observed != set(DEVELOPMENT_DOMAINS):
+        raise ValueError(f"expected development domains {DEVELOPMENT_DOMAINS}, got {sorted(observed)}")
+
+    destination = Path(output_directory)
+    destination.mkdir(parents=True, exist_ok=True)
+    runs: list[DQNMixRun] = []
+    total = len(seeds) * len(fractions)
+    position = 0
+    for seed in seeds:
+        outer_train, outer_holdout = _dqn_outer_template_split(records, seed)
+        for fraction in fractions:
+            position += 1
+            selected_train = _select_dqn_pagila_fraction(
+                outer_train,
+                fraction=fraction,
+                seed=seed,
+            )
+            run_name = f"fraction_{fraction:g}_seed_{seed}"
+            run_directory = destination / "runs" / run_name
+            training_path = run_directory / "training.jsonl"
+            _write_jsonl(selected_train, training_path)
+            if progress:
+                progress(position, total, fraction, seed, "training")
+            model_directory = run_directory / "model"
+            train_dqn(
+                training_path,
+                model_directory,
+                epochs=epochs,
+                batch_size=64,
+                learning_rate=1e-3,
+                seed=seed,
+                split_mode="unseen-template",
+                ranking_weight=0.10,
+                sampling_mode="group",
+            )
+            domain_metrics: list[DQNDomainMetric] = []
+            for domain in DEVELOPMENT_DOMAINS:
+                domain_records = [
+                    record
+                    for record in outer_holdout
+                    if infer_development_domain(record[GROUP_COLUMN]) == domain
+                ]
+                holdout_path = run_directory / f"{domain}_holdout.jsonl"
+                _write_jsonl(domain_records, holdout_path)
+                metrics = evaluate_dqn_control(
+                    holdout_path,
+                    model_directory / "dqn_index_advisor.pt",
+                    run_directory / f"{domain}_evaluation",
+                    seed=seed,
+                )
+                domain_metrics.append(
+                    DQNDomainMetric(
+                        domain=domain,
+                        query_count=metrics.query_count,
+                        recommendation_accuracy=metrics.recommendation_accuracy,
+                        mean_regret=metrics.mean_regret,
+                    )
+                )
+            pagila_queries = {
+                record["query_id"]
+                for record in selected_train
+                if infer_development_domain(record[GROUP_COLUMN]) == "pagila"
+            }
+            runs.append(
+                DQNMixRun(
+                    fraction=fraction,
+                    seed=seed,
+                    training_action_count=len(selected_train),
+                    pagila_training_query_count=len(pagila_queries),
+                    macro_accuracy=float(
+                        np.mean(
+                            [metric.recommendation_accuracy for metric in domain_metrics]
+                        )
+                    ),
+                    macro_mean_regret=float(
+                        np.mean([metric.mean_regret for metric in domain_metrics])
+                    ),
+                    domains=domain_metrics,
+                )
+            )
+            if progress:
+                progress(position, total, fraction, seed, "complete")
+
+    summaries: list[DQNFractionSummary] = []
+    for fraction in fractions:
+        matching = [run for run in runs if run.fraction == fraction]
+        summaries.append(
+            DQNFractionSummary(
+                fraction=fraction,
+                mean_macro_accuracy=float(
+                    np.mean([run.macro_accuracy for run in matching])
+                ),
+                mean_macro_regret=float(
+                    np.mean([run.macro_mean_regret for run in matching])
+                ),
+                worst_macro_regret=max(run.macro_mean_regret for run in matching),
+            )
+        )
+    selected = min(
+        summaries,
+        key=lambda item: (
+            item.mean_macro_regret,
+            item.worst_macro_regret,
+            -item.mean_macro_accuracy,
+            item.fraction,
+        ),
+    )
+    report = DQNDomainMixReport(
+        selection_protocol="development-only unseen-template macro mean regret",
+        fractions=fractions,
+        seeds=seeds,
+        runs=runs,
+        summaries=summaries,
+        selected_fraction=selected.fraction,
+    )
+    (destination / "dqn_domain_mix_report.json").write_text(
+        json.dumps(asdict(report), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _write_summary_csv(summaries, destination / "dqn_domain_mix_summary.csv")
+    final_records = _select_dqn_pagila_fraction(
+        records,
+        fraction=selected.fraction,
+        seed=seeds[0],
+    )
+    _write_jsonl(final_records, destination / "selected_dqn_training.jsonl")
+    return report
 
 
 def evaluate_xgboost_domain_mix(
@@ -303,10 +502,71 @@ def build_mixed_dataset(
     return len(mixed)
 
 
-def _write_summary_csv(summaries: list[FractionSummary], path: Path) -> None:
+def _write_summary_csv(
+    summaries: list[FractionSummary] | list[DQNFractionSummary],
+    path: Path,
+) -> None:
     import csv
 
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(asdict(summaries[0])))
         writer.writeheader()
         writer.writerows(asdict(summary) for summary in summaries)
+
+
+def _dqn_outer_template_split(
+    records: list[dict],
+    seed: int,
+) -> tuple[list[dict], list[dict]]:
+    holdout_templates: set[str] = set()
+    for domain in DEVELOPMENT_DOMAINS:
+        templates = sorted(
+            {
+                record[GROUP_COLUMN]
+                for record in records
+                if infer_development_domain(record[GROUP_COLUMN]) == domain
+            }
+        )
+        randomizer = random.Random(f"dqn-template-split:{seed}:{domain}")
+        randomizer.shuffle(templates)
+        holdout_count = max(1, math.ceil(len(templates) * 0.20))
+        holdout_templates.update(templates[:holdout_count])
+    return (
+        [record for record in records if record[GROUP_COLUMN] not in holdout_templates],
+        [record for record in records if record[GROUP_COLUMN] in holdout_templates],
+    )
+
+
+def _select_dqn_pagila_fraction(
+    records: list[dict],
+    *,
+    fraction: float,
+    seed: int,
+) -> list[dict]:
+    selected_query_ids: set[str] = {
+        record["query_id"]
+        for record in records
+        if infer_development_domain(record[GROUP_COLUMN]) != "pagila"
+    }
+    if fraction > 0.0:
+        query_ids_by_template: dict[str, list[str]] = {}
+        for record in records:
+            if infer_development_domain(record[GROUP_COLUMN]) != "pagila":
+                continue
+            values = query_ids_by_template.setdefault(record[GROUP_COLUMN], [])
+            if record["query_id"] not in values:
+                values.append(record["query_id"])
+        for template, query_ids in sorted(query_ids_by_template.items()):
+            query_ids = list(query_ids)
+            randomizer = random.Random(f"dqn-pagila-fraction:{seed}:{template}")
+            randomizer.shuffle(query_ids)
+            count = max(1, math.ceil(len(query_ids) * fraction))
+            selected_query_ids.update(query_ids[:count])
+    return [record for record in records if record["query_id"] in selected_query_ids]
+
+
+def _write_jsonl(records: list[dict], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        for record in records:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
