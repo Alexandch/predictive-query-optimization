@@ -75,9 +75,9 @@ accuracy до 69,58% и regret 0,0570, но ни один не улучшил о
 aviation до 48,15% / 0,0487 и CH accuracy до 38,46%, но ухудшил retail и
 logistics. Все DQN-кандидаты отклонены.
 
-Основные XGBoost и DQN не заменялись. Pagila остаётся development-доменом для
-следующего эксперимента с domain-balanced validation, а не частью объявленной
-основной модели.
+Основные XGBoost и DQN не заменялись. Последующий development-only подбор доли
+описан в `domain-balanced-validation.md`: лучшей оказалась примесь 10%, но
+финальный XGBoost-кандидат не прошёл внутренний unseen-template шлюз.
 
 ## Воспроизведение
 

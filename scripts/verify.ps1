@@ -11,6 +11,9 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 docker compose up -d --wait
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker Compose could not start PostgreSQL. Start Docker Desktop and retry."
+}
 $env:PQO_INTEGRATION_TESTS = "1"
 & $python -m pytest
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

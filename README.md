@@ -20,6 +20,8 @@ PostgreSQL. Проект извлекает структурные призна�
 - экспериментальное CH-расширение добавляет 800 измерений XGBoost и 300
   действий DQN; кандидаты честно отклонены после регрессии внешнего CH/logistics
   контроля, поэтому выбранные основные модели не перезаписаны;
+- development-only проверка доли Pagila выбрала 10% по macro-ошибке трёх
+  доменов, но XGBoost-кандидаты не прошли внутренний unseen-template шлюз;
 - на полностью исключённой из обучения схеме `logistics` XGBoost достигает
   `R² = 0,8636`, а DQN снижает mean regret с `0,2557` случайной стратегии до `0,0603`;
 - SQL, планы, прогнозы и рекомендации журналируются в служебной схеме `pqo`;
@@ -133,11 +135,12 @@ PostgreSQL по-прежнему должен быть доступен по п�
 - [Калибровка прогноза для пользовательской БД](docs/database-calibration.md)
 - [Экспериментальная проверка калибровки](docs/calibration-experiment.md)
 - [Development-эксперимент Pagila и generic-v3](docs/pagila-development-experiment.md)
+- [Domain-balanced подбор доли Pagila](docs/domain-balanced-validation.md)
 - [Резервное копирование и восстановление](docs/backup-and-recovery.md)
 
 ## Следующие этапы
 
-1. Domain-balanced validation и подбор доли Pagila без подглядывания в
+1. Domain-balanced validation для DQN `generic-v3` без подглядывания в
    запечатанные контроли.
 2. Последовательная multi-index среда DQN с действием `STOP` и бюджетом.
 3. Подготовка текста, диаграмм и приложений курсовой работы.
