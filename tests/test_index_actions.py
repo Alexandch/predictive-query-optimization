@@ -1,6 +1,12 @@
 import unittest
 
-from pqo.index_actions import IndexAction, IndexActionKind, generate_index_actions
+from pqo.index_actions import (
+    IndexAction,
+    IndexActionKind,
+    generate_index_actions,
+    generate_sequential_index_actions,
+)
+from pqo.index_environment import IndexExperimentEnvironment
 
 
 class IndexActionTests(unittest.TestCase):
@@ -33,6 +39,23 @@ class IndexActionTests(unittest.TestCase):
     def test_rejects_unsafe_identifier(self):
         with self.assertRaises(ValueError):
             IndexAction.create("aviation", "flights; DROP TABLE x", ("status",))
+
+    def test_sequential_actions_use_stop_instead_of_noop(self):
+        actions = generate_sequential_index_actions(
+            "SELECT * FROM aviation.flights WHERE status = 'Scheduled'"
+        )
+
+        self.assertEqual(actions[0], IndexAction.stop())
+        self.assertNotIn(IndexAction.noop(), actions)
+        self.assertTrue(any(action.kind is IndexActionKind.CREATE for action in actions))
+
+    def test_stop_rejects_index_fields(self):
+        with self.assertRaises(ValueError):
+            IndexAction(IndexActionKind.STOP, "aviation")
+
+    def test_one_step_environment_rejects_sequential_stop(self):
+        with self.assertRaisesRegex(ValueError, "only NOOP and CREATE"):
+            IndexExperimentEnvironment().evaluate("SELECT 1", IndexAction.stop())
 
     def test_does_not_generate_actions_outside_allowlist(self):
         actions = generate_index_actions(

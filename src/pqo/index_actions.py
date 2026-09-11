@@ -17,6 +17,7 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 class IndexActionKind(StrEnum):
     NOOP = "noop"
     CREATE = "create"
+    STOP = "stop"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,9 +31,9 @@ class IndexAction:
     include_columns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.kind is IndexActionKind.NOOP:
+        if self.kind in {IndexActionKind.NOOP, IndexActionKind.STOP}:
             if any((self.schema_name, self.table_name, self.key_columns, self.include_columns)):
-                raise ValueError("NOOP action cannot contain index fields")
+                raise ValueError(f"{self.kind.value.upper()} action cannot contain index fields")
             return
 
         if not self.schema_name or not self.table_name or not self.key_columns:
@@ -70,6 +71,10 @@ class IndexAction:
             key_columns,
             include_columns,
         )
+
+    @classmethod
+    def stop(cls) -> "IndexAction":
+        return cls(IndexActionKind.STOP)
 
 
 def generate_index_actions(
@@ -151,6 +156,21 @@ def generate_index_actions(
                 return tuple(actions)
 
     return tuple(actions)
+
+
+def generate_sequential_index_actions(
+    sql_text: str,
+    *,
+    allowed_schemas: frozenset[str] = frozenset({"aviation"}),
+    max_actions: int = 24,
+) -> tuple[IndexAction, ...]:
+    """Return STOP followed by the same safe CREATE candidates as one-step mode."""
+    actions = generate_index_actions(
+        sql_text,
+        allowed_schemas=allowed_schemas,
+        max_actions=max_actions,
+    )
+    return (IndexAction.stop(), *actions[1:])
 
 
 def _predicate_nodes(tree: exp.Expression):

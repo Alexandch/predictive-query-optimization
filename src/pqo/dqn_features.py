@@ -41,6 +41,7 @@ AVIATION_TABLES = (
 LEGACY_ACTION_ENCODING = "aviation-v1"
 GENERIC_ACTION_ENCODING = "generic-v2"
 GENERIC_V3_ACTION_ENCODING = "generic-v3"
+SEQUENTIAL_ACTION_ENCODING = "generic-v4-sequential"
 DEFAULT_ACTION_ENCODING = GENERIC_ACTION_ENCODING
 TABLE_HASH_BUCKETS = len(AVIATION_TABLES) - 1
 COLUMN_HASH_BUCKETS = 24
@@ -88,6 +89,19 @@ ACTION_V3_FEATURE_NAMES = (
     "prefix_index_exists",
     "non_sargable_key_count",
     "leading_key_non_sargable",
+)
+SEQUENTIAL_ACTION_FEATURE_NAMES = (
+    *ACTION_V3_FEATURE_NAMES,
+    "is_stop",
+)
+SEQUENTIAL_STATE_FEATURE_NAMES = (
+    "selected_index_count_ratio",
+    "remaining_budget_ratio",
+    "cumulative_improvement_ratio",
+    "current_to_baseline_time_ratio",
+    "remaining_step_ratio",
+    "selected_key_column_count_log",
+    "selected_include_column_count_log",
 )
 
 
@@ -143,7 +157,11 @@ def encode_action(
         if table_name not in AVIATION_TABLES:
             table_name = "other"
         tables = [float(table_name == name) for name in AVIATION_TABLES]
-    elif encoding_version in {GENERIC_ACTION_ENCODING, GENERIC_V3_ACTION_ENCODING}:
+    elif encoding_version in {
+        GENERIC_ACTION_ENCODING,
+        GENERIC_V3_ACTION_ENCODING,
+        SEQUENTIAL_ACTION_ENCODING,
+    }:
         tables = _hashed_table(action.table_name)
         tables.append(float(action.schema_name == "public"))
     else:
@@ -152,7 +170,7 @@ def encode_action(
     includes = _hashed_columns(action.include_columns)
     context = _action_query_context(action, sql_text)
     result = [*prefix, *tables, *keys, *includes, *context]
-    if encoding_version == GENERIC_V3_ACTION_ENCODING:
+    if encoding_version in {GENERIC_V3_ACTION_ENCODING, SEQUENTIAL_ACTION_ENCODING}:
         result.extend(
             _optimizer_action_context(
                 action,
@@ -160,6 +178,8 @@ def encode_action(
                 database_context or {},
             )
         )
+    if encoding_version == SEQUENTIAL_ACTION_ENCODING:
+        result.append(float(action.kind is IndexActionKind.STOP))
     return result
 
 
@@ -170,6 +190,8 @@ def action_feature_names(encoding_version: str) -> tuple[str, ...]:
         return ACTION_FEATURE_NAMES
     if encoding_version == GENERIC_V3_ACTION_ENCODING:
         return ACTION_V3_FEATURE_NAMES
+    if encoding_version == SEQUENTIAL_ACTION_ENCODING:
+        return SEQUENTIAL_ACTION_FEATURE_NAMES
     raise ValueError(f"Unsupported action encoding: {encoding_version}")
 
 
@@ -177,7 +199,7 @@ def _action_query_context(
     action: IndexAction,
     sql_text: str | None,
 ) -> list[float]:
-    if action.kind is IndexActionKind.NOOP or not sql_text:
+    if action.kind is not IndexActionKind.CREATE or not sql_text:
         return [0.0] * 8
 
     from sqlglot import exp, parse_one
@@ -266,7 +288,7 @@ def collect_action_database_context(
         "exact_index_exists": False,
         "prefix_index_exists": False,
     }
-    if action.kind is IndexActionKind.NOOP:
+    if action.kind is not IndexActionKind.CREATE:
         return empty
 
     import psycopg
@@ -324,7 +346,7 @@ def _optimizer_action_context(
     sql_text: str | None,
     database_context: dict[str, int | float | bool],
 ) -> list[float]:
-    if action.kind is IndexActionKind.NOOP:
+    if action.kind is not IndexActionKind.CREATE:
         return [0.0] * 7
     non_sargable = _non_sargable_action_columns(action, sql_text)
     return [
@@ -396,3 +418,21 @@ def _non_sargable_action_columns(
         for column, flags in occurrences.items()
         if flags and all(flags)
     }
+
+
+def encode_sequential_state(base_state: list[float], episode_state) -> list[float]:
+    """Append bounded episode context to the ordinary query-state vector."""
+    max_steps = max(1, int(episode_state.max_steps))
+    budget = max(1, int(episode_state.storage_budget_bytes))
+    baseline = max(0.001, float(episode_state.baseline_time_ms))
+    selected = episode_state.selected_actions
+    episode_features = [
+        len(selected) / max_steps,
+        max(0.0, episode_state.remaining_budget_bytes / budget),
+        float(episode_state.cumulative_improvement_ratio),
+        max(0.0, float(episode_state.current_time_ms) / baseline),
+        max(0.0, (max_steps - episode_state.step) / max_steps),
+        math.log1p(sum(len(action.key_columns) for action in selected)),
+        math.log1p(sum(len(action.include_columns) for action in selected)),
+    ]
+    return [*base_state, *episode_features]

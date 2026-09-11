@@ -73,6 +73,7 @@ pqo-dqn-sample = "pqo.dqn_sample_cli:main"
 pqo-pagila = "pqo.pagila_cli:main"
 pqo-domain-mix = "pqo.domain_mix_cli:main"
 pqo-dqn-domain-mix = "pqo.dqn_domain_mix_cli:main"
+pqo-sequential-collect = "pqo.sequential_collect_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

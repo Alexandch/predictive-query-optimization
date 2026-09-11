@@ -48,6 +48,8 @@ class IndexExperimentEnvironment:
         connection=None,
     ) -> IndexExperimentResult:
         query = _assert_read_only_query(sql_text)
+        if action.kind not in {IndexActionKind.NOOP, IndexActionKind.CREATE}:
+            raise ValueError("One-step environment supports only NOOP and CREATE")
         if action.kind is IndexActionKind.CREATE:
             if action.schema_name not in self.allowed_schemas:
                 raise ValueError("Index action targets a schema outside the allowlist")

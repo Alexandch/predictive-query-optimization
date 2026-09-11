@@ -11,6 +11,7 @@ from pqo.dqn_features import collect_action_database_context
 from pqo.index_actions import IndexAction
 from pqo.index_environment import IndexExperimentEnvironment
 from pqo.query_generator import AviationQueryGenerator
+from pqo.sequential_environment import SequentialIndexEnvironment
 
 
 @unittest.skipUnless(
@@ -165,6 +166,69 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
                 """
             ).fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_sequential_episode_stops_and_rolls_back_all_indexes(self):
+        import psycopg
+
+        settings = DatabaseSettings.from_env()
+        environment = SequentialIndexEnvironment(
+            settings,
+            repetitions=1,
+            max_steps=2,
+            storage_budget_bytes=16 * 1024 * 1024,
+        )
+        query = (
+            "SELECT flight_id FROM aviation.flights "
+            "WHERE departure_airport = 'MSQ' AND status = 'Scheduled'"
+        )
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            with environment.episode(query, connection=connection) as episode:
+                action = next(
+                    candidate
+                    for candidate in episode.available_actions
+                    if candidate.kind.value == "create"
+                )
+                transition = episode.step(action)
+                self.assertTrue(transition.accepted)
+                self.assertEqual(transition.next_state.step, 1)
+                self.assertGreater(transition.index_size_bytes, 0)
+                self.assertTrue(transition.candidate_uses_created_index)
+                self.assertTrue(transition.candidate_uses_selected_index)
+                live_count = connection.execute(
+                    "SELECT count(*) FROM pg_indexes "
+                    "WHERE schemaname = 'aviation' AND indexname LIKE 'pqo_seq_%'"
+                ).fetchone()[0]
+                self.assertEqual(live_count, 1)
+                stopped = episode.step(IndexAction.stop())
+                self.assertTrue(stopped.next_state.done)
+                self.assertEqual(stopped.terminal_reason, "stop")
+                self.assertEqual(episode.available_actions, ())
+
+            remaining = connection.execute(
+                "SELECT count(*) FROM pg_indexes "
+                "WHERE schemaname = 'aviation' AND indexname LIKE 'pqo_seq_%'"
+            ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_sequential_episode_rejects_index_outside_budget(self):
+        environment = SequentialIndexEnvironment(
+            repetitions=1,
+            max_steps=2,
+            storage_budget_bytes=1,
+        )
+        query = "SELECT flight_id FROM aviation.flights WHERE status = 'Scheduled'"
+        with environment.episode(query) as episode:
+            action = next(
+                candidate
+                for candidate in episode.available_actions
+                if candidate.kind.value == "create"
+            )
+            transition = episode.step(action)
+
+            self.assertFalse(transition.accepted)
+            self.assertEqual(transition.terminal_reason, "budget_exceeded")
+            self.assertEqual(transition.next_state, transition.previous_state)
+            self.assertEqual(transition.reward, -0.10)
 
     def test_combined_analysis_is_persisted(self):
         import psycopg

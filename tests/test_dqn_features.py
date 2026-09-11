@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from pqo.dqn_features import (
     ACTION_FEATURE_NAMES,
@@ -7,7 +8,11 @@ from pqo.dqn_features import (
     GENERIC_ACTION_ENCODING,
     GENERIC_V3_ACTION_ENCODING,
     LEGACY_ACTION_ENCODING,
+    SEQUENTIAL_ACTION_ENCODING,
+    SEQUENTIAL_ACTION_FEATURE_NAMES,
+    SEQUENTIAL_STATE_FEATURE_NAMES,
     encode_action,
+    encode_sequential_state,
 )
 from pqo.index_actions import IndexAction
 
@@ -93,6 +98,41 @@ class DQNFeatureTests(unittest.TestCase):
         self.assertEqual(direct[-2:], [0.0, 0.0])
         self.assertEqual(expression[-2:], [1.0, 1.0])
         self.assertEqual(expression[-4:-2], [1.0, 1.0])
+
+    def test_sequential_encoding_distinguishes_stop(self):
+        stop = encode_action(
+            IndexAction.stop(),
+            encoding_version=SEQUENTIAL_ACTION_ENCODING,
+        )
+        create = encode_action(
+            IndexAction.create("aviation", "flights", ("status",)),
+            "SELECT * FROM aviation.flights WHERE status = 'Scheduled'",
+            encoding_version=SEQUENTIAL_ACTION_ENCODING,
+        )
+
+        self.assertEqual(len(stop), len(SEQUENTIAL_ACTION_FEATURE_NAMES))
+        self.assertEqual(stop[-1], 1.0)
+        self.assertEqual(create[-1], 0.0)
+
+    def test_sequential_state_includes_budget_and_selected_indexes(self):
+        state = SimpleNamespace(
+            max_steps=3,
+            storage_budget_bytes=1000,
+            remaining_budget_bytes=750,
+            baseline_time_ms=100.0,
+            current_time_ms=60.0,
+            cumulative_improvement_ratio=0.4,
+            step=1,
+            selected_actions=(
+                IndexAction.create("aviation", "flights", ("status",)),
+            ),
+        )
+        encoded = encode_sequential_state([1.0, 2.0], state)
+
+        self.assertEqual(len(encoded), 2 + len(SEQUENTIAL_STATE_FEATURE_NAMES))
+        self.assertEqual(encoded[2], 1 / 3)
+        self.assertEqual(encoded[3], 0.75)
+        self.assertEqual(encoded[5], 0.6)
 
 
 if __name__ == "__main__":
