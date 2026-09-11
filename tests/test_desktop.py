@@ -8,9 +8,12 @@ from PyQt6.QtWidgets import QApplication
 from pqo.desktop import (
     DEFAULT_DQN_MODEL,
     DEFAULT_DQN_STRESS_METRICS,
+    DEFAULT_SEQUENTIAL_DQN_MODEL,
     DEFAULT_XGB_MODEL,
     MainWindow,
+    _format_index_action,
 )
+from pqo.index_actions import IndexAction
 
 
 class DesktopTests(unittest.TestCase):
@@ -30,6 +33,7 @@ class DesktopTests(unittest.TestCase):
             self.assertIn("SELECT", window.sql_editor.toPlainText())
             self.assertIsNotNone(window.persist_check)
             self.assertIsNotNone(window.calibrate_button)
+            self.assertTrue(window.deep_analyze_button.isEnabled())
             self.assertFalse(window.use_calibration_check.isChecked())
         finally:
             window.close()
@@ -37,7 +41,19 @@ class DesktopTests(unittest.TestCase):
     def test_default_models_are_part_of_repository(self):
         self.assertTrue(DEFAULT_XGB_MODEL.is_file())
         self.assertTrue(DEFAULT_DQN_MODEL.is_file())
+        self.assertTrue(DEFAULT_SEQUENTIAL_DQN_MODEL.is_file())
         self.assertTrue(DEFAULT_DQN_STRESS_METRICS.is_file())
+
+    def test_sequential_index_ddl_is_readable(self):
+        action = IndexAction.create(
+            "public", "orders", ("customer_id",), ("created_at",)
+        )
+
+        self.assertEqual(
+            _format_index_action(action),
+            'CREATE INDEX ON "public"."orders" ("customer_id") '
+            'INCLUDE ("created_at");',
+        )
 
 
 if __name__ == "__main__":

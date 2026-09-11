@@ -11,6 +11,7 @@ from .chbenchmark_control_queries import CHBenchmarkControlQueryGenerator
 from .logistics_control_queries import LogisticsControlQueryGenerator
 from .sequential_dqn import evaluate_sequential_dqn_control
 from .sequential_experience import collect_sequential_experience
+from .sequential_rollout import evaluate_sequential_rollout
 
 
 def main() -> int:
@@ -30,11 +31,34 @@ def main() -> int:
     evaluate.add_argument("model", type=Path)
     evaluate.add_argument("output_dir", type=Path)
     evaluate.add_argument("--seed", type=int, default=42)
+    rollout = commands.add_parser("rollout")
+    rollout.add_argument("domain", choices=("logistics", "chbenchmark"))
+    rollout.add_argument("experience", type=Path)
+    rollout.add_argument("model", type=Path)
+    rollout.add_argument("output_dir", type=Path)
+    rollout.add_argument("--seed", type=int, default=42)
+    rollout.add_argument("--repetitions", type=int, default=1)
+    rollout.add_argument("--max-steps", type=int, default=2)
+    rollout.add_argument("--budget-mb", type=float, default=64.0)
     args = parser.parse_args()
 
     if args.command == "evaluate":
         metrics = evaluate_sequential_dqn_control(
             args.experience, args.model, args.output_dir, seed=args.seed
+        )
+        print(json.dumps(asdict(metrics), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "rollout":
+        metrics = evaluate_sequential_rollout(
+            args.experience,
+            args.model,
+            args.output_dir,
+            allowed_schemas=frozenset({args.domain}),
+            repetitions=args.repetitions,
+            max_steps=args.max_steps,
+            storage_budget_bytes=round(args.budget_mb * 1024 * 1024),
+            random_seed=args.seed,
         )
         print(json.dumps(asdict(metrics), ensure_ascii=False, indent=2))
         return 0

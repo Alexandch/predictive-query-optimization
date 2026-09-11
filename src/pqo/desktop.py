@@ -57,6 +57,10 @@ from .experiments import (
 )
 from .history import check_database_connection, load_analysis_history
 from .index_actions import IndexActionKind
+from .sequential_recommendation import (
+    SequentialRecommendationPlan,
+    recommend_sequential_indexes,
+)
 from .training import train_xgboost
 
 
@@ -66,6 +70,9 @@ ARTIFACT_ROOT = WRITABLE_ROOT / "artifacts"
 APP_ICON = PROJECT_ROOT / "assets" / "pqo.ico"
 DEFAULT_XGB_MODEL = PROJECT_ROOT / "models" / "xgboost" / "xgboost_query_time.joblib"
 DEFAULT_DQN_MODEL = PROJECT_ROOT / "models" / "dqn" / "dqn_index_advisor.pt"
+DEFAULT_SEQUENTIAL_DQN_MODEL = (
+    PROJECT_ROOT / "models" / "sequential_dqn" / "sequential_dqn_index_advisor.pt"
+)
 DEFAULT_DATASET = PROJECT_ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"
 DEFAULT_DQN_DATASET = (
     PROJECT_ROOT / "dataset" / "postgresql" / "multidomain_dqn_augmented.jsonl"
@@ -101,6 +108,15 @@ class Worker(QRunnable):
             self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
         else:
             self.signals.succeeded.emit(result)
+
+
+def _format_index_action(action) -> str:
+    keys = ", ".join(f'"{name}"' for name in action.key_columns)
+    ddl = f'CREATE INDEX ON "{action.schema_name}"."{action.table_name}" ({keys})'
+    if action.include_columns:
+        includes = ", ".join(f'"{name}"' for name in action.include_columns)
+        ddl += f" INCLUDE ({includes})"
+    return ddl + ";"
 
 
 class MainWindow(QMainWindow):
@@ -153,6 +169,13 @@ class MainWindow(QMainWindow):
         self.analyze_button.setObjectName("primaryButton")
         self.analyze_button.clicked.connect(self._start_analysis)
         controls.addWidget(self.analyze_button)
+        self.deep_analyze_button = QPushButton("Глубокий анализ индексов")
+        self.deep_analyze_button.setToolTip(
+            "Выполняет SELECT через EXPLAIN ANALYZE и проверяет до двух "
+            "временных индексов с полным откатом."
+        )
+        self.deep_analyze_button.clicked.connect(self._start_sequential_analysis)
+        controls.addWidget(self.deep_analyze_button)
         self.persist_check = QCheckBox("Сохранять в историю pqo")
         self.persist_check.setChecked(
             str(self.preferences.value("persist_analysis", "false")).lower()
@@ -196,11 +219,11 @@ class MainWindow(QMainWindow):
         self.node_value = self._metric_card(metrics, 3, "Корневой узел", "—")
         layout.addLayout(metrics)
 
-        recommendation_group = QGroupBox("Рекомендация DQN")
+        recommendation_group = QGroupBox("Рекомендации по индексам")
         recommendation_layout = QVBoxLayout(recommendation_group)
         self.recommendation_text = QPlainTextEdit()
         self.recommendation_text.setReadOnly(True)
-        self.recommendation_text.setMaximumHeight(150)
+        self.recommendation_text.setMaximumHeight(240)
         self.recommendation_text.setPlaceholderText(
             "Рекомендация появится после анализа достаточно долгого запроса."
         )
@@ -283,6 +306,13 @@ class MainWindow(QMainWindow):
         self.dqn_model_edit = QLineEdit(
             str(self.preferences.value("dqn_model", str(DEFAULT_DQN_MODEL)))
         )
+        self.sequential_dqn_model_edit = QLineEdit(
+            str(
+                self.preferences.value(
+                    "sequential_dqn_model", str(DEFAULT_SEQUENTIAL_DQN_MODEL)
+                )
+            )
+        )
         form.addRow("Хост", self.host_edit)
         form.addRow("Порт", self.port_spin)
         form.addRow("База данных", self.database_edit)
@@ -291,6 +321,10 @@ class MainWindow(QMainWindow):
         form.addRow("Пароль", self.password_edit)
         form.addRow("Модель XGBoost", self._path_row(self.xgb_model_edit, False))
         form.addRow("Модель DQN", self._path_row(self.dqn_model_edit, False))
+        form.addRow(
+            "Последовательная DQN",
+            self._path_row(self.sequential_dqn_model_edit, False),
+        )
         layout.addLayout(form)
 
         note = QLabel(
@@ -614,6 +648,98 @@ class MainWindow(QMainWindow):
             f"Анализ завершён · запись #{analysis.query_run_id or 'не сохранена'}"
         )
 
+    def _start_sequential_analysis(self) -> None:
+        sql_text = self.sql_editor.toPlainText().strip()
+        if not sql_text:
+            QMessageBox.warning(self, "Нет SQL", "Введите SQL-запрос.")
+            return
+        model_path = Path(self.sequential_dqn_model_edit.text())
+        if not model_path.is_file():
+            QMessageBox.warning(
+                self,
+                "Модель не найдена",
+                "Проверьте путь к последовательной DQN в настройках.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Запустить глубокий анализ?",
+            "PostgreSQL реально выполнит SELECT через EXPLAIN ANALYZE и временно "
+            "создаст до двух пробных индексов. Все изменения будут полностью "
+            "откачены. Для тяжёлого запроса операция может занять время.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.deep_analyze_button.setEnabled(False)
+        self.recommendation_text.setPlainText(
+            "Проверяю кандидаты в изолированной транзакции…"
+        )
+        self.statusBar().showMessage("Глубокий анализ индексов…")
+        worker = Worker(
+            recommend_sequential_indexes,
+            sql_text,
+            model_path,
+            self._database_settings(),
+            max_steps=2,
+            storage_budget_bytes=64 * 1024 * 1024,
+            repetitions=1,
+        )
+        worker.signals.succeeded.connect(self._show_sequential_analysis)
+        worker.signals.failed.connect(
+            lambda message: self._task_failed(message, self.deep_analyze_button)
+        )
+        self.thread_pool.start(worker)
+
+    def _show_sequential_analysis(
+        self, plan: SequentialRecommendationPlan
+    ) -> None:
+        self.deep_analyze_button.setEnabled(True)
+        if not plan.steps:
+            reasons = {
+                "model_stop": "модель не нашла достаточно надёжного улучшения",
+                "no_candidates": "для запроса не сформированы индексные кандидаты",
+                "measured_not_beneficial": (
+                    "лучший кандидат проверен, но не дал полезного результата"
+                ),
+                "budget_exceeded": "кандидат превысил лимит 64 МиБ",
+            }
+            reason = reasons.get(plan.terminal_reason, plan.terminal_reason)
+            self.recommendation_text.setPlainText(
+                "Создавать новые индексы не рекомендуется.\n"
+                f"Причина: {reason}.\n"
+                f"Измеренное исходное время: {plan.baseline_time_ms:.2f} мс."
+            )
+        else:
+            lines = [
+                f"Проверенный план: {len(plan.steps)} индекс(а/ов)",
+                (
+                    f"Время: {plan.baseline_time_ms:.2f} → "
+                    f"{plan.final_time_ms:.2f} мс "
+                    f"({plan.measured_improvement_ratio:+.1%})"
+                ),
+            ]
+            for number, step in enumerate(plan.steps, start=1):
+                lines.extend(
+                    (
+                        "",
+                        f"{number}. {_format_index_action(step.action)}",
+                        (
+                            f"   Q={step.predicted_q:.4f}; reward="
+                            f"{step.measured_reward:+.4f}; размер="
+                            f"{step.index_size_bytes / 1024 / 1024:.2f} МиБ"
+                        ),
+                    )
+                )
+            lines.extend(
+                (
+                    "",
+                    "Индексы были только проверены и откачены; команда выше "
+                    "сама базу не изменяет.",
+                )
+            )
+            self.recommendation_text.setPlainText("\n".join(lines))
+        self.statusBar().showMessage("Глубокий анализ завершён; изменения откачены")
+
     def _refresh_history(self) -> None:
         self.statusBar().showMessage("Загрузка истории…")
         worker = Worker(load_analysis_history, self._database_settings(), limit=200)
@@ -788,6 +914,9 @@ class MainWindow(QMainWindow):
         )
         self.preferences.setValue("xgb_model", self.xgb_model_edit.text().strip())
         self.preferences.setValue("dqn_model", self.dqn_model_edit.text().strip())
+        self.preferences.setValue(
+            "sequential_dqn_model", self.sequential_dqn_model_edit.text().strip()
+        )
         self.preferences.setValue("threshold_ms", self.threshold_spin.value())
         self.preferences.setValue("persist_analysis", self.persist_check.isChecked())
         self.preferences.setValue(
@@ -976,7 +1105,12 @@ def main() -> int:
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
         smoke_log = ARTIFACT_ROOT / "smoke-test.log"
         smoke_log.write_text("Starting resource check...", encoding="utf-8")
-        required = (DEFAULT_XGB_MODEL, DEFAULT_DQN_MODEL, DEFAULT_DATASET)
+        required = (
+            DEFAULT_XGB_MODEL,
+            DEFAULT_DQN_MODEL,
+            DEFAULT_SEQUENTIAL_DQN_MODEL,
+            DEFAULT_DATASET,
+        )
         if not all(path.is_file() for path in required):
             missing = [str(path) for path in required if not path.is_file()]
             smoke_log.write_text(
@@ -987,6 +1121,7 @@ def main() -> int:
         try:
             smoke_log.write_text("Loading Python dependencies...", encoding="utf-8")
             import joblib
+            import torch
 
             from .dqn import dqn_action_encoding_version
             from .sql_features import extract_sql_features
@@ -1011,13 +1146,25 @@ def main() -> int:
                 return 3
             smoke_log.write_text("Loading DQN artifact...", encoding="utf-8")
             dqn_action_encoding_version(DEFAULT_DQN_MODEL)
+            sequential_artifact = torch.load(
+                DEFAULT_SEQUENTIAL_DQN_MODEL,
+                map_location="cpu",
+                weights_only=True,
+            )
+            if sequential_artifact.get("training_kind") != (
+                "offline-sequential-bellman-dqn"
+            ):
+                smoke_log.write_text(
+                    "Sequential DQN artifact has an invalid type.", encoding="utf-8"
+                )
+                return 3
             smoke_log.write_text("Constructing the main window...", encoding="utf-8")
             MainWindow()
         except Exception:
             smoke_log.write_text(traceback.format_exc(), encoding="utf-8")
             return 3
         smoke_log.write_text(
-            "OK: GUI, PostgreSQL SQL parser, XGBoost artifact and DQN artifact loaded.",
+            "OK: GUI, SQL parser, XGBoost, DQN and sequential DQN loaded.",
             encoding="utf-8",
         )
         return 0

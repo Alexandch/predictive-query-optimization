@@ -1,0 +1,21 @@
+{
+  "episode_count": 69,
+  "template_count": 15,
+  "model_mean_return": 0.17263398772043378,
+  "random_mean_return": 0.0774736855315143,
+  "model_positive_rate": 0.42028985507246375,
+  "random_positive_rate": 0.2463768115942029,
+  "model_negative_rate": 0.11594202898550725,
+  "random_negative_rate": 0.2318840579710145,
+  "model_stop_rate": 1.0,
+  "random_stop_rate": 0.8115942028985508,
+  "model_mean_create_actions": 0.5362318840579711,
+  "random_mean_create_actions": 0.6666666666666666,
+  "model_index_use_rate": 0.8378378378378378,
+  "random_index_use_rate": 0.5434782608695652,
+  "model_budget_rejections": 0,
+  "random_budget_rejections": 1,
+  "decision_threshold": 0.38724906742572784,
+  "gamma": 0.95,
+  "random_seed": 901
+}
