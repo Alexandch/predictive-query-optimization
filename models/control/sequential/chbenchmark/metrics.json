@@ -1,0 +1,15 @@
+{
+  "transition_count": 400,
+  "episode_count": 60,
+  "state_count": 152,
+  "template_count": 10,
+  "return_mae": 0.07587223500013351,
+  "recommendation_accuracy": 0.75,
+  "mean_regret": 0.024670569678837698,
+  "stop_accuracy": 0.756578947368421,
+  "stop_mean_regret": 0.025791918207752326,
+  "random_accuracy": 0.4342105263157895,
+  "random_mean_regret": 0.03167737506889303,
+  "decision_threshold": 0.38724906742572784,
+  "gamma": 0.95
+}

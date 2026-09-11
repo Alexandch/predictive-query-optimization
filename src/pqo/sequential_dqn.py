@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import copy
+import csv
 from functools import lru_cache
 import json
 from pathlib import Path
@@ -37,6 +38,23 @@ class SequentialDQNMetrics:
     gamma: float
     ranking_weight: float
     seed: int
+
+
+@dataclass(frozen=True, slots=True)
+class SequentialControlMetrics:
+    transition_count: int
+    episode_count: int
+    state_count: int
+    template_count: int
+    return_mae: float
+    recommendation_accuracy: float
+    mean_regret: float
+    stop_accuracy: float
+    stop_mean_regret: float
+    random_accuracy: float
+    random_mean_regret: float
+    decision_threshold: float
+    gamma: float
 
 
 def merge_sequential_experience(
@@ -296,6 +314,108 @@ def predict_sequential_action_values(
         if action[-1] >= 0.5:
             result[index] = 0.0
     return result
+
+
+def evaluate_sequential_dqn_control(
+    experience_path: str | Path,
+    model_path: str | Path,
+    output_dir: str | Path,
+    *,
+    seed: int = 42,
+) -> SequentialControlMetrics:
+    """Evaluate a frozen sequential model without changing its threshold."""
+    import numpy as np
+    import torch
+
+    records = _read_experience(experience_path)
+    state_size, action_size = _validate_records(records)
+    resolved_model = str(Path(model_path).resolve())
+    model, feature_mean, feature_std = _load_prediction_model(resolved_model)
+    artifact = torch.load(resolved_model, map_location="cpu", weights_only=True)
+    if artifact["state_size"] != state_size or artifact["action_size"] != action_size:
+        raise ValueError("Control features do not match the sequential DQN artifact")
+    gamma = float(artifact["gamma"])
+    threshold = float(artifact["decision_threshold"])
+    inputs = (_input_array(records, np) - feature_mean) / feature_std
+    with torch.no_grad():
+        predictions = (
+            model(torch.tensor(inputs, dtype=torch.float32)).squeeze(1).numpy()
+        )
+    evaluated_predictions = predictions.copy()
+    for index, record in enumerate(records):
+        if record["action"]["kind"] == "stop":
+            evaluated_predictions[index] = 0.0
+    returns = np.asarray(_bellman_returns(records, gamma), dtype=np.float32)
+    accuracy, regret = _policy_metrics(
+        records, predictions, gamma, np, threshold=threshold
+    )
+    stop_accuracy, stop_regret, random_accuracy, random_regret = _baselines(
+        records, gamma, seed, np
+    )
+    metrics = SequentialControlMetrics(
+        transition_count=len(records),
+        episode_count=len({record["episode_id"] for record in records}),
+        state_count=len({record["state_id"] for record in records}),
+        template_count=len({record["template_id"] for record in records}),
+        return_mae=float(np.mean(np.abs(returns - evaluated_predictions))),
+        recommendation_accuracy=accuracy,
+        mean_regret=regret,
+        stop_accuracy=stop_accuracy,
+        stop_mean_regret=stop_regret,
+        random_accuracy=random_accuracy,
+        random_mean_regret=random_regret,
+        decision_threshold=threshold,
+        gamma=gamma,
+    )
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "sequential_control_metrics.json").write_text(
+        json.dumps(asdict(metrics), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    decision_rows = _control_decision_rows(
+        records, evaluated_predictions, returns, threshold, np
+    )
+    with (destination / "sequential_control_decisions.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(decision_rows[0]))
+        writer.writeheader()
+        writer.writerows(decision_rows)
+    return metrics
+
+
+def _control_decision_rows(records, predictions, returns, threshold, np):
+    rows = []
+    for indices in _state_groups(records):
+        stop_index = next(
+            index for index in indices if records[index]["action"]["kind"] == "stop"
+        )
+        create_indices = [index for index in indices if index != stop_index]
+        predicted_index = stop_index
+        if create_indices:
+            best_create = create_indices[int(np.argmax(predictions[create_indices]))]
+            if predictions[best_create] > threshold:
+                predicted_index = best_create
+        actual_index = max(indices, key=lambda index: returns[index])
+        rows.append(
+            {
+                "template_id": records[indices[0]]["template_id"],
+                "episode_id": records[indices[0]]["episode_id"],
+                "state_id": records[indices[0]]["state_id"],
+                "predicted_action": json.dumps(
+                    records[predicted_index]["action"], ensure_ascii=False
+                ),
+                "actual_best_action": json.dumps(
+                    records[actual_index]["action"], ensure_ascii=False
+                ),
+                "predicted_q": float(predictions[predicted_index]),
+                "predicted_action_return": float(returns[predicted_index]),
+                "actual_best_return": float(returns[actual_index]),
+                "regret": float(returns[actual_index] - returns[predicted_index]),
+                "is_correct": predicted_index == actual_index,
+            }
+        )
+    return rows
 
 
 @lru_cache(maxsize=4)

@@ -1,0 +1,19 @@
+{
+  "model_sha256": "4CE5EDC815F5BDEDEE62DC704AC4C9201C44B8F9F684B904E241F5CC34343B1A",
+  "logistics_dataset_sha256": "EC2E81CE12EF795599ACF737F101BF8EC00B096D5DD57CCB057579E5EDD98732",
+  "chbenchmark_dataset_sha256": "CB2C01BF32A7A1398761D67598E07886884BC32BEA0BF7CDC248789952F893FA",
+  "state_count": 307,
+  "recommendation_accuracy": 0.6872964169381107,
+  "mean_regret": 0.06499406509227662,
+  "stop_accuracy": 0.6482084690553745,
+  "stop_mean_regret": 0.10017987933182843,
+  "random_accuracy": 0.4495114006514658,
+  "random_mean_regret": 0.06565810999008276,
+  "paired_accuracy_delta_vs_stop": 0.03908794788273615,
+  "paired_accuracy_delta_95_ci": [0.006514657980456026, 0.07166123778501629],
+  "paired_regret_delta_vs_stop": -0.03518581409796053,
+  "paired_regret_delta_95_ci": [-0.05262656997682994, -0.01958539409726761],
+  "bootstrap_samples": 20000,
+  "bootstrap_seed": 803,
+  "status": "offline_control_passed_end_to_end_rollout_required"
+}

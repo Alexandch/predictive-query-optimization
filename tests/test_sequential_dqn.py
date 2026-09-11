@@ -6,6 +6,7 @@ import unittest
 from pqo.dqn_features import SEQUENTIAL_ACTION_ENCODING
 from pqo.sequential_dqn import (
     _bellman_returns,
+    _control_decision_rows,
     _episode_parameter_split,
     merge_sequential_experience,
 )
@@ -66,6 +67,24 @@ class SequentialDQNTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "Missing next state"):
                 merge_sequential_experience([source], output)
+
+    def test_control_threshold_keeps_stop_when_create_q_is_too_low(self):
+        import numpy as np
+
+        records = [
+            record("e", "s", "stop", 0.0),
+            record("e", "s", "create", 0.3),
+        ]
+        rows = _control_decision_rows(
+            records,
+            np.asarray([0.0, 0.2]),
+            np.asarray([0.0, 0.3]),
+            0.25,
+            np,
+        )
+
+        self.assertEqual(json.loads(rows[0]["predicted_action"])["kind"], "stop")
+        self.assertAlmostEqual(rows[0]["regret"], 0.3)
 
 
 if __name__ == "__main__":

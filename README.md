@@ -142,10 +142,11 @@ PostgreSQL по-прежнему должен быть доступен по п�
 - [Domain-balanced подбор доли Pagila](docs/domain-balanced-validation.md)
 - [Domain-balanced validation DQN generic-v3](docs/dqn-domain-balanced-validation.md)
 - [Последовательная multi-index среда](docs/sequential-index-environment.md)
+- [Независимый контроль последовательной DQN](docs/sequential-control-benchmark.md)
 - [Резервное копирование и восстановление](docs/backup-and-recovery.md)
 
 ## Следующие этапы
 
-1. Независимая проверка последовательной DQN на запечатанных нагрузках.
-2. Интеграция принятой последовательной политики в анализатор и PyQt6.
+1. End-to-end rollout последовательной DQN по полному списку действий.
+2. Интеграция прошедшей rollout политики в анализатор и PyQt6.
 3. Подготовка текста, диаграмм и приложений курсовой работы.
