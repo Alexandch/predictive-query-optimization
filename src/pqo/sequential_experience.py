@@ -94,6 +94,7 @@ def collect_sequential_experience(
                                 ),
                                 reward=0.0,
                                 next_state=None,
+                                next_state_id=None,
                                 next_action_features=[],
                                 done=True,
                                 behavior_done=not create_actions,
@@ -124,6 +125,15 @@ def collect_sequential_experience(
                     )
                     transition = episode.step(action)
                     next_state = encode_sequential_state(base_state, transition.next_state)
+                    done = transition.next_state.done or not transition.accepted
+                    next_state_id = (
+                        None
+                        if done
+                        else _state_id(
+                            episode_id,
+                            transition.next_state.selected_actions,
+                        )
+                    )
                     next_features = []
                     if transition.accepted and not transition.next_state.done:
                         for next_action in episode.available_actions:
@@ -151,15 +161,10 @@ def collect_sequential_experience(
                                 action_features=action_features,
                                 reward=transition.reward,
                                 next_state=next_state,
+                                next_state_id=next_state_id,
                                 next_action_features=next_features,
-                                done=(
-                                    transition.next_state.done
-                                    or not transition.accepted
-                                ),
-                                behavior_done=(
-                                    transition.next_state.done
-                                    or not transition.accepted
-                                ),
+                                done=done,
+                                behavior_done=done,
                                 accepted=transition.accepted,
                                 terminal_reason=transition.terminal_reason,
                                 index_size_bytes=transition.index_size_bytes,

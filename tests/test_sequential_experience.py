@@ -3,10 +3,25 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from pqo.sequential_experience import _completed_episode_ids, _prepare_resume
+from pqo.index_actions import IndexAction
+from pqo.sequential_experience import (
+    _completed_episode_ids,
+    _prepare_resume,
+    _state_id,
+)
 
 
 class SequentialExperienceTests(unittest.TestCase):
+    def test_state_id_changes_after_an_action(self):
+        root = _state_id("episode", ())
+        child = _state_id(
+            "episode",
+            (IndexAction.create("public", "orders", ("customer_id",)),),
+        )
+
+        self.assertNotEqual(root, child)
+        self.assertEqual(root, _state_id("episode", ()))
+
     def test_resume_ignores_partial_behavior_trajectory(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "experience.jsonl"

@@ -93,3 +93,32 @@ PostgreSQL осталось ноль временных индексов.
 .\.venv\Scripts\pqo-sequential-collect.exe pagila 100 `
   artifacts\sequential\pagila.jsonl --seed 733 --max-steps 2 --budget-mb 64
 ```
+
+## Объединение и обучение
+
+Каждый нетерминальный переход содержит `next_state_id`. Поэтому обучающий
+модуль связывает только реально измеренные действия следующего состояния и не
+делает Bellman-подстановку по непроверенным индексам. Эпизоды целиком попадают
+в одну часть train/validation/test, что исключает утечку соседнего шага.
+
+```powershell
+.\.venv\Scripts\pqo-sequential-merge.exe `
+  artifacts\sequential\multidomain_training.jsonl `
+  artifacts\sequential\aviation_training.jsonl `
+  artifacts\sequential\retail_training.jsonl `
+  artifacts\sequential\pagila_training.jsonl
+
+.\.venv\Scripts\pqo-sequential-train.exe `
+  artifacts\sequential\multidomain_training.jsonl `
+  artifacts\models\sequential_dqn `
+  --epochs 1000 --ranking-weight 0.20 --seed 741
+```
+
+Первый многодоменный набор содержит 1 172 перехода, 279 уникальных эпизодов и
+564 состояния. На независимой test-части калиброванная последовательная DQN
+получила accuracy 78,01% и mean regret 0,0640. Стратегия «всегда STOP» получила
+71,73% и 0,1228, случайная — 54,45% и 0,0851. Порог принятия CREATE равен
+0,3872; он выбран только по validation-части и сохранён в артефакте модели.
+
+Это development-оценка. Запечатанные `logistics` и CH-контроли при сборе,
+калибровке порога и выборе эпохи не использовались.
