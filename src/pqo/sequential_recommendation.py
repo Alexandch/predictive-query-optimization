@@ -39,6 +39,8 @@ class SequentialRecommendationPlan:
     used_budget_bytes: int
     candidate_count: int
     decision_threshold: float
+    minimum_baseline_time_ms: float
+    minimum_absolute_improvement_ms: float
     terminal_reason: str
 
     @property
@@ -56,11 +58,15 @@ def recommend_sequential_indexes(
     max_steps: int = 2,
     storage_budget_bytes: int = 64 * 1024 * 1024,
     repetitions: int = 1,
+    minimum_baseline_time_ms: float = 50.0,
+    minimum_absolute_improvement_ms: float = 5.0,
 ) -> SequentialRecommendationPlan:
     """Measure a model-selected plan and discard all trial indexes on exit."""
     import psycopg
     import torch
 
+    if minimum_baseline_time_ms < 0 or minimum_absolute_improvement_ms < 0:
+        raise ValueError("Recommendation time thresholds must be non-negative")
     settings = settings or DatabaseSettings.from_env()
     resolved_model = str(Path(model_path).resolve())
     artifact = torch.load(resolved_model, map_location="cpu", weights_only=True)
@@ -83,7 +89,11 @@ def recommend_sequential_indexes(
             baseline_time = episode.state.baseline_time_ms
             final_time = baseline_time
             used_budget = 0
+            if baseline_time < minimum_baseline_time_ms:
+                terminal_reason = "below_runtime_threshold"
             while not episode.state.done:
+                if terminal_reason == "below_runtime_threshold":
+                    break
                 actions = list(episode.available_actions)
                 candidate_count = max(candidate_count, len(actions))
                 encoded_state = encode_sequential_state(base_state, episode.state)
@@ -118,11 +128,17 @@ def recommend_sequential_indexes(
                 if not transition.accepted:
                     terminal_reason = transition.terminal_reason or "rejected"
                     break
+                if not transition.candidate_uses_created_index:
+                    terminal_reason = "index_not_used"
+                    break
+                if transition.reward <= 0:
+                    terminal_reason = "non_positive_reward"
+                    break
                 if (
-                    not transition.candidate_uses_created_index
-                    or transition.reward <= 0
+                    previous_time - transition.next_state.current_time_ms
+                    < minimum_absolute_improvement_ms
                 ):
-                    terminal_reason = "measured_not_beneficial"
+                    terminal_reason = "absolute_gain_too_small"
                     break
                 accepted_steps.append(
                     SequentialRecommendationStep(
@@ -149,5 +165,7 @@ def recommend_sequential_indexes(
         used_budget_bytes=used_budget,
         candidate_count=candidate_count,
         decision_threshold=threshold,
+        minimum_baseline_time_ms=minimum_baseline_time_ms,
+        minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
         terminal_reason=terminal_reason,
     )

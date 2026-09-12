@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
         self.preferences = QSettings("PQO", "PredictiveQueryOptimization")
         self.thread_pool = QThreadPool.globalInstance()
         self.history_records = []
+        self.last_prediction_ms: float | None = None
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
@@ -213,7 +214,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(calibration_controls)
 
         metrics = QGridLayout()
-        self.predicted_value = self._metric_card(metrics, 0, "Прогноз", "—")
+        self.predicted_value = self._metric_card(metrics, 0, "Время запроса", "—")
         self.cost_value = self._metric_card(metrics, 1, "Стоимость плана", "—")
         self.rows_value = self._metric_card(metrics, 2, "Строки плана", "—")
         self.node_value = self._metric_card(metrics, 3, "Корневой узел", "—")
@@ -610,6 +611,7 @@ class MainWindow(QMainWindow):
 
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
         prediction = analysis.prediction
+        self.last_prediction_ms = prediction.predicted_time_ms
         prediction_text = f"{prediction.predicted_time_ms:.2f} мс"
         if abs(prediction.calibration_factor - 1.0) > 1e-12:
             prediction_text += (
@@ -683,6 +685,8 @@ class MainWindow(QMainWindow):
             max_steps=2,
             storage_budget_bytes=64 * 1024 * 1024,
             repetitions=1,
+            minimum_baseline_time_ms=self.threshold_spin.value(),
+            minimum_absolute_improvement_ms=5.0,
         )
         worker.signals.succeeded.connect(self._show_sequential_analysis)
         worker.signals.failed.connect(
@@ -694,12 +698,27 @@ class MainWindow(QMainWindow):
         self, plan: SequentialRecommendationPlan
     ) -> None:
         self.deep_analyze_button.setEnabled(True)
+        prediction_text = (
+            "—"
+            if self.last_prediction_ms is None
+            else f"ML-прогноз {self.last_prediction_ms:.2f} мс"
+        )
+        self.predicted_value.setText(
+            f"{prediction_text}\nфакт {plan.baseline_time_ms:.2f} мс"
+        )
         if not plan.steps:
             reasons = {
                 "model_stop": "модель не нашла достаточно надёжного улучшения",
                 "no_candidates": "для запроса не сформированы индексные кандидаты",
-                "measured_not_beneficial": (
-                    "лучший кандидат проверен, но не дал полезного результата"
+                "below_runtime_threshold": (
+                    "фактическое время ниже порога рекомендации "
+                    f"{plan.minimum_baseline_time_ms:.1f} мс"
+                ),
+                "index_not_used": "PostgreSQL не использовал пробный индекс",
+                "non_positive_reward": "пробный индекс не дал положительной награды",
+                "absolute_gain_too_small": (
+                    "абсолютная экономия меньше "
+                    f"{plan.minimum_absolute_improvement_ms:.1f} мс"
                 ),
                 "budget_exceeded": "кандидат превысил лимит 64 МиБ",
             }
@@ -707,13 +726,13 @@ class MainWindow(QMainWindow):
             self.recommendation_text.setPlainText(
                 "Создавать новые индексы не рекомендуется.\n"
                 f"Причина: {reason}.\n"
-                f"Измеренное исходное время: {plan.baseline_time_ms:.2f} мс."
+                f"Фактическое исходное время: {plan.baseline_time_ms:.2f} мс."
             )
         else:
             lines = [
                 f"Проверенный план: {len(plan.steps)} индекс(а/ов)",
                 (
-                    f"Время: {plan.baseline_time_ms:.2f} → "
+                    f"Фактическое время: {plan.baseline_time_ms:.2f} → "
                     f"{plan.final_time_ms:.2f} мс "
                     f"({plan.measured_improvement_ratio:+.1%})"
                 ),
