@@ -1,5 +1,11 @@
 """Predictive query optimization core package."""
 
+import os
+
+# Large detected CPU counts can make OpenBLAS DLL initialization fail on Windows.
+# Respect an explicit user value while keeping desktop and test processes stable.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+
 from .explain import ExplainResult, collect_explain
 from .plan_features import PlanFeatures, extract_plan_features
 from .database_features import (

@@ -61,6 +61,7 @@ from .sequential_recommendation import (
     SequentialRecommendationPlan,
     recommend_sequential_indexes,
 )
+from .sql_rewrite import SQLRewritePlan, evaluate_sql_rewrites
 from .training import train_xgboost
 
 
@@ -179,6 +180,13 @@ class MainWindow(QMainWindow):
         )
         self.deep_analyze_button.clicked.connect(self._start_sequential_analysis)
         controls.addWidget(self.deep_analyze_button)
+        self.rewrite_analyze_button = QPushButton("Проверить переписывание SQL")
+        self.rewrite_analyze_button.setToolTip(
+            "Формирует безопасные варианты SQL, доказывает эквивалентность "
+            "результатов и измеряет фактическое время выполнения."
+        )
+        self.rewrite_analyze_button.clicked.connect(self._start_rewrite_analysis)
+        controls.addWidget(self.rewrite_analyze_button)
         self.persist_check = QCheckBox("Сохранять в историю pqo")
         self.persist_check.setChecked(
             str(self.preferences.value("persist_analysis", "false")).lower()
@@ -784,6 +792,87 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Глубокий анализ завершён; изменения откачены{saved}"
         )
+
+    def _start_rewrite_analysis(self) -> None:
+        sql_text = self.sql_editor.toPlainText().strip()
+        if not sql_text:
+            QMessageBox.warning(self, "Нет SQL", "Введите SQL-запрос.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Проверить переписывание SQL?",
+            "PostgreSQL реально выполнит исходный и переписанные SELECT через "
+            "EXPLAIN ANALYZE. Результаты будут сравнены в транзакции только для "
+            "чтения. Для тяжёлого запроса операция может занять время.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.rewrite_analyze_button.setEnabled(False)
+        self.recommendation_text.setPlainText(
+            "Формирую варианты, проверяю эквивалентность и измеряю время…"
+        )
+        self.statusBar().showMessage("Проверка переписывания SQL…")
+        worker = Worker(
+            evaluate_sql_rewrites,
+            sql_text,
+            self._database_settings(),
+            repetitions=3,
+            minimum_baseline_time_ms=self.threshold_spin.value(),
+            minimum_absolute_improvement_ms=5.0,
+            minimum_improvement_ratio=0.05,
+        )
+        worker.signals.succeeded.connect(self._show_rewrite_analysis)
+        worker.signals.failed.connect(
+            lambda message: self._task_failed(message, self.rewrite_analyze_button)
+        )
+        self.thread_pool.start(worker)
+
+    def _show_rewrite_analysis(self, plan: SQLRewritePlan) -> None:
+        self.rewrite_analyze_button.setEnabled(True)
+        if plan.recommended is not None:
+            result = plan.recommended
+            self.recommendation_text.setPlainText(
+                "Проверенное переписывание SQL:\n"
+                f"Правило: {result.candidate.title}\n"
+                f"Фактическое время: {result.baseline_time_ms:.2f} → "
+                f"{result.rewritten_time_ms:.2f} мс "
+                f"({result.improvement_ratio:+.1%})\n\n"
+                f"{result.candidate.sql_text}\n\n"
+                "Эквивалентность результатов подтверждена через EXCEPT ALL."
+            )
+            self.statusBar().showMessage(
+                "Найдено и измерено безопасное переписывание SQL"
+            )
+            return
+
+        reasons = {
+            "no_candidates": "для этого SQL нет поддерживаемых безопасных правил",
+            "below_runtime_threshold": (
+                "фактическое время запроса ниже установленного порога"
+            ),
+            "no_measured_improvement": (
+                "варианты эквивалентны, но не дали достаточного ускорения"
+            ),
+        }
+        lines = [
+            "Переписывать SQL не рекомендуется.",
+            f"Причина: {reasons.get(plan.terminal_reason, plan.terminal_reason)}.",
+        ]
+        for evaluation in plan.evaluations:
+            if evaluation.equivalent and evaluation.baseline_time_ms is not None:
+                lines.append(
+                    f"{evaluation.candidate.title}: "
+                    f"{evaluation.baseline_time_ms:.2f} → "
+                    f"{evaluation.rewritten_time_ms:.2f} мс "
+                    f"({evaluation.improvement_ratio:+.1%})."
+                )
+            else:
+                lines.append(
+                    f"{evaluation.candidate.title}: "
+                    f"{evaluation.rejection_reason or 'отклонено'}."
+                )
+        self.recommendation_text.setPlainText("\n".join(lines))
+        self.statusBar().showMessage("Безопасное ускоряющее переписывание не найдено")
 
     def _refresh_history(self) -> None:
         self.statusBar().showMessage("Загрузка истории…")

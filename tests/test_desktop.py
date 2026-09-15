@@ -36,6 +36,7 @@ class DesktopTests(unittest.TestCase):
             self.assertIsNotNone(window.persist_check)
             self.assertIsNotNone(window.calibrate_button)
             self.assertTrue(window.deep_analyze_button.isEnabled())
+            self.assertTrue(window.rewrite_analyze_button.isEnabled())
             self.assertFalse(window.use_calibration_check.isChecked())
         finally:
             window.close()

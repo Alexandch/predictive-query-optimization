@@ -12,6 +12,7 @@ from pqo.index_actions import IndexAction
 from pqo.index_environment import IndexExperimentEnvironment
 from pqo.query_generator import AviationQueryGenerator
 from pqo.sequential_environment import SequentialIndexEnvironment
+from pqo.sql_rewrite import evaluate_sql_rewrites
 
 
 @unittest.skipUnless(
@@ -20,6 +21,27 @@ from pqo.sequential_environment import SequentialIndexEnvironment
 )
 class PostgreSQLIntegrationTests(unittest.TestCase):
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+    def test_proves_and_measures_count_to_exists_rewrite(self):
+        result = evaluate_sql_rewrites(
+            "SELECT c.customer_id FROM retail.customers c "
+            "WHERE c.customer_id <= 100 AND "
+            "(SELECT COUNT(*) FROM retail.customer_orders o "
+            "WHERE o.customer_id = c.customer_id) > 0",
+            repetitions=1,
+            minimum_baseline_time_ms=0,
+            minimum_absolute_improvement_ms=100,
+            minimum_improvement_ratio=0.20,
+        )
+
+        self.assertIsNotNone(result.recommended)
+        self.assertTrue(result.recommended.equivalent)
+        self.assertEqual(
+            result.recommended.candidate.rule_id,
+            "count-positive-to-exists",
+        )
+        self.assertGreater(result.recommended.improvement_ratio, 0.20)
+
     def test_collects_real_explain_plan(self):
         result = collect_explain(
             "SELECT value FROM generate_series(1, 3) AS value"
