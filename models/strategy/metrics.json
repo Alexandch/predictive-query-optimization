@@ -1,0 +1,66 @@
+{
+  "sample_count": 39,
+  "train_count": 26,
+  "test_count": 13,
+  "train_templates": [
+    "aircraft_flight_counts",
+    "daily_flight_count",
+    "flight_revenue",
+    "pagila_customer_lifetime_value",
+    "pagila_customer_payment_transitions",
+    "pagila_inventory_imbalance",
+    "retail_brand_performance",
+    "retail_daily_channel_revenue",
+    "retail_failed_payments",
+    "retail_regional_sales",
+    "route_traffic_share",
+    "strategy_aviation_booking_has_tickets",
+    "strategy_pagila_film_has_inventory",
+    "strategy_pagila_inventory_has_rentals",
+    "strategy_retail_customer_has_orders",
+    "strategy_retail_order_has_items"
+  ],
+  "test_templates": [
+    "pagila_inactive_customers",
+    "pagila_rating_revenue_pivot",
+    "pagila_unrented_films",
+    "passenger_spending_rank",
+    "retail_category_revenue",
+    "retail_top_products",
+    "strategy_aviation_ticket_has_flights",
+    "strategy_retail_product_has_sales",
+    "ticket_fare_lookup"
+  ],
+  "class_counts": {
+    "NOOP": 12,
+    "CREATE_INDEX": 21,
+    "REWRITE_QUERY": 6
+  },
+  "accuracy": 0.6153846153846154,
+  "balanced_accuracy": 0.6547619047619048,
+  "macro_f1": 0.6,
+  "majority_accuracy": 0.5384615384615384,
+  "confusion_matrix": [
+    [
+      1,
+      2,
+      1
+    ],
+    [
+      2,
+      5,
+      0
+    ],
+    [
+      0,
+      0,
+      2
+    ]
+  ],
+  "labels": [
+    "NOOP",
+    "CREATE_INDEX",
+    "REWRITE_QUERY"
+  ],
+  "seed": 42
+}

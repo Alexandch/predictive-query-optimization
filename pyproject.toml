@@ -78,6 +78,7 @@ pqo-sequential-merge = "pqo.sequential_dqn_cli:merge_main"
 pqo-sequential-train = "pqo.sequential_dqn_cli:train_main"
 pqo-sequential-control = "pqo.sequential_control_cli:main"
 pqo-rewrite = "pqo.rewrite_cli:main"
+pqo-strategy = "pqo.strategy_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
