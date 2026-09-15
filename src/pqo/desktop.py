@@ -74,6 +74,7 @@ DEFAULT_DQN_MODEL = PROJECT_ROOT / "models" / "dqn" / "dqn_index_advisor.pt"
 DEFAULT_SEQUENTIAL_DQN_MODEL = (
     PROJECT_ROOT / "models" / "sequential_dqn" / "sequential_dqn_index_advisor.pt"
 )
+DEFAULT_STRATEGY_MODEL = PROJECT_ROOT / "models" / "strategy" / "strategy_selector.joblib"
 DEFAULT_DATASET = PROJECT_ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"
 DEFAULT_DQN_DATASET = (
     PROJECT_ROOT / "dataset" / "postgresql" / "multidomain_dqn_augmented.jsonl"
@@ -230,7 +231,7 @@ class MainWindow(QMainWindow):
         self.node_value = self._metric_card(metrics, 3, "Корневой узел", "—")
         layout.addLayout(metrics)
 
-        recommendation_group = QGroupBox("Рекомендации по индексам")
+        recommendation_group = QGroupBox("Рекомендации по оптимизации")
         recommendation_layout = QVBoxLayout(recommendation_group)
         self.recommendation_text = QPlainTextEdit()
         self.recommendation_text.setReadOnly(True)
@@ -328,6 +329,13 @@ class MainWindow(QMainWindow):
                 )
             )
         )
+        self.strategy_model_edit = QLineEdit(
+            str(
+                self.preferences.value(
+                    "strategy_model", str(DEFAULT_STRATEGY_MODEL)
+                )
+            )
+        )
         form.addRow("Хост", self.host_edit)
         form.addRow("Порт", self.port_spin)
         form.addRow("База данных", self.database_edit)
@@ -339,6 +347,10 @@ class MainWindow(QMainWindow):
         form.addRow(
             "Последовательная DQN",
             self._path_row(self.sequential_dqn_model_edit, False),
+        )
+        form.addRow(
+            "Селектор стратегии",
+            self._path_row(self.strategy_model_edit, False),
         )
         layout.addLayout(form)
 
@@ -595,7 +607,12 @@ class MainWindow(QMainWindow):
             return
         xgb_path = Path(self.xgb_model_edit.text())
         dqn_path = Path(self.dqn_model_edit.text())
-        if not xgb_path.is_file() or not dqn_path.is_file():
+        strategy_path = Path(self.strategy_model_edit.text())
+        if (
+            not xgb_path.is_file()
+            or not dqn_path.is_file()
+            or not strategy_path.is_file()
+        ):
             QMessageBox.warning(
                 self, "Модель не найдена", "Проверьте пути к моделям в настройках."
             )
@@ -616,6 +633,7 @@ class MainWindow(QMainWindow):
                 if self.use_calibration_check.isChecked()
                 else None
             ),
+            strategy_model_path=strategy_path,
         )
         worker.signals.succeeded.connect(self._show_analysis)
         worker.signals.failed.connect(
@@ -659,6 +677,31 @@ class MainWindow(QMainWindow):
             text = (
                 f"{ddl};\nОценка улучшения: {recommendation.predicted_reward:.4f}\n"
                 f"Рассмотрено кандидатов: {recommendation.candidate_count}"
+            )
+        strategy = analysis.strategy_prediction
+        if strategy is not None:
+            selected = strategy["strategy"]
+            titles = {
+                "NOOP": "ничего не менять",
+                "CREATE_INDEX": "проверить создание индекса",
+                "REWRITE_QUERY": "проверить переписывание SQL",
+            }
+            hints = {
+                "NOOP": "Существенная оптимизация по известным стратегиям маловероятна.",
+                "CREATE_INDEX": "Для фактической проверки используйте глубокий анализ индексов.",
+                "REWRITE_QUERY": "Нажмите «Проверить переписывание SQL» для доказательства эквивалентности и замера.",
+            }
+            probabilities = strategy["probabilities"]
+            probability_text = ", ".join(
+                f"{name}={probabilities[name] * 100:.1f}%"
+                for name in ("NOOP", "CREATE_INDEX", "REWRITE_QUERY")
+            )
+            text = (
+                "Рекомендуемая стратегия: "
+                f"{titles[selected]} ({probabilities[selected] * 100:.1f}%).\n"
+                f"{hints[selected]}\n"
+                f"Вероятности модели: {probability_text}\n\n"
+                f"Предварительная индексная оценка:\n{text}"
             )
         self.recommendation_text.setPlainText(text)
         self.analyze_button.setEnabled(True)
@@ -1083,6 +1126,9 @@ class MainWindow(QMainWindow):
         self.preferences.setValue(
             "sequential_dqn_model", self.sequential_dqn_model_edit.text().strip()
         )
+        self.preferences.setValue(
+            "strategy_model", self.strategy_model_edit.text().strip()
+        )
         self.preferences.setValue("threshold_ms", self.threshold_spin.value())
         self.preferences.setValue("persist_analysis", self.persist_check.isChecked())
         self.preferences.setValue(
@@ -1275,6 +1321,7 @@ def main() -> int:
             DEFAULT_XGB_MODEL,
             DEFAULT_DQN_MODEL,
             DEFAULT_SEQUENTIAL_DQN_MODEL,
+            DEFAULT_STRATEGY_MODEL,
             DEFAULT_DATASET,
         )
         if not all(path.is_file() for path in required):
@@ -1312,6 +1359,12 @@ def main() -> int:
                 return 3
             smoke_log.write_text("Loading DQN artifact...", encoding="utf-8")
             dqn_action_encoding_version(DEFAULT_DQN_MODEL)
+            strategy_artifact = joblib.load(DEFAULT_STRATEGY_MODEL)
+            if "classifier" not in strategy_artifact:
+                smoke_log.write_text(
+                    "Strategy artifact has no classifier.", encoding="utf-8"
+                )
+                return 3
             sequential_artifact = torch.load(
                 DEFAULT_SEQUENTIAL_DQN_MODEL,
                 map_location="cpu",
@@ -1330,7 +1383,7 @@ def main() -> int:
             smoke_log.write_text(traceback.format_exc(), encoding="utf-8")
             return 3
         smoke_log.write_text(
-            "OK: GUI, SQL parser, XGBoost, DQN and sequential DQN loaded.",
+            "OK: GUI, SQL parser, XGBoost, DQN, sequential DQN and strategy selector loaded.",
             encoding="utf-8",
         )
         return 0

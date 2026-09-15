@@ -10,7 +10,7 @@ from .retail_queries import RetailQueryGenerator
 
 def generate_strategy_workload(
     *,
-    ordinary_per_domain: int = 6,
+    ordinary_per_domain: int = 15,
     rewrite_variants: int = 3,
     seed: int = 42,
 ) -> list[QueryCase]:
@@ -31,6 +31,12 @@ def generate_strategy_workload(
         order_limit = 10_000 + offset * 10_000
         ticket_limit = 50_000 + offset * 25_000
         inventory_limit = 2_000 + offset * 1_000
+        item_limit = 50_000 + offset * 25_000
+        payment_limit = 30_000 + offset * 20_000
+        segment_limit = 50_000 + offset * 25_000
+        boarding_flight_limit = 10_000 + offset * 10_000
+        rental_limit = 5_000 + offset * 5_000
+        payment_month = 3 + offset
         rewrites.extend(
             (
                 QueryCase(
@@ -81,6 +87,50 @@ def generate_strategy_workload(
                     f"WHERE i.inventory_id <= {inventory_limit} AND "
                     "(SELECT COUNT(*) FROM pagila.rental AS r "
                     "WHERE r.inventory_id = i.inventory_id) > 0",
+                ),
+                QueryCase(
+                    "strategy_retail_item_has_order",
+                    "SELECT i.order_id, i.line_no FROM retail.order_items AS i "
+                    f"WHERE i.order_id <= {item_limit} AND "
+                    "(SELECT COUNT(*) FROM retail.customer_orders AS o "
+                    "WHERE o.order_id = i.order_id) > 0",
+                ),
+                QueryCase(
+                    "strategy_retail_payment_has_order",
+                    "SELECT p.payment_id FROM retail.payments AS p "
+                    f"WHERE p.payment_id <= {payment_limit} AND "
+                    "(SELECT COUNT(*) FROM retail.customer_orders AS o "
+                    "WHERE o.order_id = p.order_id) > 0",
+                ),
+                QueryCase(
+                    "strategy_aviation_segment_has_ticket",
+                    "SELECT tf.ticket_no, tf.flight_id "
+                    "FROM aviation.ticket_flights AS tf "
+                    f"WHERE tf.ticket_no <= '{segment_limit:013d}' AND "
+                    "(SELECT COUNT(*) FROM aviation.tickets AS t "
+                    "WHERE t.ticket_no = tf.ticket_no) > 0",
+                ),
+                QueryCase(
+                    "strategy_aviation_boarding_has_flight",
+                    "SELECT bp.ticket_no, bp.flight_id "
+                    "FROM aviation.boarding_passes AS bp "
+                    f"WHERE bp.flight_id <= {boarding_flight_limit} AND "
+                    "(SELECT COUNT(*) FROM aviation.flights AS f "
+                    "WHERE f.flight_id = bp.flight_id) > 0",
+                ),
+                QueryCase(
+                    "strategy_pagila_rental_has_inventory",
+                    "SELECT r.rental_id FROM pagila.rental AS r "
+                    f"WHERE r.rental_id <= {rental_limit} AND "
+                    "(SELECT COUNT(*) FROM pagila.inventory AS i "
+                    "WHERE i.inventory_id = r.inventory_id) > 0",
+                ),
+                QueryCase(
+                    "strategy_pagila_payment_has_customer",
+                    "SELECT p.payment_date, p.payment_id FROM pagila.payment AS p "
+                    f"WHERE p.payment_date < TIMESTAMPTZ '2022-{payment_month:02d}-01' AND "
+                    "(SELECT COUNT(*) FROM pagila.customer AS c "
+                    "WHERE c.customer_id = p.customer_id) > 0",
                 ),
             )
         )

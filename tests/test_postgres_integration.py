@@ -262,9 +262,16 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             self.PROJECT_ROOT / "models/dqn/dqn_index_advisor.pt",
             recommendation_threshold_ms=0,
             persist=True,
+            strategy_model_path=(
+                self.PROJECT_ROOT / "models/strategy/strategy_selector.joblib"
+            ),
         )
         self.assertIsNotNone(result.query_run_id)
         self.assertIsNotNone(result.recommendation)
+        self.assertIn(
+            result.strategy_prediction["strategy"],
+            {"NOOP", "CREATE_INDEX", "REWRITE_QUERY"},
+        )
 
         settings = DatabaseSettings.from_env()
         with psycopg.connect(**settings.connection_kwargs()) as connection:

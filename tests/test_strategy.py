@@ -69,13 +69,14 @@ class StrategyTests(unittest.TestCase):
             ordinary_per_domain=1, rewrite_variants=1
         )
 
-        self.assertEqual(len(cases), 10)
+        self.assertEqual(len(cases), 16)
         self.assertFalse(any("logistics." in case.sql_text for case in cases))
         self.assertFalse(any("chbenchmark." in case.sql_text for case in cases))
-        self.assertEqual(
-            sum("COUNT(*)" in case.sql_text for case in cases),
-            7,
-        )
+        rewrite_cases = [
+            case for case in cases if case.template_id.startswith("strategy_")
+        ]
+        self.assertEqual(len(rewrite_cases), 13)
+        self.assertTrue(all("COUNT(*)" in case.sql_text for case in rewrite_cases))
 
     def test_feature_contract_contains_rewrite_availability(self):
         sql = "SELECT * FROM retail.orders WHERE status = 'new' OR status = 'paid'"

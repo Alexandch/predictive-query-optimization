@@ -20,6 +20,7 @@ from .prediction import QueryTimePrediction
 from .recommendation import IndexRecommendation
 from .repository import save_analysis, save_optimization_result
 from .sql_features import extract_sql_features
+from .strategy import build_strategy_features, predict_strategy
 from .training import predict_query_time
 
 
@@ -29,6 +30,7 @@ class QueryAnalysis:
     recommendation: IndexRecommendation | None
     recommendation_threshold_ms: float
     query_run_id: int | None
+    strategy_prediction: dict | None = None
 
 
 def analyze_query(
@@ -40,6 +42,7 @@ def analyze_query(
     recommendation_threshold_ms: float = 50.0,
     persist: bool = True,
     calibration_profile_path: str | Path | None = None,
+    strategy_model_path: str | Path | None = None,
 ) -> QueryAnalysis:
     if recommendation_threshold_ms < 0:
         raise ValueError("recommendation_threshold_ms must be non-negative")
@@ -91,29 +94,65 @@ def analyze_query(
         calibration_sample_count=calibration_sample_count,
     )
 
-    recommendation = None
-    if predicted_time >= recommendation_threshold_ms:
+    query_state = encode_query_state(feature_values)
+    actions = None
+    action_contexts = {}
+    strategy_prediction = None
+    if strategy_model_path is not None and Path(strategy_model_path).is_file():
         actions = generate_index_actions(
             normalized_sql,
             allowed_schemas=settings.allowed_schemas,
         )
+        import psycopg
+
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            action_contexts = {
+                action: collect_action_database_context(
+                    action, connection=connection
+                )
+                for action in actions[1:]
+            }
+        eligible_index_count = sum(
+            not context["exact_index_exists"]
+            and not context["prefix_index_exists"]
+            for context in action_contexts.values()
+        )
+        strategy_prediction = predict_strategy(
+            strategy_model_path,
+            build_strategy_features(
+                normalized_sql,
+                query_state,
+                eligible_index_count,
+            ),
+        )
+
+    recommendation = None
+    if predicted_time >= recommendation_threshold_ms:
+        actions = actions or generate_index_actions(
+            normalized_sql, allowed_schemas=settings.allowed_schemas
+        )
         encoding_version = dqn_action_encoding_version(dqn_model_path)
-        values = predict_action_values(
-            dqn_model_path,
-            encode_query_state(feature_values),
-            [
+        encoded_actions = []
+        for action in actions:
+            database_context = None
+            if encoding_version == GENERIC_V3_ACTION_ENCODING:
+                database_context = action_contexts.get(action)
+                if database_context is None:
+                    database_context = collect_action_database_context(
+                        action, settings=settings
+                    )
+            encoded_actions.append(
                 encode_action(
                     action,
                     normalized_sql,
                     encoding_version=encoding_version,
-                    database_context=(
-                        collect_action_database_context(action, settings=settings)
-                        if encoding_version == GENERIC_V3_ACTION_ENCODING
-                        else None
-                    ),
+                    database_context=database_context,
                 )
-                for action in actions
-            ],
+            )
+        values = predict_action_values(
+            dqn_model_path,
+            query_state,
+            encoded_actions,
         )
         best_index = max(range(len(actions)), key=values.__getitem__)
         if best_index != 0 and values[best_index] <= 0:
@@ -147,4 +186,5 @@ def analyze_query(
         recommendation=recommendation,
         recommendation_threshold_ms=recommendation_threshold_ms,
         query_run_id=query_run_id,
+        strategy_prediction=strategy_prediction,
     )

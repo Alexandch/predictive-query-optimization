@@ -9,7 +9,10 @@ PyInstaller, а затем упаковывается в установщик In
 
 Локальный установщик создаётся по пути:
 
-`dist\installer\PredictiveQueryOptimization-Setup-0.3.0.exe`
+`dist\installer\PredictiveQueryOptimization-Setup-0.4.0.exe`
+
+SHA-256 проверенной сборки:
+`B1124409C316E60CC298063DDF4A0DCDF2ABE2867897FC12239ACE9C6F209C64`.
 
 Стандартный каталог установки:
 
@@ -31,7 +34,7 @@ docker compose up -d --wait
 Требуются Windows 10/11, Python с созданным `.venv` и Inno Setup 6. Полная
 команда:
 
-Проверенный установщик 0.3.0 собран на Python 3.13.3. Для обычного запуска
+Проверенный установщик 0.4.0 собран на Python 3.13.3. Для обычного запуска
 исходников допустимы версии из диапазона `requires-python`, но релизную
 Windows-сборку следует выполнять на 3.13.3: на тестовой системе Python 3.13.15
 зависал в системном WMI-вызове ещё до запуска приложения.
@@ -43,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 Скрипт устанавливает группы зависимостей `desktop` и `build`, генерирует
 иконку, собирает каталог `dist\PredictiveQueryOptimization`, запускает
 smoke-тест и формирует установщик. Smoke-тест проверяет не только запуск Qt, но
-и реальную десериализацию артефактов XGBoost и DQN. Его журнал находится в
+и реальную десериализацию артефактов XGBoost, DQN и селектора стратегии. Его журнал находится в
 `%LOCALAPPDATA%\PredictiveQueryOptimization\artifacts\smoke-test.log`.
 
 Для повторной сборки без установки зависимостей:

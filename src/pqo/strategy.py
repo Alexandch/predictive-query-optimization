@@ -314,7 +314,11 @@ def train_strategy_classifier(
         n_jobs=4,
         eval_metric="mlogloss",
     )
-    classifier.fit(x[train_indices], y[train_indices])
+    classifier.fit(
+        x[train_indices],
+        y[train_indices],
+        sample_weight=_balanced_sample_weights(y[train_indices], np, len(labels)),
+    )
     predictions = classifier.predict(x[test_indices]).astype(int)
     majority_class = int(np.bincount(y[train_indices]).argmax())
     test_y = y[test_indices]
@@ -336,7 +340,11 @@ def train_strategy_classifier(
         seed=seed,
     )
 
-    classifier.fit(x, y)
+    classifier.fit(
+        x,
+        y,
+        sample_weight=_balanced_sample_weights(y, np, len(labels)),
+    )
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     joblib.dump(
@@ -346,6 +354,7 @@ def train_strategy_classifier(
             "labels": labels,
             "format_version": 1,
             "seed": seed,
+            "class_balanced": True,
         },
         destination / "strategy_selector.joblib",
     )
@@ -405,6 +414,14 @@ def _read_strategy_records(path: str | Path) -> list[dict]:
         if len(record.get("strategy_features", ())) != len(expected_features):
             raise ValueError("Strategy experience contains an invalid feature vector")
     return records
+
+
+def _balanced_sample_weights(y, np, class_count: int):
+    counts = np.bincount(y, minlength=class_count)
+    return np.asarray(
+        [len(y) / (class_count * counts[class_id]) for class_id in y],
+        dtype=np.float32,
+    )
 
 
 def _index_result_payload(

@@ -19,6 +19,7 @@ from .strategy import (
     train_strategy_classifier,
 )
 from .strategy_queries import generate_strategy_workload
+from .strategy_validation import evaluate_strategy_stability
 
 
 def main() -> int:
@@ -31,7 +32,7 @@ def main() -> int:
         "seed-workload", help="write a reproducible three-domain workload"
     )
     seed_workload.add_argument("output", type=Path)
-    seed_workload.add_argument("--ordinary-per-domain", type=int, default=6)
+    seed_workload.add_argument("--ordinary-per-domain", type=int, default=15)
     seed_workload.add_argument("--rewrite-variants", type=int, default=3)
     seed_workload.add_argument("--seed", type=int, default=42)
 
@@ -50,6 +51,13 @@ def main() -> int:
 
     summary = commands.add_parser("summary", help="show dataset balance")
     summary.add_argument("experience", type=Path)
+
+    validate = commands.add_parser(
+        "validate", help="repeat unseen-template evaluation across seeds"
+    )
+    validate.add_argument("experience", type=Path)
+    validate.add_argument("output", type=Path)
+    validate.add_argument("--seeds", type=int, nargs="+", default=(7, 21, 42, 84, 168))
 
     predict = commands.add_parser("predict", help="classify one SQL query")
     predict.add_argument("model", type=Path)
@@ -92,6 +100,14 @@ def main() -> int:
         )
     elif args.command == "summary":
         result = summarize_strategy_experience(args.experience)
+    elif args.command == "validate":
+        result = asdict(
+            evaluate_strategy_stability(
+                args.experience,
+                args.output,
+                seeds=tuple(args.seeds),
+            )
+        )
     else:
         state = build_query_state(args.sql)
         index_count = len(

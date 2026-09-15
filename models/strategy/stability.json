@@ -1,0 +1,552 @@
+{
+  "sample_count": 84,
+  "template_count": 58,
+  "class_counts": {
+    "NOOP": 28,
+    "CREATE_INDEX": 33,
+    "REWRITE_QUERY": 23
+  },
+  "seeds": [
+    7,
+    21,
+    42,
+    84,
+    168
+  ],
+  "runs": [
+    {
+      "sample_count": 84,
+      "train_count": 55,
+      "test_count": 29,
+      "train_templates": [
+        "aircraft_capacity_load",
+        "booking_month_outliers",
+        "daily_flight_count",
+        "flight_revenue",
+        "flights_without_tickets",
+        "pagila_category_percentiles",
+        "pagila_customer_lifetime_value",
+        "pagila_customer_payment_transitions",
+        "pagila_customer_recency_rank",
+        "pagila_film_pair_affinity",
+        "pagila_inventory_imbalance",
+        "pagila_store_monthly_revenue",
+        "pagila_unrented_films",
+        "passenger_spending_rank",
+        "retail_basket_statistics",
+        "retail_brand_performance",
+        "retail_category_revenue",
+        "retail_daily_channel_revenue",
+        "retail_inventory_imbalance",
+        "retail_product_affinity",
+        "retail_refund_report",
+        "retail_repeat_customers",
+        "retail_stale_pending_orders",
+        "retail_stock_by_region",
+        "retail_top_products",
+        "route_traffic_share",
+        "strategy_aviation_booking_has_tickets",
+        "strategy_aviation_ticket_has_flights",
+        "strategy_pagila_film_has_inventory",
+        "strategy_pagila_inventory_has_rentals",
+        "strategy_pagila_payment_has_customer",
+        "strategy_pagila_rental_has_inventory",
+        "strategy_retail_customer_has_orders",
+        "strategy_retail_item_has_order",
+        "strategy_retail_order_has_items",
+        "ticket_fare_lookup",
+        "ticket_name_prefix"
+      ],
+      "test_templates": [
+        "aircraft_flight_counts",
+        "aircraft_revenue_rank",
+        "connecting_itineraries",
+        "flight_occupancy",
+        "latest_route_flights",
+        "monthly_route_rank",
+        "pagila_actor_rental_impact",
+        "pagila_city_customer_density",
+        "pagila_country_revenue",
+        "pagila_inactive_customers",
+        "pagila_payment_moving_average",
+        "pagila_rating_revenue_pivot",
+        "pagila_repeat_renters",
+        "retail_failed_payments",
+        "retail_orders_by_status",
+        "retail_regional_sales",
+        "retail_shipment_sla",
+        "strategy_aviation_boarding_has_flight",
+        "strategy_aviation_segment_has_ticket",
+        "strategy_retail_payment_has_order",
+        "strategy_retail_product_has_sales"
+      ],
+      "class_counts": {
+        "NOOP": 28,
+        "CREATE_INDEX": 33,
+        "REWRITE_QUERY": 23
+      },
+      "accuracy": 0.7931034482758621,
+      "balanced_accuracy": 0.806060606060606,
+      "macro_f1": 0.7990196078431374,
+      "majority_accuracy": 0.3793103448275862,
+      "confusion_matrix": [
+        [
+          6,
+          4,
+          0
+        ],
+        [
+          1,
+          9,
+          1
+        ],
+        [
+          0,
+          0,
+          8
+        ]
+      ],
+      "labels": [
+        "NOOP",
+        "CREATE_INDEX",
+        "REWRITE_QUERY"
+      ],
+      "seed": 7
+    },
+    {
+      "sample_count": 84,
+      "train_count": 56,
+      "test_count": 28,
+      "train_templates": [
+        "aircraft_capacity_load",
+        "aircraft_flight_counts",
+        "aircraft_revenue_rank",
+        "booking_month_outliers",
+        "daily_flight_count",
+        "flight_revenue",
+        "latest_route_flights",
+        "monthly_route_rank",
+        "pagila_actor_rental_impact",
+        "pagila_category_percentiles",
+        "pagila_city_customer_density",
+        "pagila_country_revenue",
+        "pagila_customer_lifetime_value",
+        "pagila_customer_payment_transitions",
+        "pagila_customer_recency_rank",
+        "pagila_payment_moving_average",
+        "pagila_repeat_renters",
+        "pagila_store_monthly_revenue",
+        "pagila_unrented_films",
+        "passenger_spending_rank",
+        "retail_brand_performance",
+        "retail_failed_payments",
+        "retail_orders_by_status",
+        "retail_product_affinity",
+        "retail_refund_report",
+        "retail_regional_sales",
+        "retail_repeat_customers",
+        "retail_shipment_sla",
+        "retail_stale_pending_orders",
+        "retail_stock_by_region",
+        "route_traffic_share",
+        "strategy_aviation_boarding_has_flight",
+        "strategy_aviation_segment_has_ticket",
+        "strategy_aviation_ticket_has_flights",
+        "strategy_pagila_film_has_inventory",
+        "strategy_pagila_payment_has_customer",
+        "strategy_retail_customer_has_orders",
+        "strategy_retail_order_has_items",
+        "strategy_retail_product_has_sales",
+        "ticket_fare_lookup"
+      ],
+      "test_templates": [
+        "connecting_itineraries",
+        "flight_occupancy",
+        "flights_without_tickets",
+        "pagila_film_pair_affinity",
+        "pagila_inactive_customers",
+        "pagila_inventory_imbalance",
+        "pagila_rating_revenue_pivot",
+        "retail_basket_statistics",
+        "retail_category_revenue",
+        "retail_daily_channel_revenue",
+        "retail_inventory_imbalance",
+        "retail_top_products",
+        "strategy_aviation_booking_has_tickets",
+        "strategy_pagila_inventory_has_rentals",
+        "strategy_pagila_rental_has_inventory",
+        "strategy_retail_item_has_order",
+        "strategy_retail_payment_has_order",
+        "ticket_name_prefix"
+      ],
+      "class_counts": {
+        "NOOP": 28,
+        "CREATE_INDEX": 33,
+        "REWRITE_QUERY": 23
+      },
+      "accuracy": 0.6785714285714286,
+      "balanced_accuracy": 0.6868686868686869,
+      "macro_f1": 0.6519480519480519,
+      "majority_accuracy": 0.39285714285714285,
+      "confusion_matrix": [
+        [
+          3,
+          3,
+          3
+        ],
+        [
+          2,
+          8,
+          1
+        ],
+        [
+          0,
+          0,
+          8
+        ]
+      ],
+      "labels": [
+        "NOOP",
+        "CREATE_INDEX",
+        "REWRITE_QUERY"
+      ],
+      "seed": 21
+    },
+    {
+      "sample_count": 84,
+      "train_count": 55,
+      "test_count": 29,
+      "train_templates": [
+        "aircraft_revenue_rank",
+        "booking_month_outliers",
+        "connecting_itineraries",
+        "daily_flight_count",
+        "flight_revenue",
+        "latest_route_flights",
+        "monthly_route_rank",
+        "pagila_actor_rental_impact",
+        "pagila_city_customer_density",
+        "pagila_customer_recency_rank",
+        "pagila_film_pair_affinity",
+        "pagila_inactive_customers",
+        "pagila_payment_moving_average",
+        "pagila_repeat_renters",
+        "pagila_store_monthly_revenue",
+        "pagila_unrented_films",
+        "passenger_spending_rank",
+        "retail_basket_statistics",
+        "retail_brand_performance",
+        "retail_failed_payments",
+        "retail_inventory_imbalance",
+        "retail_orders_by_status",
+        "retail_regional_sales",
+        "retail_stale_pending_orders",
+        "retail_top_products",
+        "route_traffic_share",
+        "strategy_aviation_booking_has_tickets",
+        "strategy_aviation_segment_has_ticket",
+        "strategy_aviation_ticket_has_flights",
+        "strategy_pagila_film_has_inventory",
+        "strategy_pagila_inventory_has_rentals",
+        "strategy_pagila_payment_has_customer",
+        "strategy_pagila_rental_has_inventory",
+        "strategy_retail_customer_has_orders",
+        "strategy_retail_order_has_items",
+        "ticket_fare_lookup",
+        "ticket_name_prefix"
+      ],
+      "test_templates": [
+        "aircraft_capacity_load",
+        "aircraft_flight_counts",
+        "flight_occupancy",
+        "flights_without_tickets",
+        "pagila_category_percentiles",
+        "pagila_country_revenue",
+        "pagila_customer_lifetime_value",
+        "pagila_customer_payment_transitions",
+        "pagila_inventory_imbalance",
+        "pagila_rating_revenue_pivot",
+        "retail_category_revenue",
+        "retail_daily_channel_revenue",
+        "retail_product_affinity",
+        "retail_refund_report",
+        "retail_repeat_customers",
+        "retail_shipment_sla",
+        "retail_stock_by_region",
+        "strategy_aviation_boarding_has_flight",
+        "strategy_retail_item_has_order",
+        "strategy_retail_payment_has_order",
+        "strategy_retail_product_has_sales"
+      ],
+      "class_counts": {
+        "NOOP": 28,
+        "CREATE_INDEX": 33,
+        "REWRITE_QUERY": 23
+      },
+      "accuracy": 0.7241379310344828,
+      "balanced_accuracy": 0.7424242424242425,
+      "macro_f1": 0.7320261437908497,
+      "majority_accuracy": 0.3793103448275862,
+      "confusion_matrix": [
+        [
+          5,
+          5,
+          0
+        ],
+        [
+          2,
+          8,
+          1
+        ],
+        [
+          0,
+          0,
+          8
+        ]
+      ],
+      "labels": [
+        "NOOP",
+        "CREATE_INDEX",
+        "REWRITE_QUERY"
+      ],
+      "seed": 42
+    },
+    {
+      "sample_count": 84,
+      "train_count": 56,
+      "test_count": 28,
+      "train_templates": [
+        "aircraft_capacity_load",
+        "aircraft_flight_counts",
+        "booking_month_outliers",
+        "connecting_itineraries",
+        "daily_flight_count",
+        "flight_revenue",
+        "latest_route_flights",
+        "pagila_actor_rental_impact",
+        "pagila_category_percentiles",
+        "pagila_country_revenue",
+        "pagila_customer_lifetime_value",
+        "pagila_customer_payment_transitions",
+        "pagila_customer_recency_rank",
+        "pagila_film_pair_affinity",
+        "pagila_inventory_imbalance",
+        "pagila_payment_moving_average",
+        "pagila_rating_revenue_pivot",
+        "pagila_repeat_renters",
+        "pagila_store_monthly_revenue",
+        "retail_basket_statistics",
+        "retail_category_revenue",
+        "retail_daily_channel_revenue",
+        "retail_failed_payments",
+        "retail_orders_by_status",
+        "retail_product_affinity",
+        "retail_refund_report",
+        "retail_repeat_customers",
+        "retail_shipment_sla",
+        "retail_top_products",
+        "route_traffic_share",
+        "strategy_aviation_boarding_has_flight",
+        "strategy_aviation_booking_has_tickets",
+        "strategy_aviation_segment_has_ticket",
+        "strategy_pagila_film_has_inventory",
+        "strategy_retail_item_has_order",
+        "strategy_retail_order_has_items",
+        "strategy_retail_payment_has_order",
+        "strategy_retail_product_has_sales",
+        "ticket_fare_lookup",
+        "ticket_name_prefix"
+      ],
+      "test_templates": [
+        "aircraft_revenue_rank",
+        "flight_occupancy",
+        "flights_without_tickets",
+        "monthly_route_rank",
+        "pagila_city_customer_density",
+        "pagila_inactive_customers",
+        "pagila_unrented_films",
+        "passenger_spending_rank",
+        "retail_brand_performance",
+        "retail_inventory_imbalance",
+        "retail_regional_sales",
+        "retail_stale_pending_orders",
+        "retail_stock_by_region",
+        "strategy_aviation_ticket_has_flights",
+        "strategy_pagila_inventory_has_rentals",
+        "strategy_pagila_payment_has_customer",
+        "strategy_pagila_rental_has_inventory",
+        "strategy_retail_customer_has_orders"
+      ],
+      "class_counts": {
+        "NOOP": 28,
+        "CREATE_INDEX": 33,
+        "REWRITE_QUERY": 23
+      },
+      "accuracy": 0.6071428571428571,
+      "balanced_accuracy": 0.6216329966329966,
+      "macro_f1": 0.6042884990253411,
+      "majority_accuracy": 0.39285714285714285,
+      "confusion_matrix": [
+        [
+          4,
+          1,
+          4
+        ],
+        [
+          5,
+          6,
+          0
+        ],
+        [
+          0,
+          1,
+          7
+        ]
+      ],
+      "labels": [
+        "NOOP",
+        "CREATE_INDEX",
+        "REWRITE_QUERY"
+      ],
+      "seed": 84
+    },
+    {
+      "sample_count": 84,
+      "train_count": 56,
+      "test_count": 28,
+      "train_templates": [
+        "aircraft_flight_counts",
+        "aircraft_revenue_rank",
+        "connecting_itineraries",
+        "daily_flight_count",
+        "flight_occupancy",
+        "latest_route_flights",
+        "monthly_route_rank",
+        "pagila_actor_rental_impact",
+        "pagila_category_percentiles",
+        "pagila_customer_lifetime_value",
+        "pagila_customer_payment_transitions",
+        "pagila_customer_recency_rank",
+        "pagila_inactive_customers",
+        "pagila_inventory_imbalance",
+        "pagila_repeat_renters",
+        "pagila_store_monthly_revenue",
+        "pagila_unrented_films",
+        "retail_brand_performance",
+        "retail_category_revenue",
+        "retail_daily_channel_revenue",
+        "retail_failed_payments",
+        "retail_inventory_imbalance",
+        "retail_orders_by_status",
+        "retail_refund_report",
+        "retail_regional_sales",
+        "retail_repeat_customers",
+        "retail_stale_pending_orders",
+        "retail_stock_by_region",
+        "retail_top_products",
+        "route_traffic_share",
+        "strategy_aviation_booking_has_tickets",
+        "strategy_aviation_segment_has_ticket",
+        "strategy_aviation_ticket_has_flights",
+        "strategy_pagila_payment_has_customer",
+        "strategy_pagila_rental_has_inventory",
+        "strategy_retail_customer_has_orders",
+        "strategy_retail_item_has_order",
+        "strategy_retail_payment_has_order",
+        "ticket_fare_lookup",
+        "ticket_name_prefix"
+      ],
+      "test_templates": [
+        "aircraft_capacity_load",
+        "booking_month_outliers",
+        "flight_revenue",
+        "flights_without_tickets",
+        "pagila_city_customer_density",
+        "pagila_country_revenue",
+        "pagila_film_pair_affinity",
+        "pagila_payment_moving_average",
+        "pagila_rating_revenue_pivot",
+        "passenger_spending_rank",
+        "retail_basket_statistics",
+        "retail_product_affinity",
+        "retail_shipment_sla",
+        "strategy_aviation_boarding_has_flight",
+        "strategy_pagila_film_has_inventory",
+        "strategy_pagila_inventory_has_rentals",
+        "strategy_retail_order_has_items",
+        "strategy_retail_product_has_sales"
+      ],
+      "class_counts": {
+        "NOOP": 28,
+        "CREATE_INDEX": 33,
+        "REWRITE_QUERY": 23
+      },
+      "accuracy": 0.7142857142857143,
+      "balanced_accuracy": 0.6965367965367966,
+      "macro_f1": 0.6979066022544284,
+      "majority_accuracy": 0.39285714285714285,
+      "confusion_matrix": [
+        [
+          7,
+          0,
+          3
+        ],
+        [
+          1,
+          9,
+          1
+        ],
+        [
+          0,
+          3,
+          4
+        ]
+      ],
+      "labels": [
+        "NOOP",
+        "CREATE_INDEX",
+        "REWRITE_QUERY"
+      ],
+      "seed": 168
+    }
+  ],
+  "accuracy": {
+    "mean": 0.7034482758620689,
+    "standard_deviation": 0.060790053543472444,
+    "minimum": 0.6071428571428571,
+    "maximum": 0.7931034482758621
+  },
+  "balanced_accuracy": {
+    "mean": 0.7107046657046657,
+    "standard_deviation": 0.061321336488166636,
+    "minimum": 0.6216329966329966,
+    "maximum": 0.806060606060606
+  },
+  "macro_f1": {
+    "mean": 0.6970377809723617,
+    "standard_deviation": 0.06672442785099443,
+    "minimum": 0.6042884990253411,
+    "maximum": 0.7990196078431374
+  },
+  "accuracy_lift_over_majority": {
+    "mean": 0.31600985221674877,
+    "standard_deviation": 0.06585895553248433,
+    "minimum": 0.21428571428571425,
+    "maximum": 0.4137931034482759
+  },
+  "readiness_criteria": {
+    "minimum_samples": 50,
+    "minimum_samples_per_class": 8,
+    "minimum_mean_balanced_accuracy": 0.6,
+    "minimum_worst_balanced_accuracy": 0.45,
+    "minimum_mean_macro_f1": 0.55,
+    "minimum_mean_accuracy_lift": 0.05,
+    "sample_count_passed": true,
+    "class_balance_passed": true,
+    "mean_balanced_accuracy_passed": true,
+    "worst_balanced_accuracy_passed": true,
+    "mean_macro_f1_passed": true,
+    "mean_accuracy_lift_passed": true
+  },
+  "ready_for_ui_trial": true
+}

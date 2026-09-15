@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import unittest
 from datetime import datetime, timezone
 
@@ -10,6 +11,7 @@ from pqo.desktop import (
     DEFAULT_DQN_MODEL,
     DEFAULT_DQN_STRESS_METRICS,
     DEFAULT_SEQUENTIAL_DQN_MODEL,
+    DEFAULT_STRATEGY_MODEL,
     DEFAULT_XGB_MODEL,
     MainWindow,
     _format_index_action,
@@ -37,6 +39,9 @@ class DesktopTests(unittest.TestCase):
             self.assertIsNotNone(window.calibrate_button)
             self.assertTrue(window.deep_analyze_button.isEnabled())
             self.assertTrue(window.rewrite_analyze_button.isEnabled())
+            self.assertEqual(
+                Path(window.strategy_model_edit.text()), DEFAULT_STRATEGY_MODEL
+            )
             self.assertFalse(window.use_calibration_check.isChecked())
         finally:
             window.close()
@@ -45,6 +50,7 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(DEFAULT_XGB_MODEL.is_file())
         self.assertTrue(DEFAULT_DQN_MODEL.is_file())
         self.assertTrue(DEFAULT_SEQUENTIAL_DQN_MODEL.is_file())
+        self.assertTrue(DEFAULT_STRATEGY_MODEL.is_file())
         self.assertTrue(DEFAULT_DQN_STRESS_METRICS.is_file())
 
     def test_sequential_index_ddl_is_readable(self):
