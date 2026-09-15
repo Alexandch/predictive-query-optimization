@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .config import DatabaseSettings
@@ -42,6 +42,8 @@ class SequentialRecommendationPlan:
     minimum_baseline_time_ms: float
     minimum_absolute_improvement_ms: float
     terminal_reason: str
+    query_run_id: int | None = None
+    sequential_analysis_id: int | None = None
 
     @property
     def measured_improvement_ratio(self) -> float:
@@ -60,6 +62,8 @@ def recommend_sequential_indexes(
     repetitions: int = 1,
     minimum_baseline_time_ms: float = 50.0,
     minimum_absolute_improvement_ms: float = 5.0,
+    persist: bool = False,
+    query_run_id: int | None = None,
 ) -> SequentialRecommendationPlan:
     """Measure a model-selected plan and discard all trial indexes on exit."""
     import psycopg
@@ -157,7 +161,7 @@ def recommend_sequential_indexes(
                 if transition.next_state.done:
                     terminal_reason = transition.terminal_reason or "max_steps"
                     break
-    return SequentialRecommendationPlan(
+    plan = SequentialRecommendationPlan(
         steps=tuple(accepted_steps),
         baseline_time_ms=baseline_time,
         final_time_ms=final_time,
@@ -169,3 +173,19 @@ def recommend_sequential_indexes(
         minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
         terminal_reason=terminal_reason,
     )
+    if persist:
+        from .repository import save_sequential_analysis
+
+        saved_query_run_id, sequential_analysis_id = save_sequential_analysis(
+            sql_text,
+            plan,
+            settings=settings,
+            query_run_id=query_run_id,
+            model_version=Path(model_path).name,
+        )
+        plan = replace(
+            plan,
+            query_run_id=saved_query_run_id,
+            sequential_analysis_id=sequential_analysis_id,
+        )
+    return plan

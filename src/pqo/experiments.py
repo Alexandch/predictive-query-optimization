@@ -285,10 +285,19 @@ def export_history_records(
         "recommended_table",
         "recommended_columns",
         "predicted_reward",
+        "sequential_analysis_id",
+        "measured_baseline_time_ms",
+        "measured_final_time_ms",
+        "measured_improvement_ratio",
+        "sequential_terminal_reason",
+        "sequential_steps",
     ]
     with destination.open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             row["recommended_columns"] = ", ".join(row["recommended_columns"])
+            row["sequential_steps"] = json.dumps(
+                row["sequential_steps"], ensure_ascii=False
+            )
             writer.writerow(row)

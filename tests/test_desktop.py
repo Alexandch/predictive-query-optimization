@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -14,6 +15,7 @@ from pqo.desktop import (
     _format_index_action,
 )
 from pqo.index_actions import IndexAction
+from pqo.history import HistoryRecord, HistorySequentialStep
 
 
 class DesktopTests(unittest.TestCase):
@@ -54,6 +56,47 @@ class DesktopTests(unittest.TestCase):
             'CREATE INDEX ON "public"."orders" ("customer_id") '
             'INCLUDE ("created_at");',
         )
+
+    def test_history_displays_measured_sequential_result(self):
+        window = MainWindow()
+        try:
+            record = HistoryRecord(
+                query_run_id=4,
+                started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                status="completed",
+                sql_text="SELECT 1",
+                predicted_time_ms=11.4,
+                root_node_type="Result",
+                recommended_table=None,
+                recommended_columns=(),
+                predicted_reward=None,
+                sequential_analysis_id=8,
+                measured_baseline_time_ms=4.12,
+                measured_final_time_ms=3.09,
+                measured_improvement_ratio=0.25,
+                sequential_terminal_reason="max_steps",
+                sequential_steps=(
+                    HistorySequentialStep(
+                        1,
+                        'CREATE INDEX ON "public"."orders" ("customer_id");',
+                        0.75,
+                        0.23,
+                        4.12,
+                        3.09,
+                        65536,
+                        True,
+                    ),
+                ),
+            )
+
+            window._show_history([record])
+
+            self.assertEqual(window.history_table.columnCount(), 10)
+            self.assertEqual(window.history_table.item(0, 0).text(), "4/8")
+            self.assertIn("4.12", window.history_table.item(0, 7).text())
+            self.assertEqual(window.history_table.item(0, 8).text(), "+25.0%")
+        finally:
+            window.close()
 
 
 if __name__ == "__main__":

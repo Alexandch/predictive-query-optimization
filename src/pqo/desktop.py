@@ -127,6 +127,8 @@ class MainWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.history_records = []
         self.last_prediction_ms: float | None = None
+        self.last_query_run_id: int | None = None
+        self.last_analyzed_sql: str | None = None
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
@@ -259,9 +261,13 @@ class MainWindow(QMainWindow):
         header.addWidget(self.history_export_button)
         layout.addLayout(header)
 
-        self.history_table = QTableWidget(0, 7)
+        self.history_table = QTableWidget(0, 10)
         self.history_table.setHorizontalHeaderLabels(
-            ["ID", "Время", "SQL", "Прогноз", "План", "Индекс", "Reward"]
+            [
+                "ID", "Время", "SQL", "ML-прогноз", "План",
+                "Рекомендация", "Q/Reward", "Факт до → после",
+                "Выигрыш", "Итог глубокого анализа",
+            ]
         )
         self.history_table.setAlternatingRowColors(True)
         self.history_table.setSelectionBehavior(
@@ -612,6 +618,8 @@ class MainWindow(QMainWindow):
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
         prediction = analysis.prediction
         self.last_prediction_ms = prediction.predicted_time_ms
+        self.last_query_run_id = analysis.query_run_id
+        self.last_analyzed_sql = prediction.sql_text
         prediction_text = f"{prediction.predicted_time_ms:.2f} мс"
         if abs(prediction.calibration_factor - 1.0) > 1e-12:
             prediction_text += (
@@ -687,6 +695,13 @@ class MainWindow(QMainWindow):
             repetitions=1,
             minimum_baseline_time_ms=self.threshold_spin.value(),
             minimum_absolute_improvement_ms=5.0,
+            persist=self.persist_check.isChecked(),
+            query_run_id=(
+                self.last_query_run_id
+                if self.last_query_run_id is not None
+                and self.last_analyzed_sql == sql_text
+                else None
+            ),
         )
         worker.signals.succeeded.connect(self._show_sequential_analysis)
         worker.signals.failed.connect(
@@ -698,6 +713,9 @@ class MainWindow(QMainWindow):
         self, plan: SequentialRecommendationPlan
     ) -> None:
         self.deep_analyze_button.setEnabled(True)
+        if plan.query_run_id is not None:
+            self.last_query_run_id = plan.query_run_id
+            self.last_analyzed_sql = self.sql_editor.toPlainText().strip()
         prediction_text = (
             "—"
             if self.last_prediction_ms is None
@@ -757,7 +775,15 @@ class MainWindow(QMainWindow):
                 )
             )
             self.recommendation_text.setPlainText("\n".join(lines))
-        self.statusBar().showMessage("Глубокий анализ завершён; изменения откачены")
+        saved = (
+            f"; запись #{plan.query_run_id}, глубокий результат "
+            f"#{plan.sequential_analysis_id} сохранён"
+            if plan.sequential_analysis_id is not None
+            else ""
+        )
+        self.statusBar().showMessage(
+            f"Глубокий анализ завершён; изменения откачены{saved}"
+        )
 
     def _refresh_history(self) -> None:
         self.statusBar().showMessage("Загрузка истории…")
@@ -775,14 +801,46 @@ class MainWindow(QMainWindow):
             recommendation = record.recommended_table or "—"
             if record.recommended_columns:
                 recommendation += f" ({', '.join(record.recommended_columns)})"
+            if record.sequential_steps:
+                recommendation = "\n".join(
+                    step.proposed_ddl for step in record.sequential_steps
+                )
+            measured_time = "—"
+            if record.measured_baseline_time_ms is not None:
+                measured_time = (
+                    f"{record.measured_baseline_time_ms:.2f} → "
+                    f"{record.measured_final_time_ms:.2f} мс"
+                )
+            measured_gain = (
+                "—"
+                if record.measured_improvement_ratio is None
+                else f"{record.measured_improvement_ratio:+.1%}"
+            )
+            score = (
+                "—"
+                if record.predicted_reward is None
+                else f"{record.predicted_reward:.4f}"
+            )
+            if record.sequential_steps:
+                score = "; ".join(
+                    f"Q={step.predicted_q:.4f}, reward={step.measured_reward:+.4f}"
+                    for step in record.sequential_steps
+                )
             values = (
-                str(record.query_run_id),
+                (
+                    str(record.query_run_id)
+                    if record.sequential_analysis_id is None
+                    else f"{record.query_run_id}/{record.sequential_analysis_id}"
+                ),
                 record.started_at.astimezone().strftime("%d.%m.%Y %H:%M:%S"),
                 sql_preview,
                 "—" if record.predicted_time_ms is None else f"{record.predicted_time_ms:.2f} мс",
                 record.root_node_type or "—",
                 recommendation,
-                "—" if record.predicted_reward is None else f"{record.predicted_reward:.4f}",
+                score,
+                measured_time,
+                measured_gain,
+                record.sequential_terminal_reason or "—",
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)

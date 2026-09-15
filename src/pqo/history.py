@@ -9,6 +9,18 @@ from .config import DatabaseSettings
 
 
 @dataclass(frozen=True, slots=True)
+class HistorySequentialStep:
+    step_number: int
+    proposed_ddl: str
+    predicted_q: float
+    measured_reward: float
+    before_time_ms: float
+    after_time_ms: float
+    index_size_bytes: int
+    used_by_postgresql: bool
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryRecord:
     query_run_id: int
     started_at: datetime
@@ -19,6 +31,12 @@ class HistoryRecord:
     recommended_table: str | None
     recommended_columns: tuple[str, ...]
     predicted_reward: float | None
+    sequential_analysis_id: int | None = None
+    measured_baseline_time_ms: float | None = None
+    measured_final_time_ms: float | None = None
+    measured_improvement_ratio: float | None = None
+    sequential_terminal_reason: str | None = None
+    sequential_steps: tuple[HistorySequentialStep, ...] = ()
 
 
 def load_analysis_history(
@@ -33,18 +51,64 @@ def load_analysis_history(
 
     settings = settings or DatabaseSettings.from_env()
     with psycopg.connect(**settings.connection_kwargs()) as connection:
-        rows = connection.execute(
+        sequential_history_ready = connection.execute(
+            "SELECT to_regclass('pqo.sequential_analysis') IS NOT NULL "
+            "AND to_regclass('pqo.sequential_analysis_step') IS NOT NULL"
+        ).fetchone()[0]
+        sequential_columns = (
             """
+                sequential.id,
+                sequential.baseline_time_ms,
+                sequential.final_time_ms,
+                sequential.measured_improvement_ratio,
+                sequential.terminal_reason,
+                sequential_steps.steps
+            """
+            if sequential_history_ready
+            else "NULL, NULL, NULL, NULL, NULL, NULL"
+        )
+        sequential_join = (
+            """
+            LEFT JOIN pqo.sequential_analysis AS sequential
+                ON sequential.query_run_id = qr.id
+            LEFT JOIN LATERAL (
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'step_number', step.step_number,
+                        'proposed_ddl', step.proposed_ddl,
+                        'predicted_q', step.predicted_q,
+                        'measured_reward', step.measured_reward,
+                        'before_time_ms', step.before_time_ms,
+                        'after_time_ms', step.after_time_ms,
+                        'index_size_bytes', step.index_size_bytes,
+                        'used_by_postgresql', step.used_by_postgresql
+                    ) ORDER BY step.step_number
+                ) AS steps
+                FROM pqo.sequential_analysis_step AS step
+                WHERE step.sequential_analysis_id = sequential.id
+            ) AS sequential_steps ON true
+            """
+            if sequential_history_ready
+            else ""
+        )
+        event_time = (
+            "COALESCE(sequential.created_at, qr.started_at)"
+            if sequential_history_ready
+            else "qr.started_at"
+        )
+        rows = connection.execute(
+            f"""
             SELECT
                 qr.id,
-                qr.started_at,
+                {event_time},
                 qr.status,
                 qr.sql_text,
                 prediction.predicted_time_ms,
                 ep.root_node_type,
                 recommendation.table_name,
                 recommendation.index_columns,
-                recommendation.estimated_improvement
+                recommendation.estimated_improvement,
+                {sequential_columns}
             FROM pqo.query_run AS qr
             LEFT JOIN pqo.execution_plan AS ep ON ep.query_run_id = qr.id
             LEFT JOIN LATERAL (
@@ -61,8 +125,9 @@ def load_analysis_history(
                 ORDER BY ir.created_at DESC
                 LIMIT 1
             ) AS recommendation ON true
+            {sequential_join}
             WHERE qr.source = 'application'
-            ORDER BY qr.started_at DESC
+            ORDER BY {event_time} DESC
             LIMIT %s
             """,
             (limit,),
@@ -79,6 +144,24 @@ def load_analysis_history(
             recommended_table=row[6],
             recommended_columns=tuple(row[7] or ()),
             predicted_reward=row[8],
+            sequential_analysis_id=row[9],
+            measured_baseline_time_ms=row[10],
+            measured_final_time_ms=row[11],
+            measured_improvement_ratio=row[12],
+            sequential_terminal_reason=row[13],
+            sequential_steps=tuple(
+                HistorySequentialStep(
+                    step_number=step["step_number"],
+                    proposed_ddl=step["proposed_ddl"],
+                    predicted_q=step["predicted_q"],
+                    measured_reward=step["measured_reward"],
+                    before_time_ms=step["before_time_ms"],
+                    after_time_ms=step["after_time_ms"],
+                    index_size_bytes=step["index_size_bytes"],
+                    used_by_postgresql=step["used_by_postgresql"],
+                )
+                for step in (row[14] or ())
+            ),
         )
         for row in rows
     ]

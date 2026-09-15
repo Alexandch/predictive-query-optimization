@@ -12,7 +12,7 @@ from pqo.experiments import (
     export_history_records,
     promote_candidate_model,
 )
-from pqo.history import HistoryRecord
+from pqo.history import HistoryRecord, HistorySequentialStep
 
 
 class ExperimentTests(unittest.TestCase):
@@ -94,6 +94,23 @@ class ExperimentTests(unittest.TestCase):
                 None,
                 (),
                 None,
+                sequential_analysis_id=5,
+                measured_baseline_time_ms=12.0,
+                measured_final_time_ms=7.0,
+                measured_improvement_ratio=5 / 12,
+                sequential_terminal_reason="max_steps",
+                sequential_steps=(
+                    HistorySequentialStep(
+                        1,
+                        'CREATE INDEX ON "public"."orders" ("customer_id");',
+                        0.8,
+                        0.4,
+                        12.0,
+                        7.0,
+                        8192,
+                        True,
+                    ),
+                ),
             )
         ]
         with tempfile.TemporaryDirectory() as temp_directory:
@@ -111,6 +128,14 @@ class ExperimentTests(unittest.TestCase):
             self.assertIn("SELECT 1", (root / "points.csv").read_text(encoding="utf-8-sig"))
             self.assertTrue((root / "points_summary.csv").is_file())
             self.assertIn("completed", (root / "history.csv").read_text(encoding="utf-8-sig"))
+            history_json = json.loads(
+                (root / "history.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(history_json[0]["measured_final_time_ms"], 7.0)
+            self.assertEqual(
+                history_json[0]["sequential_steps"][0]["index_size_bytes"],
+                8192,
+            )
 
 
 if __name__ == "__main__":

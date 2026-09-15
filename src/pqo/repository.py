@@ -234,6 +234,129 @@ def save_optimization_result(
             )
 
 
+def save_sequential_analysis(
+    sql_text: str,
+    plan,
+    settings: DatabaseSettings | None = None,
+    *,
+    query_run_id: int | None = None,
+    model_version: str = "unknown",
+    source: str = "application",
+    connection=None,
+) -> tuple[int, int]:
+    """Persist a measured sequential plan and all of its accepted steps."""
+    import psycopg
+
+    settings = settings or DatabaseSettings.from_env()
+    normalized_sql = sql_text.strip()
+    sql_hash = hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest()
+    if connection is None:
+        with psycopg.connect(**settings.connection_kwargs()) as owned_connection:
+            return save_sequential_analysis(
+                normalized_sql,
+                plan,
+                settings=settings,
+                query_run_id=query_run_id,
+                model_version=model_version,
+                source=source,
+                connection=owned_connection,
+            )
+
+    with connection.transaction():
+        if query_run_id is None:
+            query_run_id = connection.execute(
+                """
+                INSERT INTO pqo.query_run (
+                    sql_text, sql_hash, source, status, finished_at,
+                    execution_time_ms
+                ) VALUES (%s, %s, %s, 'completed', clock_timestamp(), %s)
+                RETURNING id
+                """,
+                (normalized_sql, sql_hash, source, plan.baseline_time_ms),
+            ).fetchone()[0]
+        else:
+            existing = connection.execute(
+                "SELECT sql_text FROM pqo.query_run WHERE id = %s",
+                (query_run_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError(f"Query run #{query_run_id} does not exist")
+            if existing[0].strip() != normalized_sql:
+                raise ValueError("Sequential analysis SQL does not match query run")
+            connection.execute(
+                """
+                UPDATE pqo.query_run
+                SET status = 'completed',
+                    finished_at = COALESCE(finished_at, clock_timestamp()),
+                    execution_time_ms = %s
+                WHERE id = %s
+                """,
+                (plan.baseline_time_ms, query_run_id),
+            )
+
+        sequential_analysis_id = connection.execute(
+            """
+            INSERT INTO pqo.sequential_analysis (
+                query_run_id, model_version, baseline_time_ms, final_time_ms,
+                measured_improvement_ratio, storage_budget_bytes,
+                used_budget_bytes, candidate_count, decision_threshold,
+                minimum_baseline_time_ms, minimum_absolute_improvement_ms,
+                terminal_reason
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            ) RETURNING id
+            """,
+            (
+                query_run_id,
+                model_version,
+                plan.baseline_time_ms,
+                plan.final_time_ms,
+                plan.measured_improvement_ratio,
+                plan.storage_budget_bytes,
+                plan.used_budget_bytes,
+                plan.candidate_count,
+                plan.decision_threshold,
+                plan.minimum_baseline_time_ms,
+                plan.minimum_absolute_improvement_ms,
+                plan.terminal_reason,
+            ),
+        ).fetchone()[0]
+
+        for step_number, step in enumerate(plan.steps, start=1):
+            action = step.action
+            connection.execute(
+                """
+                INSERT INTO pqo.sequential_analysis_step (
+                    sequential_analysis_id, step_number, schema_name,
+                    table_name, key_columns, include_columns, proposed_ddl,
+                    predicted_q, measured_reward, before_time_ms,
+                    after_time_ms, index_size_bytes, creation_time_ms,
+                    used_by_postgresql
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    sequential_analysis_id,
+                    step_number,
+                    action.schema_name,
+                    action.table_name,
+                    list(action.key_columns),
+                    list(action.include_columns),
+                    _proposed_ddl(action),
+                    step.predicted_q,
+                    step.measured_reward,
+                    step.before_time_ms,
+                    step.after_time_ms,
+                    step.index_size_bytes,
+                    step.creation_time_ms,
+                    step.used_by_postgresql,
+                ),
+            )
+
+    return query_run_id, sequential_analysis_id
+
+
 def _proposed_ddl(action) -> str:
     keys = ", ".join(f'"{column}"' for column in action.key_columns)
     statement = (
