@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predictive-query-optimization"
-version = "0.4.0"
+version = "0.5.0"
 description = "PostgreSQL query-time prediction and index recommendation system"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,19 +15,23 @@ dependencies = [
 [project.optional-dependencies]
 ml = [
     "joblib>=1.6,<2",
+    "numpy>=2.3,<2.4",
     "pandas>=3.0,<4",
+    "scipy>=1.16,<1.17",
     "scikit-learn>=1.9,<2",
     "xgboost>=3.4,<4",
 ]
 rl = [
-    "torch>=2.10,<3",
+    "torch>=2.10,<2.11",
 ]
 desktop = [
     "joblib>=1.6,<2",
+    "numpy>=2.3,<2.4",
     "pandas>=3.0,<4",
+    "scipy>=1.16,<1.17",
     "scikit-learn>=1.9,<2",
     "xgboost>=3.4,<4",
-    "torch>=2.10,<3",
+    "torch>=2.10,<2.11",
     "PyQt6>=6.7,<7",
 ]
 build = [
@@ -37,10 +41,12 @@ build = [
 dev = [
     "pytest>=8.3,<9",
     "joblib>=1.6,<2",
+    "numpy>=2.3,<2.4",
     "pandas>=3.0,<4",
+    "scipy>=1.16,<1.17",
     "scikit-learn>=1.9,<2",
     "xgboost>=3.4,<4",
-    "torch>=2.10,<3",
+    "torch>=2.10,<2.11",
     "PyQt6>=6.7,<7",
 ]
 
@@ -79,6 +85,7 @@ pqo-sequential-train = "pqo.sequential_dqn_cli:train_main"
 pqo-sequential-control = "pqo.sequential_control_cli:main"
 pqo-rewrite = "pqo.rewrite_cli:main"
 pqo-strategy = "pqo.strategy_cli:main"
+pqo-structure = "pqo.structure_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

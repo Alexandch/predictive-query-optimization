@@ -1,6 +1,7 @@
 param(
     [switch]$SkipInstaller,
-    [switch]$SkipDependencyInstall
+    [switch]$SkipDependencyInstall,
+    [switch]$Incremental
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,7 +26,12 @@ try {
     & $python scripts\generate_app_icon.py $icon
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    & $python $pyinstallerRunner --noconfirm --clean $spec
+    $pyinstallerArguments = @("--noconfirm")
+    if (-not $Incremental) {
+        $pyinstallerArguments += "--clean"
+    }
+    $pyinstallerArguments += $spec
+    & $python $pyinstallerRunner @pyinstallerArguments
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not (Test-Path -LiteralPath $executable)) {
         throw "PyInstaller did not create $executable"

@@ -121,6 +121,32 @@ def _format_index_action(action) -> str:
     return ddl + ";"
 
 
+def _format_structural_recommendations(recommendations) -> str:
+    if not recommendations:
+        return "Дополнительный структурный анализ: рекомендаций не найдено."
+    categories = {
+        "aggregation": "Агрегация",
+        "join": "JOIN",
+        "sort": "Сортировка",
+        "materialized_view": "Материализованное представление",
+    }
+    priorities = {"high": "высокий", "medium": "средний", "low": "низкий"}
+    lines = ["Дополнительные структурные рекомендации:"]
+    for position, item in enumerate(recommendations, start=1):
+        lines.extend(
+            (
+                f"{position}. [{categories[item.category.value]}; "
+                f"приоритет: {priorities[item.priority.value]}] {item.title}",
+                f"   Основание: {item.evidence}",
+                f"   Действие: {item.action}",
+                f"   Проверка: {item.verification}",
+            )
+        )
+        if item.suggested_sql:
+            lines.append(f"   Шаблон SQL:\n{item.suggested_sql}")
+    return "\n".join(lines)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -235,7 +261,7 @@ class MainWindow(QMainWindow):
         recommendation_layout = QVBoxLayout(recommendation_group)
         self.recommendation_text = QPlainTextEdit()
         self.recommendation_text.setReadOnly(True)
-        self.recommendation_text.setMaximumHeight(240)
+        self.recommendation_text.setMaximumHeight(380)
         self.recommendation_text.setPlaceholderText(
             "Рекомендация появится после анализа достаточно долгого запроса."
         )
@@ -703,6 +729,10 @@ class MainWindow(QMainWindow):
                 f"Вероятности модели: {probability_text}\n\n"
                 f"Предварительная индексная оценка:\n{text}"
             )
+        text = (
+            f"{text}\n\n"
+            f"{_format_structural_recommendations(analysis.structural_recommendations)}"
+        )
         self.recommendation_text.setPlainText(text)
         self.analyze_button.setEnabled(True)
         self.statusBar().showMessage(

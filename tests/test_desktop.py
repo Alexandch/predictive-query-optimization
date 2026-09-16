@@ -15,9 +15,15 @@ from pqo.desktop import (
     DEFAULT_XGB_MODEL,
     MainWindow,
     _format_index_action,
+    _format_structural_recommendations,
 )
 from pqo.index_actions import IndexAction
 from pqo.history import HistoryRecord, HistorySequentialStep
+from pqo.structural_advisor import (
+    RecommendationCategory,
+    RecommendationPriority,
+    StructuralRecommendation,
+)
 
 
 class DesktopTests(unittest.TestCase):
@@ -63,6 +69,25 @@ class DesktopTests(unittest.TestCase):
             'CREATE INDEX ON "public"."orders" ("customer_id") '
             'INCLUDE ("created_at");',
         )
+
+    def test_structural_recommendation_is_readable(self):
+        text = _format_structural_recommendations(
+            (
+                StructuralRecommendation(
+                    RecommendationCategory.SORT,
+                    "large-offset-pagination",
+                    RecommendationPriority.HIGH,
+                    "Использовать keyset",
+                    "OFFSET 5000",
+                    "Передать последний ключ",
+                    "Сравнить EXPLAIN ANALYZE",
+                ),
+            )
+        )
+
+        self.assertIn("Сортировка", text)
+        self.assertIn("приоритет: высокий", text)
+        self.assertIn("OFFSET 5000", text)
 
     def test_history_displays_measured_sequential_result(self):
         window = MainWindow()

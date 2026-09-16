@@ -21,6 +21,7 @@ from .recommendation import IndexRecommendation
 from .repository import save_analysis, save_optimization_result
 from .sql_features import extract_sql_features
 from .strategy import build_strategy_features, predict_strategy
+from .structural_advisor import StructuralRecommendation, analyze_query_structure
 from .training import predict_query_time
 
 
@@ -31,6 +32,7 @@ class QueryAnalysis:
     recommendation_threshold_ms: float
     query_run_id: int | None
     strategy_prediction: dict | None = None
+    structural_recommendations: tuple[StructuralRecommendation, ...] = ()
 
 
 def analyze_query(
@@ -92,6 +94,11 @@ def analyze_query(
         uncalibrated_time_ms=uncalibrated_time,
         calibration_factor=calibration_factor,
         calibration_sample_count=calibration_sample_count,
+    )
+    structural_recommendations = analyze_query_structure(
+        normalized_sql,
+        plan_json=estimated_plan.plan_json,
+        predicted_time_ms=predicted_time,
     )
 
     query_state = encode_query_state(feature_values)
@@ -187,4 +194,5 @@ def analyze_query(
         recommendation_threshold_ms=recommendation_threshold_ms,
         query_run_id=query_run_id,
         strategy_prediction=strategy_prediction,
+        structural_recommendations=structural_recommendations,
     )
