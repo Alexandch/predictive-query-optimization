@@ -18,6 +18,15 @@ from pqo.structural_feedback import (
     record_recommendation_decision,
     record_recommendation_measurement,
 )
+from pqo.structural_advisor import (
+    RecommendationCategory,
+    RecommendationPriority,
+    StructuralRecommendation,
+)
+from pqo.structural_validation import (
+    validate_and_save_structural_recommendation,
+    validate_structural_recommendation,
+)
 
 
 @unittest.skipUnless(
@@ -351,6 +360,97 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(stored[4], 0.375)
         self.assertEqual(stored[5], "improved")
         self.assertEqual(measurement.measurement_outcome.value, "improved")
+
+    def test_automatic_having_validation_is_saved_and_rolled_back(self):
+        import psycopg
+
+        sql_text = (
+            "SELECT order_status, count(*) FROM retail.customer_orders "
+            "GROUP BY order_status HAVING order_status = 'paid'"
+        )
+        analysis = analyze_query(
+            sql_text,
+            self.PROJECT_ROOT / "models/xgboost/xgboost_query_time.joblib",
+            self.PROJECT_ROOT / "models/dqn/dqn_index_advisor.pt",
+            recommendation_threshold_ms=1_000_000_000,
+            persist=True,
+        )
+        recommendation = next(
+            item
+            for item in analysis.structural_recommendations
+            if item.rule_id == "non-aggregate-having-filter"
+        )
+        record_recommendation_decision(
+            recommendation.recommendation_id,
+            RecommendationDecision.ACCEPTED,
+        )
+
+        validation = validate_and_save_structural_recommendation(
+            sql_text, recommendation, repetitions=1
+        )
+
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            stored = connection.execute(
+                """
+                SELECT validation.equivalent, validation.rolled_back,
+                       validation.baseline_time_ms,
+                       validation.candidate_time_ms,
+                       feedback.measured_at IS NOT NULL
+                FROM pqo.structural_validation AS validation
+                JOIN pqo.structural_recommendation AS feedback
+                  ON feedback.id = validation.recommendation_id
+                WHERE validation.id = %s
+                """,
+                (validation.validation_id,),
+            ).fetchone()
+            connection.execute(
+                "DELETE FROM pqo.query_run WHERE id = %s",
+                (analysis.query_run_id,),
+            )
+
+        self.assertTrue(stored[0])
+        self.assertTrue(stored[1])
+        self.assertGreater(stored[2], 0)
+        self.assertGreater(stored[3], 0)
+        self.assertTrue(stored[4])
+
+    def test_materialized_view_trial_leaves_no_schema(self):
+        import psycopg
+
+        sql_text = (
+            "SELECT a.airport_code, count(*) AS flight_count "
+            "FROM aviation.airports a "
+            "JOIN aviation.flights f "
+            "ON f.departure_airport = a.airport_code "
+            "GROUP BY a.airport_code"
+        )
+        recommendation = StructuralRecommendation(
+            RecommendationCategory.MATERIALIZED_VIEW,
+            "expensive-summary-materialization",
+            RecommendationPriority.MEDIUM,
+            "Проверить materialized view",
+            "Повторяемая агрегация",
+            "Создать пробное представление",
+            "Сравнить время",
+            "CREATE MATERIALIZED VIEW placeholder AS SELECT 1 WITH NO DATA;",
+        )
+
+        validation = validate_structural_recommendation(
+            sql_text, recommendation, repetitions=1
+        )
+
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            remaining = connection.execute(
+                "SELECT count(*) FROM pg_namespace "
+                "WHERE nspname LIKE 'pqo_trial_%'"
+            ).fetchone()[0]
+        self.assertTrue(validation.supported)
+        self.assertTrue(validation.equivalent)
+        self.assertTrue(validation.rolled_back)
+        self.assertGreater(validation.artifact_creation_time_ms, 0)
+        self.assertEqual(remaining, 0)
 
 
 if __name__ == "__main__":

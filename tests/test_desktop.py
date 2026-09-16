@@ -52,6 +52,7 @@ class DesktopTests(unittest.TestCase):
             self.assertFalse(window.accept_structural_button.isEnabled())
             self.assertFalse(window.reject_structural_button.isEnabled())
             self.assertFalse(window.save_structural_measurement_button.isEnabled())
+            self.assertFalse(window.validate_structural_button.isEnabled())
             self.assertEqual(
                 Path(window.strategy_model_edit.text()), DEFAULT_STRATEGY_MODEL
             )
@@ -100,8 +101,8 @@ class DesktopTests(unittest.TestCase):
         window = MainWindow()
         try:
             recommendation = StructuralRecommendation(
-                RecommendationCategory.JOIN,
-                "cartesian-join",
+                RecommendationCategory.AGGREGATION,
+                "non-aggregate-having-filter",
                 RecommendationPriority.HIGH,
                 "Проверить JOIN",
                 "Нет ON",
@@ -118,6 +119,7 @@ class DesktopTests(unittest.TestCase):
             window.structural_feedback_state[42] = "accepted"
             window._sync_structural_feedback_controls()
             self.assertTrue(window.save_structural_measurement_button.isEnabled())
+            self.assertTrue(window.validate_structural_button.isEnabled())
         finally:
             window.close()
 

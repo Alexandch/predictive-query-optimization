@@ -67,6 +67,10 @@ from .structural_feedback import (
     record_recommendation_decision,
     record_recommendation_measurement,
 )
+from .structural_validation import (
+    automatic_validation_supported,
+    validate_and_save_structural_recommendation,
+)
 from .training import train_xgboost
 
 
@@ -319,6 +323,15 @@ class MainWindow(QMainWindow):
             self._submit_structural_measurement
         )
         measurement_row.addWidget(self.save_structural_measurement_button)
+        self.validate_structural_button = QPushButton("Проверить автоматически")
+        self.validate_structural_button.setEnabled(False)
+        self.validate_structural_button.setToolTip(
+            "Выполняет исходный и пробный варианты внутри транзакции с полным откатом."
+        )
+        self.validate_structural_button.clicked.connect(
+            self._start_structural_validation
+        )
+        measurement_row.addWidget(self.validate_structural_button)
         self.structural_feedback_status = QLabel(
             "Сохраните анализ в историю, чтобы оставить обратную связь."
         )
@@ -808,6 +821,7 @@ class MainWindow(QMainWindow):
         self.accept_structural_button.setEnabled(False)
         self.reject_structural_button.setEnabled(False)
         self.save_structural_measurement_button.setEnabled(False)
+        self.validate_structural_button.setEnabled(False)
         self.structural_feedback_note.clear()
         self.structural_feedback_status.setText(
             "Сохраните анализ в историю, чтобы оставить обратную связь."
@@ -844,6 +858,17 @@ class MainWindow(QMainWindow):
         value = self.structural_recommendation_combo.currentData()
         return int(value) if value is not None else None
 
+    def _selected_structural_recommendation(self):
+        recommendation_id = self._selected_structural_recommendation_id()
+        return next(
+            (
+                item
+                for item in self.last_structural_recommendations
+                if item.recommendation_id == recommendation_id
+            ),
+            None,
+        )
+
     def _sync_structural_feedback_controls(self) -> None:
         recommendation_id = self._selected_structural_recommendation_id()
         available = recommendation_id is not None
@@ -852,6 +877,13 @@ class MainWindow(QMainWindow):
         self.reject_structural_button.setEnabled(available)
         self.save_structural_measurement_button.setEnabled(
             available and status == RecommendationDecision.ACCEPTED.value
+        )
+        recommendation = self._selected_structural_recommendation()
+        self.validate_structural_button.setEnabled(
+            available
+            and status == RecommendationDecision.ACCEPTED.value
+            and recommendation is not None
+            and automatic_validation_supported(recommendation.rule_id)
         )
         if available:
             labels = {
@@ -868,6 +900,7 @@ class MainWindow(QMainWindow):
         self.accept_structural_button.setEnabled(False)
         self.reject_structural_button.setEnabled(False)
         self.save_structural_measurement_button.setEnabled(False)
+        self.validate_structural_button.setEnabled(False)
         self.structural_feedback_status.setText("Сохраняю решение…")
         worker = Worker(
             record_recommendation_decision,
@@ -928,6 +961,64 @@ class MainWindow(QMainWindow):
         self.save_structural_measurement_button.setEnabled(True)
         self.statusBar().showMessage(
             f"Фактический эффект рекомендации #{update.recommendation_id} сохранён"
+        )
+
+    def _start_structural_validation(self) -> None:
+        recommendation = self._selected_structural_recommendation()
+        if recommendation is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Запустить автоматическую проверку?",
+            "PostgreSQL реально выполнит исходный и пробный варианты через "
+            "EXPLAIN ANALYZE. Для materialized view временно создаст отдельную "
+            "схему. Транзакция будет полностью откачена, но тяжёлый запрос может "
+            "работать до установленного statement_timeout.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.validate_structural_button.setEnabled(False)
+        self.accept_structural_button.setEnabled(False)
+        self.reject_structural_button.setEnabled(False)
+        self.save_structural_measurement_button.setEnabled(False)
+        self.structural_feedback_status.setText(
+            "Выполняю изолированную фактическую проверку…"
+        )
+        worker = Worker(
+            validate_and_save_structural_recommendation,
+            self.last_analyzed_sql,
+            recommendation,
+            self._database_settings(),
+            repetitions=3,
+            work_mem_mb=64,
+        )
+        worker.signals.succeeded.connect(self._structural_validation_finished)
+        worker.signals.failed.connect(self._structural_feedback_failed)
+        self.thread_pool.start(worker)
+
+    def _structural_validation_finished(self, result) -> None:
+        if not result.supported:
+            self._sync_structural_feedback_controls()
+            self.structural_feedback_status.setText(
+                "Автопроверка недоступна: " + result.details["reason"]
+            )
+            return
+        creation = (
+            ""
+            if result.artifact_creation_time_ms is None
+            else f"; построение {result.artifact_creation_time_ms:.2f} мс"
+        )
+        verdict = "подтверждено" if result.accepted else "эффект не подтверждён"
+        self.structural_before_spin.setValue(result.baseline_time_ms)
+        self.structural_after_spin.setValue(result.candidate_time_ms)
+        self._sync_structural_feedback_controls()
+        self.structural_feedback_status.setText(
+            f"{verdict}: {result.baseline_time_ms:.2f} → "
+            f"{result.candidate_time_ms:.2f} мс "
+            f"({result.improvement_ratio:+.1%}){creation}; rollback выполнен."
+        )
+        self.statusBar().showMessage(
+            f"Автопроверка #{result.validation_id} завершена; изменения откачены"
         )
 
     def _structural_feedback_failed(self, message: str) -> None:
