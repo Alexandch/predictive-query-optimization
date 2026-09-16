@@ -34,6 +34,7 @@ class StructuralRecommendation:
     action: str
     verification: str
     suggested_sql: str | None = None
+    recommendation_id: int | None = None
 
 
 def analyze_query_structure(

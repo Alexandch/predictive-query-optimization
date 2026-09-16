@@ -21,6 +21,17 @@ class HistorySequentialStep:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryStructuralFeedback:
+    recommendation_id: int
+    category: str
+    rule_id: str
+    title: str
+    status: str
+    measured_improvement_ratio: float | None
+    measurement_outcome: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryRecord:
     query_run_id: int
     started_at: datetime
@@ -37,6 +48,7 @@ class HistoryRecord:
     measured_improvement_ratio: float | None = None
     sequential_terminal_reason: str | None = None
     sequential_steps: tuple[HistorySequentialStep, ...] = ()
+    structural_feedback: tuple[HistoryStructuralFeedback, ...] = ()
 
 
 def load_analysis_history(
@@ -51,10 +63,12 @@ def load_analysis_history(
 
     settings = settings or DatabaseSettings.from_env()
     with psycopg.connect(**settings.connection_kwargs()) as connection:
-        sequential_history_ready = connection.execute(
-            "SELECT to_regclass('pqo.sequential_analysis') IS NOT NULL "
-            "AND to_regclass('pqo.sequential_analysis_step') IS NOT NULL"
-        ).fetchone()[0]
+        sequential_history_ready, structural_feedback_ready = connection.execute(
+            "SELECT "
+            "to_regclass('pqo.sequential_analysis') IS NOT NULL "
+            "AND to_regclass('pqo.sequential_analysis_step') IS NOT NULL, "
+            "to_regclass('pqo.structural_recommendation') IS NOT NULL"
+        ).fetchone()
         sequential_columns = (
             """
                 sequential.id,
@@ -91,6 +105,31 @@ def load_analysis_history(
             if sequential_history_ready
             else ""
         )
+        structural_feedback_column = (
+            "structural_feedback.items" if structural_feedback_ready else "NULL"
+        )
+        structural_feedback_join = (
+            """
+            LEFT JOIN LATERAL (
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'recommendation_id', feedback.id,
+                        'category', feedback.category,
+                        'rule_id', feedback.rule_id,
+                        'title', feedback.title,
+                        'status', feedback.status,
+                        'measured_improvement_ratio',
+                            feedback.measured_improvement_ratio,
+                        'measurement_outcome', feedback.measurement_outcome
+                    ) ORDER BY feedback.id
+                ) AS items
+                FROM pqo.structural_recommendation AS feedback
+                WHERE feedback.query_run_id = qr.id
+            ) AS structural_feedback ON true
+            """
+            if structural_feedback_ready
+            else ""
+        )
         event_time = (
             "COALESCE(sequential.created_at, qr.started_at)"
             if sequential_history_ready
@@ -108,7 +147,8 @@ def load_analysis_history(
                 recommendation.table_name,
                 recommendation.index_columns,
                 recommendation.estimated_improvement,
-                {sequential_columns}
+                {sequential_columns},
+                {structural_feedback_column}
             FROM pqo.query_run AS qr
             LEFT JOIN pqo.execution_plan AS ep ON ep.query_run_id = qr.id
             LEFT JOIN LATERAL (
@@ -126,6 +166,7 @@ def load_analysis_history(
                 LIMIT 1
             ) AS recommendation ON true
             {sequential_join}
+            {structural_feedback_join}
             WHERE qr.source = 'application'
             ORDER BY {event_time} DESC
             LIMIT %s
@@ -161,6 +202,20 @@ def load_analysis_history(
                     used_by_postgresql=step["used_by_postgresql"],
                 )
                 for step in (row[14] or ())
+            ),
+            structural_feedback=tuple(
+                HistoryStructuralFeedback(
+                    recommendation_id=item["recommendation_id"],
+                    category=item["category"],
+                    rule_id=item["rule_id"],
+                    title=item["title"],
+                    status=item["status"],
+                    measured_improvement_ratio=item[
+                        "measured_improvement_ratio"
+                    ],
+                    measurement_outcome=item["measurement_outcome"],
+                )
+                for item in (row[15] or ())
             ),
         )
         for row in rows

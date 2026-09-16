@@ -22,6 +22,7 @@ from .repository import save_analysis, save_optimization_result
 from .sql_features import extract_sql_features
 from .strategy import build_strategy_features, predict_strategy
 from .structural_advisor import StructuralRecommendation, analyze_query_structure
+from .structural_feedback import save_structural_recommendations
 from .training import predict_query_time
 
 
@@ -187,6 +188,12 @@ def analyze_query(
             recommendation,
             settings=settings,
         )
+        if structural_recommendations:
+            structural_recommendations = save_structural_recommendations(
+                query_run_id,
+                structural_recommendations,
+                settings=settings,
+            )
 
     return QueryAnalysis(
         prediction=prediction,

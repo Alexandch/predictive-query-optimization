@@ -62,6 +62,11 @@ from .sequential_recommendation import (
     recommend_sequential_indexes,
 )
 from .sql_rewrite import SQLRewritePlan, evaluate_sql_rewrites
+from .structural_feedback import (
+    RecommendationDecision,
+    record_recommendation_decision,
+    record_recommendation_measurement,
+)
 from .training import train_xgboost
 
 
@@ -157,6 +162,8 @@ class MainWindow(QMainWindow):
         self.last_prediction_ms: float | None = None
         self.last_query_run_id: int | None = None
         self.last_analyzed_sql: str | None = None
+        self.last_structural_recommendations = ()
+        self.structural_feedback_state: dict[int, str] = {}
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
@@ -261,11 +268,63 @@ class MainWindow(QMainWindow):
         recommendation_layout = QVBoxLayout(recommendation_group)
         self.recommendation_text = QPlainTextEdit()
         self.recommendation_text.setReadOnly(True)
-        self.recommendation_text.setMaximumHeight(380)
+        self.recommendation_text.setMaximumHeight(300)
         self.recommendation_text.setPlaceholderText(
             "Рекомендация появится после анализа достаточно долгого запроса."
         )
         recommendation_layout.addWidget(self.recommendation_text)
+
+        feedback_row = QHBoxLayout()
+        self.structural_recommendation_combo = QComboBox()
+        self.structural_recommendation_combo.setEnabled(False)
+        self.structural_recommendation_combo.currentIndexChanged.connect(
+            self._sync_structural_feedback_controls
+        )
+        feedback_row.addWidget(self.structural_recommendation_combo, 2)
+        self.structural_feedback_note = QLineEdit()
+        self.structural_feedback_note.setPlaceholderText("Комментарий (необязательно)")
+        feedback_row.addWidget(self.structural_feedback_note, 2)
+        self.accept_structural_button = QPushButton("Принять")
+        self.accept_structural_button.setEnabled(False)
+        self.accept_structural_button.clicked.connect(
+            lambda: self._submit_structural_decision(
+                RecommendationDecision.ACCEPTED
+            )
+        )
+        feedback_row.addWidget(self.accept_structural_button)
+        self.reject_structural_button = QPushButton("Отклонить")
+        self.reject_structural_button.setEnabled(False)
+        self.reject_structural_button.clicked.connect(
+            lambda: self._submit_structural_decision(
+                RecommendationDecision.REJECTED
+            )
+        )
+        feedback_row.addWidget(self.reject_structural_button)
+        recommendation_layout.addLayout(feedback_row)
+
+        measurement_row = QHBoxLayout()
+        measurement_row.addWidget(QLabel("Фактический замер, мс: до"))
+        self.structural_before_spin = QDoubleSpinBox()
+        self.structural_before_spin.setRange(0, 1_000_000_000)
+        self.structural_before_spin.setDecimals(3)
+        measurement_row.addWidget(self.structural_before_spin)
+        measurement_row.addWidget(QLabel("после"))
+        self.structural_after_spin = QDoubleSpinBox()
+        self.structural_after_spin.setRange(0, 1_000_000_000)
+        self.structural_after_spin.setDecimals(3)
+        measurement_row.addWidget(self.structural_after_spin)
+        self.save_structural_measurement_button = QPushButton("Сохранить замер")
+        self.save_structural_measurement_button.setEnabled(False)
+        self.save_structural_measurement_button.clicked.connect(
+            self._submit_structural_measurement
+        )
+        measurement_row.addWidget(self.save_structural_measurement_button)
+        self.structural_feedback_status = QLabel(
+            "Сохраните анализ в историю, чтобы оставить обратную связь."
+        )
+        self.structural_feedback_status.setObjectName("mutedLabel")
+        measurement_row.addWidget(self.structural_feedback_status, 2)
+        recommendation_layout.addLayout(measurement_row)
         layout.addWidget(recommendation_group)
         self.tabs.addTab(page, "Анализ")
 
@@ -296,12 +355,12 @@ class MainWindow(QMainWindow):
         header.addWidget(self.history_export_button)
         layout.addLayout(header)
 
-        self.history_table = QTableWidget(0, 10)
+        self.history_table = QTableWidget(0, 11)
         self.history_table.setHorizontalHeaderLabels(
             [
                 "ID", "Время", "SQL", "ML-прогноз", "План",
                 "Рекомендация", "Q/Reward", "Факт до → после",
-                "Выигрыш", "Итог глубокого анализа",
+                "Выигрыш", "Итог глубокого анализа", "Структурная ОС",
             ]
         )
         self.history_table.setAlternatingRowColors(True)
@@ -645,6 +704,7 @@ class MainWindow(QMainWindow):
             return
 
         self.analyze_button.setEnabled(False)
+        self._reset_structural_feedback()
         self.statusBar().showMessage("Анализ запроса…")
         worker = Worker(
             analyze_query,
@@ -734,10 +794,145 @@ class MainWindow(QMainWindow):
             f"{_format_structural_recommendations(analysis.structural_recommendations)}"
         )
         self.recommendation_text.setPlainText(text)
+        self._configure_structural_feedback(analysis.structural_recommendations)
         self.analyze_button.setEnabled(True)
         self.statusBar().showMessage(
             f"Анализ завершён · запись #{analysis.query_run_id or 'не сохранена'}"
         )
+
+    def _reset_structural_feedback(self) -> None:
+        self.last_structural_recommendations = ()
+        self.structural_feedback_state.clear()
+        self.structural_recommendation_combo.clear()
+        self.structural_recommendation_combo.setEnabled(False)
+        self.accept_structural_button.setEnabled(False)
+        self.reject_structural_button.setEnabled(False)
+        self.save_structural_measurement_button.setEnabled(False)
+        self.structural_feedback_note.clear()
+        self.structural_feedback_status.setText(
+            "Сохраните анализ в историю, чтобы оставить обратную связь."
+        )
+
+    def _configure_structural_feedback(self, recommendations) -> None:
+        self._reset_structural_feedback()
+        self.last_structural_recommendations = tuple(recommendations)
+        persisted = [
+            item for item in recommendations if item.recommendation_id is not None
+        ]
+        for position, item in enumerate(persisted, start=1):
+            self.structural_recommendation_combo.addItem(
+                f"{position}. [{item.category.value}] {item.title}",
+                item.recommendation_id,
+            )
+            self.structural_feedback_state[item.recommendation_id] = "proposed"
+        if persisted:
+            self.structural_recommendation_combo.setEnabled(True)
+            self.structural_feedback_status.setText(
+                "Выберите рекомендацию и зафиксируйте решение."
+            )
+            self._sync_structural_feedback_controls()
+        elif recommendations:
+            self.structural_feedback_status.setText(
+                "Рекомендации не сохранены: включите «Сохранять в историю pqo»."
+            )
+        else:
+            self.structural_feedback_status.setText(
+                "Для этого запроса структурных рекомендаций нет."
+            )
+
+    def _selected_structural_recommendation_id(self) -> int | None:
+        value = self.structural_recommendation_combo.currentData()
+        return int(value) if value is not None else None
+
+    def _sync_structural_feedback_controls(self) -> None:
+        recommendation_id = self._selected_structural_recommendation_id()
+        available = recommendation_id is not None
+        status = self.structural_feedback_state.get(recommendation_id, "proposed")
+        self.accept_structural_button.setEnabled(available)
+        self.reject_structural_button.setEnabled(available)
+        self.save_structural_measurement_button.setEnabled(
+            available and status == RecommendationDecision.ACCEPTED.value
+        )
+        if available:
+            labels = {
+                "proposed": "Решение ещё не принято.",
+                "accepted": "Рекомендация принята; можно сохранить независимый замер.",
+                "rejected": "Рекомендация отклонена.",
+            }
+            self.structural_feedback_status.setText(labels[status])
+
+    def _submit_structural_decision(self, decision: RecommendationDecision) -> None:
+        recommendation_id = self._selected_structural_recommendation_id()
+        if recommendation_id is None:
+            return
+        self.accept_structural_button.setEnabled(False)
+        self.reject_structural_button.setEnabled(False)
+        self.save_structural_measurement_button.setEnabled(False)
+        self.structural_feedback_status.setText("Сохраняю решение…")
+        worker = Worker(
+            record_recommendation_decision,
+            recommendation_id,
+            decision,
+            self.structural_feedback_note.text(),
+            self._database_settings(),
+        )
+        worker.signals.succeeded.connect(self._structural_decision_saved)
+        worker.signals.failed.connect(self._structural_feedback_failed)
+        self.thread_pool.start(worker)
+
+    def _structural_decision_saved(self, update) -> None:
+        self.structural_feedback_state[update.recommendation_id] = update.status
+        self._sync_structural_feedback_controls()
+        self.statusBar().showMessage(
+            f"Обратная связь по рекомендации #{update.recommendation_id} сохранена"
+        )
+
+    def _submit_structural_measurement(self) -> None:
+        recommendation_id = self._selected_structural_recommendation_id()
+        before = self.structural_before_spin.value()
+        after = self.structural_after_spin.value()
+        if recommendation_id is None:
+            return
+        if before <= 0:
+            QMessageBox.warning(
+                self,
+                "Некорректный замер",
+                "Фактическое время до оптимизации должно быть больше нуля.",
+            )
+            return
+        self.save_structural_measurement_button.setEnabled(False)
+        self.structural_feedback_status.setText("Сохраняю фактический результат…")
+        worker = Worker(
+            record_recommendation_measurement,
+            recommendation_id,
+            before,
+            after,
+            self.structural_feedback_note.text(),
+            self._database_settings(),
+        )
+        worker.signals.succeeded.connect(self._structural_measurement_saved)
+        worker.signals.failed.connect(self._structural_feedback_failed)
+        self.thread_pool.start(worker)
+
+    def _structural_measurement_saved(self, update) -> None:
+        outcome_labels = {
+            "improved": "улучшение",
+            "unchanged": "без существенного изменения",
+            "regressed": "ухудшение",
+        }
+        ratio = update.measured_improvement_ratio or 0.0
+        outcome = outcome_labels[update.measurement_outcome.value]
+        self.structural_feedback_status.setText(
+            f"Замер сохранён: {outcome}, эффект {ratio:+.1%}."
+        )
+        self.save_structural_measurement_button.setEnabled(True)
+        self.statusBar().showMessage(
+            f"Фактический эффект рекомендации #{update.recommendation_id} сохранён"
+        )
+
+    def _structural_feedback_failed(self, message: str) -> None:
+        self._sync_structural_feedback_controls()
+        self._task_failed(message)
 
     def _start_sequential_analysis(self) -> None:
         sql_text = self.sql_editor.toPlainText().strip()
@@ -988,6 +1183,31 @@ class MainWindow(QMainWindow):
                     f"Q={step.predicted_q:.4f}, reward={step.measured_reward:+.4f}"
                     for step in record.sequential_steps
                 )
+            structural_feedback = "—"
+            if record.structural_feedback:
+                feedback_lines = []
+                outcome_labels = {
+                    "improved": "улучшение",
+                    "unchanged": "без изменения",
+                    "regressed": "ухудшение",
+                }
+                status_labels = {
+                    "proposed": "предложено",
+                    "accepted": "принято",
+                    "rejected": "отклонено",
+                }
+                for feedback in record.structural_feedback:
+                    line = (
+                        f"{feedback.rule_id}: "
+                        f"{status_labels.get(feedback.status, feedback.status)}"
+                    )
+                    if feedback.measurement_outcome:
+                        line += (
+                            f", {outcome_labels.get(feedback.measurement_outcome, feedback.measurement_outcome)} "
+                            f"{feedback.measured_improvement_ratio:+.1%}"
+                        )
+                    feedback_lines.append(line)
+                structural_feedback = "\n".join(feedback_lines)
             values = (
                 (
                     str(record.query_run_id)
@@ -1003,6 +1223,7 @@ class MainWindow(QMainWindow):
                 measured_time,
                 measured_gain,
                 record.sequential_terminal_reason or "—",
+                structural_feedback,
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)

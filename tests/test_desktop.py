@@ -18,7 +18,11 @@ from pqo.desktop import (
     _format_structural_recommendations,
 )
 from pqo.index_actions import IndexAction
-from pqo.history import HistoryRecord, HistorySequentialStep
+from pqo.history import (
+    HistoryRecord,
+    HistorySequentialStep,
+    HistoryStructuralFeedback,
+)
 from pqo.structural_advisor import (
     RecommendationCategory,
     RecommendationPriority,
@@ -45,6 +49,9 @@ class DesktopTests(unittest.TestCase):
             self.assertIsNotNone(window.calibrate_button)
             self.assertTrue(window.deep_analyze_button.isEnabled())
             self.assertTrue(window.rewrite_analyze_button.isEnabled())
+            self.assertFalse(window.accept_structural_button.isEnabled())
+            self.assertFalse(window.reject_structural_button.isEnabled())
+            self.assertFalse(window.save_structural_measurement_button.isEnabled())
             self.assertEqual(
                 Path(window.strategy_model_edit.text()), DEFAULT_STRATEGY_MODEL
             )
@@ -89,6 +96,31 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("приоритет: высокий", text)
         self.assertIn("OFFSET 5000", text)
 
+    def test_persisted_structural_recommendation_enables_feedback(self):
+        window = MainWindow()
+        try:
+            recommendation = StructuralRecommendation(
+                RecommendationCategory.JOIN,
+                "cartesian-join",
+                RecommendationPriority.HIGH,
+                "Проверить JOIN",
+                "Нет ON",
+                "Добавить условие",
+                "Сравнить EXPLAIN",
+                recommendation_id=42,
+            )
+
+            window._configure_structural_feedback((recommendation,))
+
+            self.assertEqual(window.structural_recommendation_combo.currentData(), 42)
+            self.assertTrue(window.accept_structural_button.isEnabled())
+            self.assertFalse(window.save_structural_measurement_button.isEnabled())
+            window.structural_feedback_state[42] = "accepted"
+            window._sync_structural_feedback_controls()
+            self.assertTrue(window.save_structural_measurement_button.isEnabled())
+        finally:
+            window.close()
+
     def test_history_displays_measured_sequential_result(self):
         window = MainWindow()
         try:
@@ -119,14 +151,26 @@ class DesktopTests(unittest.TestCase):
                         True,
                     ),
                 ),
+                structural_feedback=(
+                    HistoryStructuralFeedback(
+                        15,
+                        "sort",
+                        "large-offset-pagination",
+                        "Использовать keyset",
+                        "accepted",
+                        0.35,
+                        "improved",
+                    ),
+                ),
             )
 
             window._show_history([record])
 
-            self.assertEqual(window.history_table.columnCount(), 10)
+            self.assertEqual(window.history_table.columnCount(), 11)
             self.assertEqual(window.history_table.item(0, 0).text(), "4/8")
             self.assertIn("4.12", window.history_table.item(0, 7).text())
             self.assertEqual(window.history_table.item(0, 8).text(), "+25.0%")
+            self.assertIn("улучшение", window.history_table.item(0, 10).text())
         finally:
             window.close()
 

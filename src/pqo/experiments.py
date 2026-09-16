@@ -291,6 +291,7 @@ def export_history_records(
         "measured_improvement_ratio",
         "sequential_terminal_reason",
         "sequential_steps",
+        "structural_feedback",
     ]
     with destination.open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
@@ -299,5 +300,8 @@ def export_history_records(
             row["recommended_columns"] = ", ".join(row["recommended_columns"])
             row["sequential_steps"] = json.dumps(
                 row["sequential_steps"], ensure_ascii=False
+            )
+            row["structural_feedback"] = json.dumps(
+                row["structural_feedback"], ensure_ascii=False
             )
             writer.writerow(row)

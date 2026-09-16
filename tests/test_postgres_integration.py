@@ -13,6 +13,11 @@ from pqo.index_environment import IndexExperimentEnvironment
 from pqo.query_generator import AviationQueryGenerator
 from pqo.sequential_environment import SequentialIndexEnvironment
 from pqo.sql_rewrite import evaluate_sql_rewrites
+from pqo.structural_feedback import (
+    RecommendationDecision,
+    record_recommendation_decision,
+    record_recommendation_measurement,
+)
 
 
 @unittest.skipUnless(
@@ -292,6 +297,60 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertEqual(stored[0], "completed")
         self.assertEqual(stored[1], "xgboost")
         self.assertGreaterEqual(stored[2], 0)
+
+    def test_structural_feedback_round_trip_is_persisted(self):
+        import psycopg
+
+        result = analyze_query(
+            "SELECT order_id FROM retail.customer_orders "
+            "ORDER BY order_id OFFSET 5000",
+            self.PROJECT_ROOT / "models/xgboost/xgboost_query_time.joblib",
+            self.PROJECT_ROOT / "models/dqn/dqn_index_advisor.pt",
+            recommendation_threshold_ms=1_000_000_000,
+            persist=True,
+        )
+        recommendation = next(
+            item
+            for item in result.structural_recommendations
+            if item.rule_id == "large-offset-pagination"
+        )
+        self.assertIsNotNone(recommendation.recommendation_id)
+
+        record_recommendation_decision(
+            recommendation.recommendation_id,
+            RecommendationDecision.ACCEPTED,
+            "Проверяем keyset-пагинацию",
+        )
+        measurement = record_recommendation_measurement(
+            recommendation.recommendation_id,
+            120.0,
+            75.0,
+            "Три медианных запуска",
+        )
+
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            stored = connection.execute(
+                """
+                SELECT status, decision_note, baseline_time_ms,
+                       optimized_time_ms, measured_improvement_ratio,
+                       measurement_outcome
+                FROM pqo.structural_recommendation
+                WHERE id = %s
+                """,
+                (recommendation.recommendation_id,),
+            ).fetchone()
+            connection.execute(
+                "DELETE FROM pqo.query_run WHERE id = %s",
+                (result.query_run_id,),
+            )
+
+        self.assertEqual(stored[0], "accepted")
+        self.assertEqual(stored[1], "Проверяем keyset-пагинацию")
+        self.assertEqual(stored[2:4], (120.0, 75.0))
+        self.assertAlmostEqual(stored[4], 0.375)
+        self.assertEqual(stored[5], "improved")
+        self.assertEqual(measurement.measurement_outcome.value, "improved")
 
 
 if __name__ == "__main__":
