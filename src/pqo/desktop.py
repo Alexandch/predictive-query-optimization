@@ -156,6 +156,18 @@ def _format_structural_recommendations(recommendations) -> str:
     return "\n".join(lines)
 
 
+def _format_prediction(prediction) -> str:
+    lines = [f"{prediction.predicted_time_ms:.2f} мс", "оценка модели"]
+    if prediction.uncertainty_lower_ms is not None:
+        lines.append(
+            f"ориентир {prediction.uncertainty_lower_ms:.2f}–"
+            f"{prediction.uncertainty_upper_ms:.2f} мс"
+        )
+    if abs(prediction.calibration_factor - 1.0) > 1e-12:
+        lines.append(f"до калибровки {prediction.uncalibrated_time_ms:.2f} мс")
+    return "\n".join(lines)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -245,6 +257,32 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.threshold_spin)
         layout.addLayout(controls)
 
+        evidence_controls = QHBoxLayout()
+        evidence_controls.addWidget(QLabel("Минимальный фактический выигрыш:"))
+        self.minimum_gain_spin = QDoubleSpinBox()
+        self.minimum_gain_spin.setRange(0, 1_000_000)
+        self.minimum_gain_spin.setDecimals(1)
+        self.minimum_gain_spin.setSuffix(" мс")
+        self.minimum_gain_spin.setValue(
+            float(self.preferences.value("minimum_gain_ms", 5.0))
+        )
+        evidence_controls.addWidget(self.minimum_gain_spin)
+        self.minimum_gain_percent_spin = QDoubleSpinBox()
+        self.minimum_gain_percent_spin.setRange(0, 100)
+        self.minimum_gain_percent_spin.setDecimals(1)
+        self.minimum_gain_percent_spin.setSuffix(" %")
+        self.minimum_gain_percent_spin.setValue(
+            float(self.preferences.value("minimum_gain_percent", 5.0))
+        )
+        evidence_controls.addWidget(self.minimum_gain_percent_spin)
+        evidence_hint = QLabel(
+            "Совет принимается, только если выполнены порог времени и оба условия выигрыша."
+        )
+        evidence_hint.setObjectName("mutedLabel")
+        evidence_controls.addWidget(evidence_hint)
+        evidence_controls.addStretch()
+        layout.addLayout(evidence_controls)
+
         calibration_controls = QHBoxLayout()
         self.use_calibration_check = QCheckBox("Использовать калибровку этой БД")
         self.use_calibration_check.setChecked(
@@ -262,7 +300,13 @@ class MainWindow(QMainWindow):
         layout.addLayout(calibration_controls)
 
         metrics = QGridLayout()
-        self.predicted_value = self._metric_card(metrics, 0, "Время запроса", "—")
+        self.predicted_value = self._metric_card(
+            metrics, 0, "ML-прогноз (не замер)", "—"
+        )
+        self.predicted_value.setToolTip(
+            "Оценка XGBoost без выполнения SELECT. Диапазон строится по средней "
+            "абсолютной ошибке модели или локальной калибровки."
+        )
         self.cost_value = self._metric_card(metrics, 1, "Стоимость плана", "—")
         self.rows_value = self._metric_card(metrics, 2, "Строки плана", "—")
         self.node_value = self._metric_card(metrics, 3, "Корневой узел", "—")
@@ -745,12 +789,13 @@ class MainWindow(QMainWindow):
         self.last_prediction_ms = prediction.predicted_time_ms
         self.last_query_run_id = analysis.query_run_id
         self.last_analyzed_sql = prediction.sql_text
-        prediction_text = f"{prediction.predicted_time_ms:.2f} мс"
-        if abs(prediction.calibration_factor - 1.0) > 1e-12:
-            prediction_text += (
-                f"\nбазовый {prediction.uncalibrated_time_ms:.2f} мс"
+        self.predicted_value.setText(_format_prediction(prediction))
+        if prediction.error_source:
+            self.predicted_value.setToolTip(
+                "Это оценка без выполнения SELECT. Ориентир основан на: "
+                f"{prediction.error_source}. Фактическое время зависит от кэша, "
+                "нагрузки и конфигурации PostgreSQL."
             )
-        self.predicted_value.setText(prediction_text)
         self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
         self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
         self.node_value.setText(
@@ -991,6 +1036,11 @@ class MainWindow(QMainWindow):
             self._database_settings(),
             repetitions=3,
             work_mem_mb=64,
+            minimum_baseline_time_ms=self.threshold_spin.value(),
+            minimum_absolute_improvement_ms=self.minimum_gain_spin.value(),
+            minimum_improvement_ratio=(
+                self.minimum_gain_percent_spin.value() / 100.0
+            ),
         )
         worker.signals.succeeded.connect(self._structural_validation_finished)
         worker.signals.failed.connect(self._structural_feedback_failed)
@@ -1008,7 +1058,19 @@ class MainWindow(QMainWindow):
             if result.artifact_creation_time_ms is None
             else f"; построение {result.artifact_creation_time_ms:.2f} мс"
         )
-        verdict = "подтверждено" if result.accepted else "эффект не подтверждён"
+        rejection_reasons = {
+            "below_runtime_threshold": "исходный запрос уже быстрее порога",
+            "absolute_gain_too_small": "слишком мала абсолютная экономия",
+            "relative_gain_too_small": "слишком мал относительный выигрыш",
+            "result_mismatch": "результаты неэквивалентны",
+        }
+        decision_reason = result.details.get("decision_reason")
+        verdict = (
+            "подтверждено"
+            if result.accepted
+            else "отклонено: "
+            + rejection_reasons.get(decision_reason, "эффект недостаточен")
+        )
         self.structural_before_spin.setValue(result.baseline_time_ms)
         self.structural_after_spin.setValue(result.candidate_time_ms)
         self._sync_structural_feedback_controls()
@@ -1061,7 +1123,10 @@ class MainWindow(QMainWindow):
             storage_budget_bytes=64 * 1024 * 1024,
             repetitions=1,
             minimum_baseline_time_ms=self.threshold_spin.value(),
-            minimum_absolute_improvement_ms=5.0,
+            minimum_absolute_improvement_ms=self.minimum_gain_spin.value(),
+            minimum_improvement_ratio=(
+                self.minimum_gain_percent_spin.value() / 100.0
+            ),
             persist=self.persist_check.isChecked(),
             query_run_id=(
                 self.last_query_run_id
@@ -1104,6 +1169,10 @@ class MainWindow(QMainWindow):
                 "absolute_gain_too_small": (
                     "абсолютная экономия меньше "
                     f"{plan.minimum_absolute_improvement_ms:.1f} мс"
+                ),
+                "relative_gain_too_small": (
+                    "относительный выигрыш меньше "
+                    f"{plan.minimum_improvement_ratio:.1%}"
                 ),
                 "budget_exceeded": "кандидат превысил лимит 64 МиБ",
             }
@@ -1177,8 +1246,10 @@ class MainWindow(QMainWindow):
             self._database_settings(),
             repetitions=3,
             minimum_baseline_time_ms=self.threshold_spin.value(),
-            minimum_absolute_improvement_ms=5.0,
-            minimum_improvement_ratio=0.05,
+            minimum_absolute_improvement_ms=self.minimum_gain_spin.value(),
+            minimum_improvement_ratio=(
+                self.minimum_gain_percent_spin.value() / 100.0
+            ),
         )
         worker.signals.succeeded.connect(self._show_rewrite_analysis)
         worker.signals.failed.connect(
@@ -1472,6 +1543,10 @@ class MainWindow(QMainWindow):
             "strategy_model", self.strategy_model_edit.text().strip()
         )
         self.preferences.setValue("threshold_ms", self.threshold_spin.value())
+        self.preferences.setValue("minimum_gain_ms", self.minimum_gain_spin.value())
+        self.preferences.setValue(
+            "minimum_gain_percent", self.minimum_gain_percent_spin.value()
+        )
         self.preferences.setValue("persist_analysis", self.persist_check.isChecked())
         self.preferences.setValue(
             "use_calibration", self.use_calibration_check.isChecked()

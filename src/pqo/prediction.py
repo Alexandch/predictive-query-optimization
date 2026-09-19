@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 from .config import DatabaseSettings
@@ -23,6 +24,33 @@ class QueryTimePrediction:
     uncalibrated_time_ms: float
     calibration_factor: float
     calibration_sample_count: int
+    error_mae_ms: float | None = None
+    error_source: str | None = None
+
+    @property
+    def uncertainty_lower_ms(self) -> float | None:
+        if self.error_mae_ms is None:
+            return None
+        return max(0.0, self.predicted_time_ms - self.error_mae_ms)
+
+    @property
+    def uncertainty_upper_ms(self) -> float | None:
+        if self.error_mae_ms is None:
+            return None
+        return self.predicted_time_ms + self.error_mae_ms
+
+
+def model_error_mae_ms(model_path: str | Path) -> float | None:
+    """Read the parameter-holdout MAE stored next to a trained model."""
+    metrics_path = Path(model_path).resolve().parent / "metrics.json"
+    if not metrics_path.is_file():
+        return None
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        value = float(metrics["parameter_holdout"]["mae_ms"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if value >= 0 else None
 
 
 def predict_sql_query(
@@ -49,6 +77,8 @@ def predict_sql_query(
     predicted_time_ms = uncalibrated_time_ms
     calibration_factor = 1.0
     calibration_sample_count = 0
+    error_mae_ms = model_error_mae_ms(model_path)
+    error_source = "контрольная MAE модели" if error_mae_ms is not None else None
     if (
         calibration_profile_path is not None
         and Path(calibration_profile_path).is_file()
@@ -69,6 +99,11 @@ def predict_sql_query(
             profile, sql_text, uncalibrated_time_ms
         )
         calibration_sample_count = profile.sample_count
+        if profile.ready and profile.calibrated_mae_ms is not None:
+            error_mae_ms = profile.calibrated_mae_ms
+            error_source = (
+                f"локальная калибровка, {profile.unique_query_count} разных SQL"
+            )
 
     return QueryTimePrediction(
         sql_text=sql_text.strip(),
@@ -80,5 +115,7 @@ def predict_sql_query(
         uncalibrated_time_ms=uncalibrated_time_ms,
         calibration_factor=calibration_factor,
         calibration_sample_count=calibration_sample_count,
+        error_mae_ms=error_mae_ms,
+        error_source=error_source,
     )
 

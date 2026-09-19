@@ -8,6 +8,7 @@ from pqo.structural_advisor import (
 from pqo.structural_validation import (
     StructuralValidationResult,
     _structural_rewrite,
+    _validation_decision_reason,
     save_structural_validation,
     validate_structural_recommendation,
 )
@@ -102,6 +103,19 @@ class StructuralValidationTests(unittest.TestCase):
         parameters = connection.calls[-1][1]
         self.assertEqual(parameters[0:3], (7, "having-filter-rewrite", True))
         self.assertTrue(parameters[8])
+
+    def test_fast_query_is_rejected_even_with_large_relative_gain(self):
+        reason = _validation_decision_reason(
+            equivalent=True,
+            baseline_time_ms=4.12,
+            absolute_gain_ms=1.03,
+            improvement_ratio=0.25,
+            minimum_baseline_time_ms=50.0,
+            minimum_absolute_improvement_ms=5.0,
+            minimum_improvement_ratio=0.05,
+        )
+
+        self.assertEqual(reason, "below_runtime_threshold")
 
 
 if __name__ == "__main__":

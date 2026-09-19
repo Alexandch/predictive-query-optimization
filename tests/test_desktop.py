@@ -15,9 +15,11 @@ from pqo.desktop import (
     DEFAULT_XGB_MODEL,
     MainWindow,
     _format_index_action,
+    _format_prediction,
     _format_structural_recommendations,
 )
 from pqo.index_actions import IndexAction
+from pqo.prediction import QueryTimePrediction
 from pqo.history import (
     HistoryRecord,
     HistorySequentialStep,
@@ -57,6 +59,8 @@ class DesktopTests(unittest.TestCase):
                 Path(window.strategy_model_edit.text()), DEFAULT_STRATEGY_MODEL
             )
             self.assertFalse(window.use_calibration_check.isChecked())
+            self.assertGreaterEqual(window.minimum_gain_spin.value(), 0)
+            self.assertGreaterEqual(window.minimum_gain_percent_spin.value(), 0)
         finally:
             window.close()
 
@@ -77,6 +81,26 @@ class DesktopTests(unittest.TestCase):
             'CREATE INDEX ON "public"."orders" ("customer_id") '
             'INCLUDE ("created_at");',
         )
+
+    def test_prediction_is_clearly_labeled_as_estimate_with_range(self):
+        prediction = QueryTimePrediction(
+            sql_text="SELECT 1",
+            predicted_time_ms=11.4,
+            estimated_total_cost=1.0,
+            estimated_plan_rows=1.0,
+            root_node_type="Result",
+            plan_node_count=1,
+            uncalibrated_time_ms=11.4,
+            calibration_factor=1.0,
+            calibration_sample_count=0,
+            error_mae_ms=14.18,
+            error_source="контрольная MAE модели",
+        )
+
+        text = _format_prediction(prediction)
+
+        self.assertIn("оценка модели", text)
+        self.assertIn("0.00–25.58 мс", text)
 
     def test_structural_recommendation_is_readable(self):
         text = _format_structural_recommendations(

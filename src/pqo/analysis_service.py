@@ -16,7 +16,7 @@ from .dqn_features import (
 )
 from .explain import collect_explain
 from .index_actions import IndexAction, generate_index_actions
-from .prediction import QueryTimePrediction
+from .prediction import QueryTimePrediction, model_error_mae_ms
 from .recommendation import IndexRecommendation
 from .repository import save_analysis, save_optimization_result
 from .sql_features import extract_sql_features
@@ -67,6 +67,8 @@ def analyze_query(
     uncalibrated_time = predicted_time
     calibration_factor = 1.0
     calibration_sample_count = 0
+    error_mae_ms = model_error_mae_ms(xgboost_model_path)
+    error_source = "контрольная MAE модели" if error_mae_ms is not None else None
     if (
         calibration_profile_path is not None
         and Path(calibration_profile_path).is_file()
@@ -85,6 +87,11 @@ def analyze_query(
             profile, normalized_sql, uncalibrated_time
         )
         calibration_sample_count = profile.sample_count
+        if profile.ready and profile.calibrated_mae_ms is not None:
+            error_mae_ms = profile.calibrated_mae_ms
+            error_source = (
+                f"локальная калибровка, {profile.unique_query_count} разных SQL"
+            )
     prediction = QueryTimePrediction(
         sql_text=normalized_sql,
         predicted_time_ms=predicted_time,
@@ -95,6 +102,8 @@ def analyze_query(
         uncalibrated_time_ms=uncalibrated_time,
         calibration_factor=calibration_factor,
         calibration_sample_count=calibration_sample_count,
+        error_mae_ms=error_mae_ms,
+        error_source=error_source,
     )
     structural_recommendations = analyze_query_structure(
         normalized_sql,

@@ -44,6 +44,7 @@ class SequentialRecommendationPlan:
     terminal_reason: str
     query_run_id: int | None = None
     sequential_analysis_id: int | None = None
+    minimum_improvement_ratio: float = 0.05
 
     @property
     def measured_improvement_ratio(self) -> float:
@@ -62,6 +63,7 @@ def recommend_sequential_indexes(
     repetitions: int = 1,
     minimum_baseline_time_ms: float = 50.0,
     minimum_absolute_improvement_ms: float = 5.0,
+    minimum_improvement_ratio: float = 0.05,
     persist: bool = False,
     query_run_id: int | None = None,
 ) -> SequentialRecommendationPlan:
@@ -69,7 +71,11 @@ def recommend_sequential_indexes(
     import psycopg
     import torch
 
-    if minimum_baseline_time_ms < 0 or minimum_absolute_improvement_ms < 0:
+    if min(
+        minimum_baseline_time_ms,
+        minimum_absolute_improvement_ms,
+        minimum_improvement_ratio,
+    ) < 0:
         raise ValueError("Recommendation time thresholds must be non-negative")
     settings = settings or DatabaseSettings.from_env()
     resolved_model = str(Path(model_path).resolve())
@@ -144,6 +150,12 @@ def recommend_sequential_indexes(
                 ):
                     terminal_reason = "absolute_gain_too_small"
                     break
+                improvement_ratio = (
+                    previous_time - transition.next_state.current_time_ms
+                ) / max(previous_time, 0.001)
+                if improvement_ratio < minimum_improvement_ratio:
+                    terminal_reason = "relative_gain_too_small"
+                    break
                 accepted_steps.append(
                     SequentialRecommendationStep(
                         action=actions[best_index],
@@ -172,6 +184,7 @@ def recommend_sequential_indexes(
         minimum_baseline_time_ms=minimum_baseline_time_ms,
         minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
         terminal_reason=terminal_reason,
+        minimum_improvement_ratio=minimum_improvement_ratio,
     )
     if persist:
         from .repository import save_sequential_analysis

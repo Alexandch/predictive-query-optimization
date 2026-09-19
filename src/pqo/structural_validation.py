@@ -57,6 +57,9 @@ def validate_and_save_structural_recommendation(
     *,
     repetitions: int = 3,
     work_mem_mb: int = 64,
+    minimum_baseline_time_ms: float = 0.0,
+    minimum_absolute_improvement_ms: float = 5.0,
+    minimum_improvement_ratio: float = 0.05,
 ) -> StructuralValidationResult:
     """Run a rolled-back trial, persist evidence, and update accepted feedback."""
     from .structural_feedback import record_recommendation_measurement
@@ -67,6 +70,9 @@ def validate_and_save_structural_recommendation(
         settings,
         repetitions=repetitions,
         work_mem_mb=work_mem_mb,
+        minimum_baseline_time_ms=minimum_baseline_time_ms,
+        minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
+        minimum_improvement_ratio=minimum_improvement_ratio,
     )
     if not result.supported:
         return result
@@ -94,8 +100,9 @@ def validate_structural_recommendation(
     *,
     repetitions: int = 3,
     work_mem_mb: int = 64,
-    minimum_absolute_improvement_ms: float = 1.0,
-    minimum_improvement_ratio: float = 0.02,
+    minimum_baseline_time_ms: float = 0.0,
+    minimum_absolute_improvement_ms: float = 5.0,
+    minimum_improvement_ratio: float = 0.05,
 ) -> StructuralValidationResult:
     """Execute a supported trial and always roll its transaction back."""
     import psycopg
@@ -104,7 +111,11 @@ def validate_structural_recommendation(
         raise ValueError("repetitions must be positive")
     if not 1 <= work_mem_mb <= 256:
         raise ValueError("work_mem_mb must be between 1 and 256")
-    if min(minimum_absolute_improvement_ms, minimum_improvement_ratio) < 0:
+    if min(
+        minimum_baseline_time_ms,
+        minimum_absolute_improvement_ms,
+        minimum_improvement_ratio,
+    ) < 0:
         raise ValueError("validation thresholds must be non-negative")
 
     original_sql = _assert_read_only_query(sql_text)
@@ -163,12 +174,50 @@ def validate_structural_recommendation(
     if result.baseline_time_ms is None or result.candidate_time_ms is None:
         return result
     absolute_gain = result.baseline_time_ms - result.candidate_time_ms
-    accepted = bool(
-        result.equivalent
-        and absolute_gain >= minimum_absolute_improvement_ms
-        and result.improvement_ratio >= minimum_improvement_ratio
+    decision_reason = _validation_decision_reason(
+        equivalent=bool(result.equivalent),
+        baseline_time_ms=result.baseline_time_ms,
+        absolute_gain_ms=absolute_gain,
+        improvement_ratio=result.improvement_ratio,
+        minimum_baseline_time_ms=minimum_baseline_time_ms,
+        minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
+        minimum_improvement_ratio=minimum_improvement_ratio,
     )
-    return replace(result, accepted=accepted, rolled_back=True)
+    details = {
+        **result.details,
+        "absolute_gain_ms": absolute_gain,
+        "minimum_baseline_time_ms": minimum_baseline_time_ms,
+        "minimum_absolute_improvement_ms": minimum_absolute_improvement_ms,
+        "minimum_improvement_ratio": minimum_improvement_ratio,
+        "decision_reason": decision_reason,
+    }
+    return replace(
+        result,
+        accepted=decision_reason == "accepted",
+        rolled_back=True,
+        details=details,
+    )
+
+
+def _validation_decision_reason(
+    *,
+    equivalent: bool,
+    baseline_time_ms: float,
+    absolute_gain_ms: float,
+    improvement_ratio: float,
+    minimum_baseline_time_ms: float,
+    minimum_absolute_improvement_ms: float,
+    minimum_improvement_ratio: float,
+) -> str:
+    if not equivalent:
+        return "result_mismatch"
+    if baseline_time_ms < minimum_baseline_time_ms:
+        return "below_runtime_threshold"
+    if absolute_gain_ms < minimum_absolute_improvement_ms:
+        return "absolute_gain_too_small"
+    if improvement_ratio < minimum_improvement_ratio:
+        return "relative_gain_too_small"
+    return "accepted"
 
 
 def save_structural_validation(
