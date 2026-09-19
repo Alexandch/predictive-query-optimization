@@ -41,7 +41,9 @@ from .app_paths import resource_root, writable_root
 from .calibration import (
     MINIMUM_ACTIVE_SAMPLES,
     calibrate_query,
+    calibrate_workload,
     load_profile,
+    parse_calibration_workload,
     suggested_profile_path,
 )
 from .charts import AccuracyBarChart, ScatterChart
@@ -293,6 +295,13 @@ class MainWindow(QMainWindow):
         self.calibrate_button = QPushButton("Добавить текущий SQL в калибровку")
         self.calibrate_button.clicked.connect(self._start_calibration)
         calibration_controls.addWidget(self.calibrate_button)
+        self.batch_calibrate_button = QPushButton("Калибровать по файлу SQL")
+        self.batch_calibrate_button.setToolTip(
+            "Выполняет до 30 разделённых точкой с запятой SELECT/WITH-запросов "
+            "и сравнивает MAE до и после калибровки."
+        )
+        self.batch_calibrate_button.clicked.connect(self._start_batch_calibration)
+        calibration_controls.addWidget(self.batch_calibrate_button)
         self.calibration_status = QLabel("Калибровка: профиль не создан")
         self.calibration_status.setObjectName("mutedLabel")
         calibration_controls.addWidget(self.calibration_status)
@@ -685,9 +694,13 @@ class MainWindow(QMainWindow):
             self.calibration_status.setText(f"Калибровка недоступна: {exc}")
             return
         state = (
-            "готова"
-            if profile.ready
-            else f"нужно {MINIMUM_ACTIVE_SAMPLES} разных SQL"
+            "активна, MAE улучшена"
+            if profile.improves_mae
+            else (
+                "не активна: MAE не улучшена"
+                if profile.ready
+                else f"нужно {MINIMUM_ACTIVE_SAMPLES} разных SQL"
+            )
         )
         self.calibration_status.setText(
             f"Калибровка: {profile.unique_query_count} SQL / "
@@ -741,6 +754,86 @@ class MainWindow(QMainWindow):
             f"прогноз {result.observation.predicted_time_ms:.2f} мс, "
             f"факт {result.observation.actual_time_ms:.2f} мс"
         )
+
+    def _start_batch_calibration(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите набор запросов для калибровки",
+            str(PROJECT_ROOT / "examples"),
+            "SQL workload (*.sql *.txt);;Все файлы (*)",
+        )
+        if not selected:
+            return
+        model_path = Path(self.xgb_model_edit.text())
+        if not model_path.is_file():
+            QMessageBox.warning(
+                self, "Модель не найдена", "Проверьте путь к XGBoost-модели."
+            )
+            return
+        try:
+            queries = parse_calibration_workload(
+                Path(selected).read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Неверный набор SQL", f"{type(exc).__name__}: {exc}"
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Запустить пакетную калибровку?",
+            f"Будут последовательно выполнены {len(queries)} read-only запросов "
+            "через EXPLAIN ANALYZE. Каждый запрос ограничен statement_timeout. "
+            "Продолжить?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.calibrate_button.setEnabled(False)
+        self.batch_calibrate_button.setEnabled(False)
+        self.statusBar().showMessage(
+            f"Пакетная калибровка: выполняются {len(queries)} запросов…"
+        )
+        worker = Worker(
+            calibrate_workload,
+            queries,
+            model_path,
+            self._calibration_path(),
+            self._database_settings(),
+        )
+        worker.signals.succeeded.connect(self._batch_calibration_finished)
+        worker.signals.failed.connect(self._batch_calibration_failed)
+        self.thread_pool.start(worker)
+
+    def _batch_calibration_finished(self, result) -> None:
+        self.calibrate_button.setEnabled(True)
+        self.batch_calibrate_button.setEnabled(True)
+        self._refresh_calibration_status()
+        if result.profile.improves_mae:
+            self.use_calibration_check.setChecked(True)
+            verdict = "профиль активирован"
+        else:
+            self.use_calibration_check.setChecked(False)
+            verdict = "профиль не активирован: MAE не улучшена"
+        improvement = (
+            "—"
+            if result.mae_improvement_percent is None
+            else f"{result.mae_improvement_percent:+.1f}%"
+        )
+        QMessageBox.information(
+            self,
+            "Пакетная калибровка завершена",
+            f"Добавлено запросов: {result.added_query_count}\n"
+            f"Разных SQL в профиле: {result.profile.unique_query_count}\n"
+            f"MAE до: {result.base_mae_ms:.2f} мс\n"
+            f"MAE после: {result.calibrated_mae_ms:.2f} мс\n"
+            f"Изменение MAE: {improvement}\n\n{verdict}.",
+        )
+        self.statusBar().showMessage(f"Пакетная калибровка завершена: {verdict}")
+
+    def _batch_calibration_failed(self, message: str) -> None:
+        self.calibrate_button.setEnabled(True)
+        self.batch_calibrate_button.setEnabled(True)
+        self._task_failed(message)
 
     def _start_analysis(self) -> None:
         sql_text = self.sql_editor.toPlainText().strip()

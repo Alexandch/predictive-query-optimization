@@ -10,6 +10,7 @@ if not (ROOT / "src" / "pqo").is_dir():
 
 datas = [
     (str(ROOT / "assets" / "pqo.ico"), "assets"),
+    (str(ROOT / "examples" / "manual-check-queries.sql"), "examples"),
     (str(ROOT / "models"), "models"),
     (str(ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"), "dataset/postgresql"),
     (

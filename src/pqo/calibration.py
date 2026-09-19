@@ -104,11 +104,39 @@ class CalibrationProfile:
             for item in self.observations
         ) / self.sample_count
 
+    @property
+    def improves_mae(self) -> bool:
+        base = self.base_mae_ms
+        calibrated = self.calibrated_mae_ms
+        return bool(
+            self.ready
+            and base is not None
+            and calibrated is not None
+            and calibrated < base
+        )
+
+    @property
+    def mae_improvement_percent(self) -> float | None:
+        base = self.base_mae_ms
+        calibrated = self.calibrated_mae_ms
+        if base is None or calibrated is None or base <= 0:
+            return None
+        return (base - calibrated) / base * 100.0
+
 
 @dataclass(frozen=True, slots=True)
 class CalibrationResult:
     profile: CalibrationProfile
     observation: CalibrationObservation
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationBatchResult:
+    profile: CalibrationProfile
+    added_query_count: int
+    base_mae_ms: float | None
+    calibrated_mae_ms: float | None
+    mae_improvement_percent: float | None
 
 
 def database_identity(settings: DatabaseSettings) -> str:
@@ -319,6 +347,8 @@ def factor_for_query(
     sql_text: str,
     predicted_time_ms: float,
 ) -> float:
+    if not profile.improves_mae:
+        return 1.0
     shape_hash = query_shape_hash(sql_text)
     if not any(item.shape_hash == shape_hash for item in profile.observations):
         return 1.0
@@ -334,7 +364,7 @@ def apply_calibration(
     profile: CalibrationProfile,
     sql_text: str | None = None,
 ) -> float:
-    if not profile.ready:
+    if not profile.improves_mae:
         return float(predicted_time_ms)
     factor = (
         factor_for_query(profile, sql_text, predicted_time_ms)
@@ -375,3 +405,83 @@ def calibrate_query(
     )
     save_profile(profile, profile_file)
     return CalibrationResult(profile=profile, observation=observation)
+
+
+def parse_calibration_workload(
+    sql_text: str,
+    *,
+    maximum_queries: int = 30,
+) -> tuple[str, ...]:
+    """Parse and deduplicate a semicolon-separated read-only workload."""
+    from sqlglot import parse
+
+    from .explain import _assert_read_only_query
+
+    if maximum_queries <= 0:
+        raise ValueError("maximum_queries must be positive")
+    queries = []
+    seen = set()
+    for expression in parse(sql_text, read="postgres"):
+        if expression is None:
+            continue
+        normalized = _assert_read_only_query(
+            expression.sql(dialect="postgres", pretty=False, comments=False)
+        )
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        queries.append(normalized)
+        if len(queries) > maximum_queries:
+            raise ValueError(
+                f"Calibration workload contains more than {maximum_queries} queries"
+            )
+    if not queries:
+        raise ValueError("Calibration workload contains no SQL queries")
+    return tuple(queries)
+
+
+def calibrate_workload(
+    queries: tuple[str, ...],
+    model_path: str | Path,
+    profile_path: str | Path,
+    settings: DatabaseSettings | None = None,
+) -> CalibrationBatchResult:
+    """Measure a bounded read-only workload and update one calibration profile."""
+    from .explain import _assert_read_only_query, collect_explain
+    from .prediction import predict_sql_query
+
+    if not 1 <= len(queries) <= 30:
+        raise ValueError("Calibration workload must contain from 1 to 30 queries")
+    settings = settings or DatabaseSettings.from_env()
+    profile_file = Path(profile_path)
+    if profile_file.is_file():
+        profile = load_profile(profile_file)
+        validate_profile(profile, settings, model_path)
+    else:
+        profile = new_profile(settings, model_path)
+
+    normalized_queries = tuple(_assert_read_only_query(item) for item in queries)
+    if len(set(normalized_queries)) != len(normalized_queries):
+        raise ValueError("Calibration workload contains duplicate SQL queries")
+
+    for sql_text in normalized_queries:
+        prediction = predict_sql_query(sql_text, model_path, settings=settings)
+        measured = collect_explain(sql_text, settings=settings, analyze=True)
+        actual_time = measured.features.actual_total_time_ms
+        if actual_time is None:
+            raise RuntimeError("EXPLAIN ANALYZE returned no execution time")
+        profile, _ = add_observation(
+            profile,
+            sql_text,
+            prediction.predicted_time_ms,
+            actual_time,
+        )
+        save_profile(profile, profile_file)
+
+    return CalibrationBatchResult(
+        profile=profile,
+        added_query_count=len(normalized_queries),
+        base_mae_ms=profile.base_mae_ms,
+        calibrated_mae_ms=profile.calibrated_mae_ms,
+        mae_improvement_percent=profile.mae_improvement_percent,
+    )

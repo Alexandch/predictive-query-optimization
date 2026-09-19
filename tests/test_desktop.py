@@ -49,6 +49,7 @@ class DesktopTests(unittest.TestCase):
             self.assertIn("SELECT", window.sql_editor.toPlainText())
             self.assertIsNotNone(window.persist_check)
             self.assertIsNotNone(window.calibrate_button)
+            self.assertTrue(window.batch_calibrate_button.isEnabled())
             self.assertTrue(window.deep_analyze_button.isEnabled())
             self.assertTrue(window.rewrite_analyze_button.isEnabled())
             self.assertFalse(window.accept_structural_button.isEnabled())

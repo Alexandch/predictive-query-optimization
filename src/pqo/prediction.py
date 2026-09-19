@@ -99,7 +99,7 @@ def predict_sql_query(
             profile, sql_text, uncalibrated_time_ms
         )
         calibration_sample_count = profile.sample_count
-        if profile.ready and profile.calibrated_mae_ms is not None:
+        if profile.improves_mae and profile.calibrated_mae_ms is not None:
             error_mae_ms = profile.calibrated_mae_ms
             error_source = (
                 f"локальная калибровка, {profile.unique_query_count} разных SQL"

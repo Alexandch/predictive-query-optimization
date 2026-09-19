@@ -28,8 +28,6 @@ def _assert_read_only_query(sql_text: str) -> str:
         raise ValueError("Only SELECT and WITH queries can be analyzed")
 
     normalized = normalized.rstrip().removesuffix(";")
-    if ";" in normalized:
-        raise ValueError("Only one SQL statement can be analyzed at a time")
 
     try:
         statements = [item for item in parse(normalized, read="postgres") if item]

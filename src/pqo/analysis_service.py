@@ -87,7 +87,7 @@ def analyze_query(
             profile, normalized_sql, uncalibrated_time
         )
         calibration_sample_count = profile.sample_count
-        if profile.ready and profile.calibrated_mae_ms is not None:
+        if profile.improves_mae and profile.calibrated_mae_ms is not None:
             error_mae_ms = profile.calibrated_mae_ms
             error_source = (
                 f"локальная калибровка, {profile.unique_query_count} разных SQL"

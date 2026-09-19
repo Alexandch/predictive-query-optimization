@@ -9,6 +9,7 @@ from pqo.calibration import (
     apply_calibration,
     load_profile,
     new_profile,
+    parse_calibration_workload,
     save_profile,
     suggested_profile_path,
     validate_profile,
@@ -55,6 +56,29 @@ class CalibrationTests(unittest.TestCase):
 
             self.assertFalse(profile.ready)
             self.assertEqual(apply_calibration(10.0, profile), 10.0)
+
+    def test_profile_is_not_applied_when_it_worsens_mae(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "model.joblib"
+            model.write_bytes(b"model-a")
+            profile = new_profile(self.settings, model)
+            for number in range(9):
+                profile, _ = add_observation(
+                    profile, f"SELECT {number}", 100.0, 100.0
+                )
+            profile, _ = add_observation(profile, "SELECT 99", 10_000.0, 20_000.0)
+
+            self.assertTrue(profile.ready)
+            self.assertFalse(profile.improves_mae)
+            self.assertEqual(apply_calibration(100.0, profile, "SELECT 500"), 100.0)
+
+    def test_parses_semicolon_workload_and_rejects_writes(self):
+        queries = parse_calibration_workload(
+            "SELECT 1; SELECT ';' AS separator; SELECT 1;"
+        )
+        self.assertEqual(len(queries), 2)
+        with self.assertRaises(ValueError):
+            parse_calibration_workload("SELECT 1; DELETE FROM public.orders;")
 
     def test_conditional_factor_requires_three_queries_in_same_segment(self):
         with tempfile.TemporaryDirectory() as directory:
