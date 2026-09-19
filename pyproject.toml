@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predictive-query-optimization"
-version = "0.7.0"
+version = "0.8.0"
 description = "PostgreSQL query-time prediction and index recommendation system"
 requires-python = ">=3.11"
 dependencies = [
@@ -86,6 +86,7 @@ pqo-sequential-control = "pqo.sequential_control_cli:main"
 pqo-rewrite = "pqo.rewrite_cli:main"
 pqo-strategy = "pqo.strategy_cli:main"
 pqo-structure = "pqo.structure_cli:main"
+pqo-final-experiment = "pqo.final_experiment_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

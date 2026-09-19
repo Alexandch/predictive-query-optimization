@@ -9,10 +9,10 @@ PyInstaller, а затем упаковывается в установщик In
 
 Локальный установщик создаётся по пути:
 
-`dist\installer\PredictiveQueryOptimization-Setup-0.7.0.exe`
+`dist\installer\PredictiveQueryOptimization-Setup-0.8.0.exe`
 
-SHA-256 сборки:
-`31B6AD3B17D36FA11B369231FCBD5F1FAC03E2ED63F75CD62A70796EE0FD7D45`.
+SHA-256 текущей сборки:
+`61F60873D134AF78FA8ECE3EF2C4ECE5F4A9D49C43B035A09EA2985D88239E58`.
 
 Стандартный каталог установки:
 
@@ -34,7 +34,7 @@ docker compose up -d --wait
 Требуются Windows 10/11, Python с созданным `.venv` и Inno Setup 6. Полная
 команда:
 
-Установщик 0.7.0 собран на Python 3.13.3. Для обычного запуска
+Релизная сборка проверяется на Python 3.13.3. Для обычного запуска
 исходников допустимы версии из диапазона `requires-python`, но релизную
 Windows-сборку следует выполнять на 3.13.3: на тестовой системе Python 3.13.15
 зависал в системном WMI-вызове ещё до запуска приложения.

@@ -1,157 +1,179 @@
 # Predictive Query Optimization
 
-Самостоятельная система прогнозирования времени выполнения SQL-запросов в
-PostgreSQL. Проект извлекает структурные признаки SQL и оценочные признаки
-`EXPLAIN`, после чего локальная модель XGBoost прогнозирует время выполнения,
-не запуская пользовательский запрос.
+Десктопная система анализа и оптимизации SQL-запросов PostgreSQL. Версия
+`0.8.0` прогнозирует время выполнения, проверяет индексные и структурные
+оптимизации на реальной БД и не применяет предложенные изменения автоматически.
 
-## Текущее состояние
+Проект написан на Python 3.11+, интерфейс реализован на PyQt6. Для доступа к
+PostgreSQL используется `psycopg`; ORM в проекте нет, поскольку анализатору
+необходимы исходный SQL, `EXPLAIN` и системные каталоги СУБД.
 
-- PostgreSQL 17 запускается в Docker Compose;
-- пять предметных областей содержат 8 авиационных, 10 розничных,
-  10 логистических, 12 CH-benCHmark-совместимых и 15 основных Pagila-сущностей;
-- обучающие генераторы формируют 120 структурных типов запросов в четырёх
-  development/train-доменах;
-- набор выбранной XGBoost-модели содержит 13 760 измерений и 6 474 уникальных SQL;
-- многодоменная XGBoost-модель достигает `R² = 0,9701`, `MAE = 14,18 мс` на
-  parameter-holdout и stress-R² `0,7761` на полностью новых структурах;
-- DQN обучена на 5 350 действиях и 86 шаблонах; отрицательные примеры подняли
-  accuracy и снизили regret на независимых контролях всех трёх БД;
-- экспериментальное CH-расширение добавляет 800 измерений XGBoost и 300
-  действий DQN; кандидаты честно отклонены после регрессии внешнего CH/logistics
-  контроля, поэтому выбранные основные модели не перезаписаны;
-- development-only проверка доли Pagila выбрала 10% по macro-ошибке трёх
-  доменов, но XGBoost-кандидаты не прошли внутренний unseen-template шлюз;
-- отдельная DQN-проверка выбрала полный Pagila-набор; `generic-v3` улучшила
-  внутренние accuracy/regret, но отклонена после регрессии внешних контролей;
-- последовательная индексная среда поддерживает несколько временных индексов,
-  `STOP`, лимит хранения и сбор переходов `generic-v4-sequential`;
-- на полностью исключённой из обучения схеме `logistics` XGBoost достигает
-  `R² = 0,8636`, а DQN снижает mean regret с `0,2557` случайной стратегии до `0,0603`;
-- SQL, планы, прогнозы и рекомендации журналируются в служебной схеме `pqo`;
-- PyQt6-приложение объединяет анализ SQL, историю, настройки
-  PostgreSQL, графики экспериментов, экспорт и запуск обучения;
-- локальная калибровка под пользовательскую БД корректирует время отдельно для
-  знакомых шаблонов SQL и не переносит поправку на неизвестную структуру;
-- сбор данных, обучение, экспорт и прогноз доступны как Python API и CLI;
-- индексные действия формируются из SQL и безопасно оцениваются с откатом DDL;
-- варианты переписывания SQL проверяются на эквивалентность через `EXCEPT ALL`
-  и рекомендуются только после измеренного ускорения;
-- модульные и интеграционные тесты проверяют ключевые компоненты.
+## Возможности
 
-## Архитектура
+- подключение пользовательской PostgreSQL через вкладку «Настройки»;
+- безопасный сбор `EXPLAIN (FORMAT JSON)` без выполнения пользовательского
+  `SELECT`;
+- прогноз времени локальной XGBoost-моделью;
+- калибровка прогноза на измерениях конкретной БД;
+- DQN-рекомендации одиночных и последовательностей временных индексов;
+- фактическая проверка индексов с последующим откатом DDL;
+- проверка переписывания SQL на эквивалентность через `EXCEPT ALL`;
+- рекомендации по `JOIN`, агрегациям, сортировкам и материализованным
+  представлениям;
+- транзакционная проверка поддерживаемых структурных рекомендаций;
+- история анализов, обратная связь, экспорт и просмотр экспериментов;
+- обучение моделей из приложения и CLI;
+- резервное копирование PostgreSQL и пользовательских артефактов.
 
-```text
-PostgreSQL -> EXPLAIN + catalog statistics -> feature vector -> XGBoost/DQN
-     |                                                           |
-     +--------------------- schema pqo <--------------------------+
-```
+Анализ и глубокая проверка показывают разные величины намеренно. «Прогноз» —
+оценка XGBoost до выполнения запроса. «Глубокий анализ» — медиана реальных
+запусков текущего и пробного плана в одной среде. Для решения о применении
+оптимизации приоритет имеет фактическая проверка.
 
-- `src/pqo` — прикладная логика на Python;
-- `database/init` — схема, функции, триггеры и тестовые данные PostgreSQL;
-- `dataset/postgresql` — воспроизводимый обучающий набор;
-- `models/xgboost` — выбранная модель и метрики;
-- `models/dqn` — агент индексных рекомендаций и два отчёта оценки;
-- `tests` — модульные и интеграционные тесты;
-- `docs` — описание БД, датасета и экспериментов.
+## Безопасность экспериментов
 
-## Быстрый запуск
+Система принимает только один `SELECT` или `WITH`-запрос. Пробные индексы,
+переписывания, локальный `work_mem` и тестовые materialized view проверяются в
+изолированной транзакции. В конце выполняется `ROLLBACK`; база пользователя не
+изменяется. Команда DDL выводится только как рекомендация для осознанного
+применения администратором.
+
+## Быстрый запуск из исходников
+
+Требуются Python 3.11+ и Docker Desktop.
 
 ```powershell
 Copy-Item .env.example .env
 docker compose up -d --wait
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-$env:PQO_INTEGRATION_TESTS = "1"
-.\.venv\Scripts\python.exe -m pytest
-```
-
-PostgreSQL доступен на порту `55432`, чтобы не конфликтовать с локальным
-экземпляром на стандартном порту `5432`.
-
-Запустить десктопное приложение:
-
-```powershell
 .\.venv\Scripts\pqo-desktop.exe
 ```
 
-Отдельная установка только компонентов приложения доступна командой
-`.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"`.
+Тестовая PostgreSQL 17 доступна на `localhost:55432`; стандартные логин, пароль
+и база указаны в `.env.example`. При первом создании Docker volume автоматически
+загружаются схемы `aviation`, `retail`, `logistics`, `chbenchmark`, `pagila` и
+служебная схема `pqo`.
 
-Для Windows также подготовлен автономный установщик. Его сборка включает
-Python, PyQt6, XGBoost, DQN-модель и необходимые библиотеки:
+Для подключения своей БД откройте «Настройки», задайте host, port, database,
+user, password и разрешённые схемы, затем проверьте соединение. У пользователя
+PostgreSQL должны быть права на чтение таблиц, планов и каталогов. Для глубоких
+проверок нужны права на временное создание индекса или materialized view внутри
+откатываемой транзакции.
+
+## Итоговый эксперимент
+
+Финальная оценка не переобучает модели и не изменяет запечатанные контрольные
+наборы. Она объединяет независимые результаты XGBoost/DQN и выполняет пять
+повторов поддерживаемых структурных проверок:
 
 ```powershell
+docker compose up -d --wait
+.\.venv\Scripts\python.exe -m pqo.final_experiment_cli --repetitions 5
+```
+
+Текущий прогон подтвердил две из трёх автоматически измеренных рекомендаций:
+
+| Сценарий | До, мс | После, мс | Результат |
+|---|---:|---:|---|
+| Перенос фильтра `HAVING` | 24,140 | 24,584 | отклонён: ускорения нет |
+| Удаление внутреннего `ORDER BY` | 72,004 | 13,510 | подтверждён, −81,2% |
+| Чтение materialized view | 514,106 | 0,012 | подтверждено; создание 442,819 мс |
+
+Materialized view ускоряет повторное чтение готовой сводки, но требует затрат на
+`REFRESH` и допустимой задержки данных. Поэтому результат нельзя трактовать как
+ускорение одноразового запроса. Все пробные объекты итогового прогона откатились.
+
+Полный отчёт: [docs/final-experiment.md](docs/final-experiment.md). Машиночитаемые
+результаты находятся в `models/final_experiment`.
+
+## Зафиксированные метрики моделей
+
+| Модель и контроль | Основной результат |
+|---|---:|
+| XGBoost, parameter holdout | `R² = 0,9701`, `MAE = 14,18 мс` |
+| XGBoost, неизвестные шаблоны | `R² = 0,7761`, `MAE = 47,75 мс` |
+| XGBoost, исключённая logistics | `R² = 0,8636`, `MAE = 114,85 мс` |
+| XGBoost, внешний CH-benCHmark | `R² = −0,6772`, `MAE = 188,56 мс` |
+| DQN, внутренний test | accuracy `56,10%`, regret `0,0749` |
+| DQN, logistics control | accuracy `50,00%`, regret `0,0603` |
+| Последовательная DQN | accuracy `68,73%` против STOP `64,82%` |
+
+Внешний CH-контроль показывает ожидаемое ограничение: абсолютное время новой БД
+нельзя надёжно предсказывать без локальных измерений и калибровки. Поэтому
+приложение не выдаёт прогноз за фактическое время и подтверждает оптимизации
+реальными замерами.
+
+## Структура проекта
+
+```text
+src/pqo/              Python-логика, модели и PyQt6-интерфейс
+database/init/        схема pqo, функции, триггеры и учебные БД
+dataset/postgresql/   зафиксированные обучающие и контрольные наборы
+models/               выбранные модели и проверяемые метрики
+tests/                модульные и PostgreSQL-интеграционные тесты
+docs/                 техническая и экспериментальная документация
+scripts/              сборка, проверка и резервное копирование
+packaging/            конфигурация Windows-установщика
+```
+
+Поток анализа:
+
+```text
+SQL -> проверка безопасности -> EXPLAIN + каталоги -> признаки -> XGBoost
+                                             |             |
+                                             +-> DQN/правила
+                                                       |
+                                      измерение -> рекомендация
+```
+
+## Основные команды
+
+```powershell
+# единый анализ XGBoost + DQN
+.\.venv\Scripts\pqo-analyze.exe models\xgboost\xgboost_query_time.joblib models\dqn\dqn_index_advisor.pt "SELECT ..." --threshold-ms 50
+
+# структурные рекомендации
+.\.venv\Scripts\pqo-structure.exe "SELECT ..." --analyze
+
+# обучение XGBoost на подготовленном CSV
+.\.venv\Scripts\pqo-train.exe dataset\postgresql\multidomain_training.csv artifacts\model_candidate
+
+# полная проверка проекта
+powershell -ExecutionPolicy Bypass -File scripts\verify.ps1
+
+# сборка актуального Windows-установщика
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-После установки приложение запускается ярлыком «Predictive Query Optimization»
-на рабочем столе или из меню «Пуск». Python для обычного запуска не требуется;
-PostgreSQL по-прежнему должен быть доступен по параметрам на вкладке «Настройки».
+Новые модели сначала сохраняются как кандидаты. Контрольные наборы нельзя
+добавлять в обучение: иначе итоговая оценка перестаёт быть независимой.
 
-## Работа с данными и моделью
-
-Сгенерировать и измерить сбалансированную выборку:
+## Резервное копирование
 
 ```powershell
-.\.venv\Scripts\pqo-generate.exe 5200 artifacts\aviation_dataset.csv --seed 4242 --repetitions 2
+powershell -ExecutionPolicy Bypass -File scripts\backup_windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\install_backup_task.ps1
+powershell -ExecutionPolicy Bypass -File scripts\restore_windows.ps1 -BackupPath <каталог>
 ```
 
-Обучить модель:
-
-```powershell
-.\.venv\Scripts\pqo-train.exe dataset\postgresql\aviation_dataset.csv artifacts\models\experiment
-```
-
-Получить прогноз без выполнения SQL-запроса:
-
-```powershell
-.\.venv\Scripts\pqo-predict.exe models\xgboost\xgboost_query_time.joblib "SELECT * FROM aviation.flights WHERE departure_airport = 'MSQ'"
-```
-
-Получить единый прогноз XGBoost и рекомендацию DQN с сохранением в `pqo`:
-
-```powershell
-.\.venv\Scripts\pqo-analyze.exe models\xgboost\xgboost_query_time.joblib models\dqn\dqn_index_advisor.pt "SELECT * FROM aviation.flights WHERE departure_airport = 'MSQ'" --threshold-ms 50
-```
-
-Собрать признаки для списка запросов, по одному запросу в строке:
-
-```powershell
-.\.venv\Scripts\pqo-collect.exe tests\fixtures\smoke_queries.txt artifacts\smoke.csv
-```
+Подробности: [docs/backup-and-recovery.md](docs/backup-and-recovery.md).
 
 ## Документация
 
-- [Модель данных](docs/database-model.md)
+- [Модель базы данных](docs/database-model.md)
 - [Проектирование датасета](docs/dataset-design.md)
-- [Разработка и оценка XGBoost](docs/xgboost-baseline.md)
-- [Среда индексных рекомендаций](docs/index-recommendation-environment.md)
-- [Самостоятельное обучение и проверка моделей](docs/training-guide.md)
-- [Десктопное PyQt6-приложение](docs/desktop-application.md)
-- [Сборка и установка в Windows](docs/windows-packaging.md)
-- [Production-like контрольный benchmark](docs/production-control-benchmark.md)
-- [Многодоменное обучение и проверка переносимости](docs/multidomain-experiment.md)
-- [Строгая проверка leave-one-database-out](docs/leave-one-database-out.md)
-- [Расширение DQN отрицательными примерами](docs/dqn-negative-augmentation.md)
-- [Второй hard-negative эксперимент DQN](docs/dqn-hard-negative-v2.md)
-- [Фиксация и проверка baseline](docs/training-baseline.md)
-- [Расширение нагрузки на основе CH-benCHmark](docs/chbenchmark-experiment.md)
-- [Эксперимент с балансировкой шаблонов](docs/chbenchmark-balanced-experiment.md)
-- [Калибровка прогноза для пользовательской БД](docs/database-calibration.md)
-- [Экспериментальная проверка калибровки](docs/calibration-experiment.md)
-- [Development-эксперимент Pagila и generic-v3](docs/pagila-development-experiment.md)
-- [Domain-balanced подбор доли Pagila](docs/domain-balanced-validation.md)
-- [Domain-balanced validation DQN generic-v3](docs/dqn-domain-balanced-validation.md)
-- [Последовательная multi-index среда](docs/sequential-index-environment.md)
-- [Независимый контроль последовательной DQN](docs/sequential-control-benchmark.md)
-- [Выбор стратегии NOOP / индекс / переписывание SQL](docs/strategy-selector.md)
-- [Структурные рекомендации SQL](docs/structural-recommendations.md)
-- [Резервное копирование и восстановление](docs/backup-and-recovery.md)
+- [Руководство по обучению](docs/training-guide.md)
+- [Десктопное приложение](docs/desktop-application.md)
+- [Структурные рекомендации](docs/structural-recommendations.md)
+- [Итоговый эксперимент](docs/final-experiment.md)
+- [Сборка и установка Windows](docs/windows-packaging.md)
+- [Стратегия NOOP / INDEX / REWRITE](docs/strategy-selector.md)
+- [Последовательная DQN](docs/sequential-control-benchmark.md)
 
-## Следующие этапы
+## Состояние курсовой
 
-1. Накопление достаточного числа автоматических и независимых замеров.
-2. Обучение модели ранжирования на принятых, отклонённых и проверенных советах.
-3. Независимая итоговая проверка новых стратегий после завершения разработки.
-4. Подготовка текста, диаграмм и приложений курсовой работы.
+Разработка функциональности и итоговый эксперимент завершены. Следующий этап —
+подготовка пояснительной записки, ER/UML-диаграмм, SQL-приложения, руководства по
+развёртыванию и презентации. Обучение дополнительной модели ранжирования не
+входит в обязательный объём и оставлено как перспектива развития.

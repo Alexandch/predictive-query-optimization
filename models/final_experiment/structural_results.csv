@@ -1,0 +1,6 @@
+﻿case_id,category,rule_id,priority,automatic_validation,supported,equivalent,baseline_time_ms,candidate_time_ms,improvement_ratio,accepted,rolled_back,validation_method,artifact_creation_time_ms
+aggregation_having,aggregation,non-aggregate-having-filter,medium,True,True,True,24.14,24.584,-0.018392709196354558,False,True,having-filter-rewrite,
+redundant_inner_sort,sort,subquery-order-without-limit,medium,True,True,True,72.004,13.51,0.812371534914727,True,True,subquery-order-rewrite,
+materialized_summary,materialized_view,expensive-summary-materialization,medium,True,True,True,514.106,0.012,0.9999766585101129,True,True,transactional-materialized-view,442.81879998743534
+join_diagnostic,join,cartesian-join,high,False,False,,,,,False,True,manual,
+join_diagnostic,join,large-nested-loop,medium,False,False,,,,,False,True,manual,
