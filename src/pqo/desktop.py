@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import faulthandler
 import json
 from pathlib import Path
 import sys
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -28,6 +30,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -59,6 +62,12 @@ from .experiments import (
 )
 from .history import check_database_connection, load_analysis_history
 from .index_actions import IndexActionKind
+from .managed_indexes import (
+    ManagedIndexDeployment,
+    apply_verified_indexes,
+    load_deployment,
+    rollback_verified_indexes,
+)
 from .sequential_recommendation import (
     SequentialRecommendationPlan,
     recommend_sequential_indexes,
@@ -118,6 +127,14 @@ class Worker(QRunnable):
             result = self.function(*self.args, **self.kwargs)
         except Exception as exc:  # GUI boundary: show a safe, useful error
             traceback.print_exc()
+            try:
+                ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+                with (ARTIFACT_ROOT / "desktop-errors.log").open(
+                    "a", encoding="utf-8"
+                ) as stream:
+                    stream.write(traceback.format_exc() + "\n")
+            except OSError:
+                pass
             self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
         else:
             self.signals.succeeded.emit(result)
@@ -159,7 +176,10 @@ def _format_structural_recommendations(recommendations) -> str:
 
 
 def _format_prediction(prediction) -> str:
-    lines = [f"{prediction.predicted_time_ms:.2f} мс", "оценка модели"]
+    lines = [
+        f"{prediction.predicted_time_ms:.2f} мс",
+        "среднее время по модели",
+    ]
     if prediction.uncertainty_lower_ms is not None:
         lines.append(
             f"ориентир {prediction.uncertainty_lower_ms:.2f}–"
@@ -176,11 +196,14 @@ class MainWindow(QMainWindow):
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
         self.preferences = QSettings("PQO", "PredictiveQueryOptimization")
         self.thread_pool = QThreadPool.globalInstance()
+        self._active_workers: set[Worker] = set()
         self.history_records = []
         self.last_prediction_ms: float | None = None
         self.last_query_run_id: int | None = None
         self.last_analyzed_sql: str | None = None
         self.last_structural_recommendations = ()
+        self.last_sequential_plan: SequentialRecommendationPlan | None = None
+        self.managed_index_deployment: ManagedIndexDeployment | None = None
         self.structural_feedback_state: dict[int, str] = {}
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
@@ -197,8 +220,29 @@ class MainWindow(QMainWindow):
         self._build_experiments_tab()
         self._build_training_tab()
         self._refresh_calibration_status()
+        self._refresh_managed_index_state()
         self._apply_style()
         self.statusBar().showMessage("Готово")
+
+    def _start_worker(self, worker: Worker) -> None:
+        """Keep background Qt objects alive until their queued signals finish."""
+        self._active_workers.add(worker)
+        worker.signals.succeeded.connect(
+            lambda _result, current=worker: self._active_workers.discard(current)
+        )
+        worker.signals.failed.connect(
+            lambda _message, current=worker: self._active_workers.discard(current)
+        )
+        self.thread_pool.start(worker)
+
+    def _set_query_actions_enabled(self, enabled: bool) -> None:
+        self.analyze_button.setEnabled(enabled)
+        self.deep_analyze_button.setEnabled(enabled)
+        self.rewrite_analyze_button.setEnabled(enabled)
+
+    def _query_action_failed(self, message: str) -> None:
+        self._set_query_actions_enabled(True)
+        self._task_failed(message)
 
     def _build_analysis_tab(self) -> None:
         page = QWidget()
@@ -310,7 +354,7 @@ class MainWindow(QMainWindow):
 
         metrics = QGridLayout()
         self.predicted_value = self._metric_card(
-            metrics, 0, "ML-прогноз (не замер)", "—"
+            metrics, 0, "Среднее прогнозируемое время (ML, не замер)", "—"
         )
         self.predicted_value.setToolTip(
             "Оценка XGBoost без выполнения SELECT. Диапазон строится по средней "
@@ -330,6 +374,40 @@ class MainWindow(QMainWindow):
             "Рекомендация появится после анализа достаточно долгого запроса."
         )
         recommendation_layout.addWidget(self.recommendation_text)
+
+        index_management_row = QHBoxLayout()
+        self.apply_indexes_button = QPushButton(
+            "Применить проверенные индексы и измерить"
+        )
+        self.apply_indexes_button.setEnabled(False)
+        self.apply_indexes_button.setToolTip(
+            "Создаёт только индексы из последнего глубокого анализа, фиксирует "
+            "их в PostgreSQL и повторяет фактический замер."
+        )
+        self.apply_indexes_button.clicked.connect(self._start_apply_indexes)
+        index_management_row.addWidget(self.apply_indexes_button)
+        self.rollback_indexes_button = QPushButton("Откатить применённые индексы")
+        self.rollback_indexes_button.setEnabled(False)
+        self.rollback_indexes_button.setToolTip(
+            "Удаляет только индексы, созданные приложением и записанные в "
+            "локальном журнале управляемых индексов."
+        )
+        self.rollback_indexes_button.clicked.connect(self._start_rollback_indexes)
+        index_management_row.addWidget(self.rollback_indexes_button)
+        self.index_management_status = QLabel(
+            "Сначала выполните глубокий анализ индексов."
+        )
+        self.index_management_status.setObjectName("mutedLabel")
+        index_management_row.addWidget(self.index_management_status, 2)
+        recommendation_layout.addLayout(index_management_row)
+
+        feedback_explanation = QLabel(
+            "Обратная связь по структурным советам (не управление индексами). "
+            "Становится доступна только для рекомендаций, сохранённых в истории pqo."
+        )
+        feedback_explanation.setObjectName("mutedLabel")
+        feedback_explanation.setWordWrap(True)
+        recommendation_layout.addWidget(feedback_explanation)
 
         feedback_row = QHBoxLayout()
         self.structural_recommendation_combo = QComboBox()
@@ -364,11 +442,15 @@ class MainWindow(QMainWindow):
         self.structural_before_spin = QDoubleSpinBox()
         self.structural_before_spin.setRange(0, 1_000_000_000)
         self.structural_before_spin.setDecimals(3)
+        self.structural_before_spin.setSpecialValueText("—")
+        self.structural_before_spin.setEnabled(False)
         measurement_row.addWidget(self.structural_before_spin)
         measurement_row.addWidget(QLabel("после"))
         self.structural_after_spin = QDoubleSpinBox()
         self.structural_after_spin.setRange(0, 1_000_000_000)
         self.structural_after_spin.setDecimals(3)
+        self.structural_after_spin.setSpecialValueText("—")
+        self.structural_after_spin.setEnabled(False)
         measurement_row.addWidget(self.structural_after_spin)
         self.save_structural_measurement_button = QPushButton("Сохранить замер")
         self.save_structural_measurement_button.setEnabled(False)
@@ -392,7 +474,12 @@ class MainWindow(QMainWindow):
         measurement_row.addWidget(self.structural_feedback_status, 2)
         recommendation_layout.addLayout(measurement_row)
         layout.addWidget(recommendation_group)
-        self.tabs.addTab(page, "Анализ")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        self.analysis_scroll = scroll
+        self.tabs.addTab(scroll, "Анализ")
 
     def _metric_card(self, layout: QGridLayout, column: int, caption: str, value: str):
         box = QGroupBox(caption)
@@ -681,6 +768,40 @@ class MainWindow(QMainWindow):
             Path(self.xgb_model_edit.text()),
         )
 
+    def _managed_index_path(self) -> Path:
+        return ARTIFACT_ROOT / "managed-indexes" / "active-plan.json"
+
+    def _refresh_managed_index_state(self) -> None:
+        target = self._managed_index_path()
+        self.managed_index_deployment = None
+        self.rollback_indexes_button.setEnabled(False)
+        if not target.is_file():
+            self.index_management_status.setText(
+                "Сначала выполните глубокий анализ индексов."
+            )
+            return
+        try:
+            deployment = load_deployment(target)
+            settings = self._database_settings()
+            identity = f"{settings.host.lower()}:{settings.port}/{settings.dbname}"
+            if deployment.database_identity != identity:
+                self.index_management_status.setText(
+                    "Есть применённый план для другой БД; переключите настройки для отката."
+                )
+                return
+        except Exception as exc:
+            self.index_management_status.setText(
+                f"Не удалось прочитать журнал индексов: {type(exc).__name__}: {exc}"
+            )
+            return
+        self.managed_index_deployment = deployment
+        self.rollback_indexes_button.setEnabled(True)
+        self.index_management_status.setText(
+            f"Применено индексов: {len(deployment.indexes)}; "
+            f"замер {deployment.baseline_time_ms:.2f} → "
+            f"{deployment.indexed_time_ms:.2f} мс. Можно откатить."
+        )
+
     def _refresh_calibration_status(self) -> None:
         try:
             path = self._calibration_path()
@@ -744,7 +865,7 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(
             lambda message: self._task_failed(message, self.calibrate_button)
         )
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _calibration_finished(self, result) -> None:
         self.calibrate_button.setEnabled(True)
@@ -802,7 +923,7 @@ class MainWindow(QMainWindow):
         )
         worker.signals.succeeded.connect(self._batch_calibration_finished)
         worker.signals.failed.connect(self._batch_calibration_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _batch_calibration_finished(self, result) -> None:
         self.calibrate_button.setEnabled(True)
@@ -853,7 +974,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.analyze_button.setEnabled(False)
+        self._set_query_actions_enabled(False)
         self._reset_structural_feedback()
         self.statusBar().showMessage("Анализ запроса…")
         worker = Worker(
@@ -872,12 +993,11 @@ class MainWindow(QMainWindow):
             strategy_model_path=strategy_path,
         )
         worker.signals.succeeded.connect(self._show_analysis)
-        worker.signals.failed.connect(
-            lambda message: self._task_failed(message, self.analyze_button)
-        )
-        self.thread_pool.start(worker)
+        worker.signals.failed.connect(self._query_action_failed)
+        self._start_worker(worker)
 
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
+        self._set_query_actions_enabled(True)
         prediction = analysis.prediction
         self.last_prediction_ms = prediction.predicted_time_ms
         self.last_query_run_id = analysis.query_run_id
@@ -960,6 +1080,8 @@ class MainWindow(QMainWindow):
         self.reject_structural_button.setEnabled(False)
         self.save_structural_measurement_button.setEnabled(False)
         self.validate_structural_button.setEnabled(False)
+        self.structural_before_spin.setEnabled(False)
+        self.structural_after_spin.setEnabled(False)
         self.structural_feedback_note.clear()
         self.structural_feedback_status.setText(
             "Сохраните анализ в историю, чтобы оставить обратную связь."
@@ -1016,6 +1138,11 @@ class MainWindow(QMainWindow):
         self.save_structural_measurement_button.setEnabled(
             available and status == RecommendationDecision.ACCEPTED.value
         )
+        measurement_available = (
+            available and status == RecommendationDecision.ACCEPTED.value
+        )
+        self.structural_before_spin.setEnabled(measurement_available)
+        self.structural_after_spin.setEnabled(measurement_available)
         recommendation = self._selected_structural_recommendation()
         self.validate_structural_button.setEnabled(
             available
@@ -1049,7 +1176,7 @@ class MainWindow(QMainWindow):
         )
         worker.signals.succeeded.connect(self._structural_decision_saved)
         worker.signals.failed.connect(self._structural_feedback_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _structural_decision_saved(self, update) -> None:
         self.structural_feedback_state[update.recommendation_id] = update.status
@@ -1083,7 +1210,7 @@ class MainWindow(QMainWindow):
         )
         worker.signals.succeeded.connect(self._structural_measurement_saved)
         worker.signals.failed.connect(self._structural_feedback_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _structural_measurement_saved(self, update) -> None:
         outcome_labels = {
@@ -1137,7 +1264,7 @@ class MainWindow(QMainWindow):
         )
         worker.signals.succeeded.connect(self._structural_validation_finished)
         worker.signals.failed.connect(self._structural_feedback_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _structural_validation_finished(self, result) -> None:
         if not result.supported:
@@ -1202,7 +1329,9 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.deep_analyze_button.setEnabled(False)
+        self.last_sequential_plan = None
+        self.apply_indexes_button.setEnabled(False)
+        self._set_query_actions_enabled(False)
         self.recommendation_text.setPlainText(
             "Проверяю кандидаты в изолированной транзакции…"
         )
@@ -1229,22 +1358,21 @@ class MainWindow(QMainWindow):
             ),
         )
         worker.signals.succeeded.connect(self._show_sequential_analysis)
-        worker.signals.failed.connect(
-            lambda message: self._task_failed(message, self.deep_analyze_button)
-        )
-        self.thread_pool.start(worker)
+        worker.signals.failed.connect(self._query_action_failed)
+        self._start_worker(worker)
 
     def _show_sequential_analysis(
         self, plan: SequentialRecommendationPlan
     ) -> None:
-        self.deep_analyze_button.setEnabled(True)
+        self._set_query_actions_enabled(True)
+        self.last_sequential_plan = plan
+        self.last_analyzed_sql = self.sql_editor.toPlainText().strip()
         if plan.query_run_id is not None:
             self.last_query_run_id = plan.query_run_id
-            self.last_analyzed_sql = self.sql_editor.toPlainText().strip()
         prediction_text = (
             "—"
             if self.last_prediction_ms is None
-            else f"ML-прогноз {self.last_prediction_ms:.2f} мс"
+            else f"средний ML-прогноз {self.last_prediction_ms:.2f} мс"
         )
         self.predicted_value.setText(
             f"{prediction_text}\nфакт {plan.baseline_time_ms:.2f} мс"
@@ -1275,6 +1403,10 @@ class MainWindow(QMainWindow):
                 f"Причина: {reason}.\n"
                 f"Фактическое исходное время: {plan.baseline_time_ms:.2f} мс."
             )
+            if self.managed_index_deployment is None:
+                self.index_management_status.setText(
+                    "Глубокий анализ не сформировал план для применения."
+                )
         else:
             lines = [
                 f"Проверенный план: {len(plan.steps)} индекс(а/ов)",
@@ -1304,6 +1436,11 @@ class MainWindow(QMainWindow):
                 )
             )
             self.recommendation_text.setPlainText("\n".join(lines))
+            if self.managed_index_deployment is None:
+                self.apply_indexes_button.setEnabled(True)
+                self.index_management_status.setText(
+                    "План проверен во временной транзакции. Его можно применить вручную."
+                )
         saved = (
             f"; запись #{plan.query_run_id}, глубокий результат "
             f"#{plan.sequential_analysis_id} сохранён"
@@ -1313,6 +1450,132 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Глубокий анализ завершён; изменения откачены{saved}"
         )
+
+    def _start_apply_indexes(self) -> None:
+        plan = self.last_sequential_plan
+        sql_text = self.sql_editor.toPlainText().strip()
+        if plan is None or not plan.steps:
+            QMessageBox.warning(
+                self,
+                "Нет проверенного плана",
+                "Сначала выполните глубокий анализ и получите принятые индексы.",
+            )
+            return
+        if self.last_analyzed_sql is not None and self.last_analyzed_sql != sql_text:
+            QMessageBox.warning(
+                self,
+                "SQL изменён",
+                "После глубокого анализа текст SQL изменился. Повторите глубокий анализ.",
+            )
+            return
+        statements = "\n".join(
+            _format_index_action(step.action) for step in plan.steps
+        )
+        answer = QMessageBox.question(
+            self,
+            "Применить индексы к базе данных?",
+            "Следующие индексы будут созданы постоянно, а запрос будет повторно "
+            "измерен три раза:\n\n"
+            f"{statements}\n\n"
+            "Приложение запишет точные имена созданных индексов, чтобы их можно "
+            "было удалить кнопкой «Откатить применённые индексы». Продолжить?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.apply_indexes_button.setEnabled(False)
+        self._set_query_actions_enabled(False)
+        self.index_management_status.setText(
+            "Создаю индексы и выполняю контрольные замеры…"
+        )
+        worker = Worker(
+            apply_verified_indexes,
+            sql_text,
+            tuple(step.action for step in plan.steps),
+            self._managed_index_path(),
+            self._database_settings(),
+            repetitions=3,
+        )
+        worker.signals.succeeded.connect(self._indexes_applied)
+        worker.signals.failed.connect(self._managed_index_operation_failed)
+        self._start_worker(worker)
+
+    def _indexes_applied(self, deployment: ManagedIndexDeployment) -> None:
+        self._set_query_actions_enabled(True)
+        self.managed_index_deployment = deployment
+        self.rollback_indexes_button.setEnabled(True)
+        names = ", ".join(item.index_name for item in deployment.indexes)
+        self.index_management_status.setText(
+            f"Индексы применены: {deployment.baseline_time_ms:.2f} → "
+            f"{deployment.indexed_time_ms:.2f} мс "
+            f"({deployment.improvement_ratio:+.1%})."
+        )
+        self.recommendation_text.appendPlainText(
+            "\n\nИндексы применены к БД и остаются активными.\n"
+            f"Фактическая медиана: {deployment.baseline_time_ms:.2f} → "
+            f"{deployment.indexed_time_ms:.2f} мс "
+            f"({deployment.improvement_ratio:+.1%}).\n"
+            f"Созданные имена: {names}\n"
+            "Для удаления используйте кнопку «Откатить применённые индексы»."
+        )
+        self.statusBar().showMessage("Проверенные индексы применены к PostgreSQL")
+
+    def _start_rollback_indexes(self) -> None:
+        deployment = self.managed_index_deployment
+        if deployment is None:
+            self._refresh_managed_index_state()
+            deployment = self.managed_index_deployment
+        if deployment is None:
+            QMessageBox.warning(
+                self, "Нет применённого плана", "Журнал применённых индексов не найден."
+            )
+            return
+        names = "\n".join(
+            f'• "{item.schema_name}"."{item.index_name}"'
+            for item in deployment.indexes
+        )
+        answer = QMessageBox.question(
+            self,
+            "Откатить применённые индексы?",
+            "Будут удалены только следующие созданные приложением индексы:\n\n"
+            f"{names}\n\nПосле удаления исходный запрос будет снова измерен.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.rollback_indexes_button.setEnabled(False)
+        self._set_query_actions_enabled(False)
+        self.index_management_status.setText("Удаляю индексы и повторяю замер…")
+        worker = Worker(
+            rollback_verified_indexes,
+            self._managed_index_path(),
+            self._database_settings(),
+            repetitions=3,
+        )
+        worker.signals.succeeded.connect(self._indexes_rolled_back)
+        worker.signals.failed.connect(self._managed_index_operation_failed)
+        self._start_worker(worker)
+
+    def _indexes_rolled_back(self, result) -> None:
+        self._set_query_actions_enabled(True)
+        self.managed_index_deployment = None
+        self.apply_indexes_button.setEnabled(
+            self.last_sequential_plan is not None
+            and bool(self.last_sequential_plan.steps)
+        )
+        self.rollback_indexes_button.setEnabled(False)
+        self.index_management_status.setText(
+            f"Откат завершён: удалено индексов {len(result.dropped_indexes)}; "
+            f"время без них {result.restored_time_ms:.2f} мс."
+        )
+        self.recommendation_text.appendPlainText(
+            "\n\nПрименённые индексы удалены. "
+            f"Медиана после отката: {result.restored_time_ms:.2f} мс."
+        )
+        self.statusBar().showMessage("Применённые индексы успешно удалены")
+
+    def _managed_index_operation_failed(self, message: str) -> None:
+        self._set_query_actions_enabled(True)
+        self._refresh_managed_index_state()
+        self._task_failed(message)
 
     def _start_rewrite_analysis(self) -> None:
         sql_text = self.sql_editor.toPlainText().strip()
@@ -1328,7 +1591,7 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.rewrite_analyze_button.setEnabled(False)
+        self._set_query_actions_enabled(False)
         self.recommendation_text.setPlainText(
             "Формирую варианты, проверяю эквивалентность и измеряю время…"
         )
@@ -1345,13 +1608,11 @@ class MainWindow(QMainWindow):
             ),
         )
         worker.signals.succeeded.connect(self._show_rewrite_analysis)
-        worker.signals.failed.connect(
-            lambda message: self._task_failed(message, self.rewrite_analyze_button)
-        )
-        self.thread_pool.start(worker)
+        worker.signals.failed.connect(self._query_action_failed)
+        self._start_worker(worker)
 
     def _show_rewrite_analysis(self, plan: SQLRewritePlan) -> None:
-        self.rewrite_analyze_button.setEnabled(True)
+        self._set_query_actions_enabled(True)
         if plan.recommended is not None:
             result = plan.recommended
             self.recommendation_text.setPlainText(
@@ -1402,7 +1663,7 @@ class MainWindow(QMainWindow):
         worker = Worker(load_analysis_history, self._database_settings(), limit=200)
         worker.signals.succeeded.connect(self._show_history)
         worker.signals.failed.connect(self._task_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _show_history(self, records) -> None:
         self.history_records = list(records)
@@ -1522,7 +1783,7 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(
             lambda message: self._task_failed(message, self.load_experiments_button)
         )
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _show_experiment_report(self, report: ExperimentReport) -> None:
         self.experiment_report = report
@@ -1617,7 +1878,7 @@ class MainWindow(QMainWindow):
             lambda message: QMessageBox.information(self, "Подключение работает", message)
         )
         worker.signals.failed.connect(self._task_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _save_settings(self) -> None:
         self.preferences.setValue("db_host", self.host_edit.text().strip())
@@ -1646,6 +1907,7 @@ class MainWindow(QMainWindow):
         )
         self.preferences.sync()
         self._refresh_calibration_status()
+        self._refresh_managed_index_state()
         self.statusBar().showMessage("Настройки сохранены (пароль не сохранялся)")
 
     def _start_xgb_training(self) -> None:
@@ -1675,7 +1937,7 @@ class MainWindow(QMainWindow):
                 message, self.xgb_train_button, self.xgb_progress
             )
         )
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _start_dqn_training(self) -> None:
         output_directory = Path(self.dqn_output_edit.text())
@@ -1708,7 +1970,7 @@ class MainWindow(QMainWindow):
                 message, self.dqn_train_button, self.dqn_progress
             )
         )
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     def _training_finished(
         self,
@@ -1818,6 +2080,11 @@ def main() -> int:
     smoke_test = "--smoke-test" in sys.argv
     if smoke_test:
         sys.argv.remove("--smoke-test")
+    ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+    crash_stream = (ARTIFACT_ROOT / "desktop-crash.log").open(
+        "a", encoding="utf-8"
+    )
+    faulthandler.enable(crash_stream, all_threads=True)
     application = QApplication(sys.argv)
     application.setApplicationName("Predictive Query Optimization")
     application.setOrganizationName("PQO")
@@ -1899,7 +2166,9 @@ def main() -> int:
         return 0
     window = MainWindow()
     window.show()
-    return application.exec()
+    exit_code = application.exec()
+    crash_stream.close()
+    return exit_code
 
 
 if __name__ == "__main__":

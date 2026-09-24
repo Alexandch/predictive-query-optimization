@@ -52,8 +52,13 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(window.batch_calibrate_button.isEnabled())
             self.assertTrue(window.deep_analyze_button.isEnabled())
             self.assertTrue(window.rewrite_analyze_button.isEnabled())
+            self.assertTrue(window.analysis_scroll.widgetResizable())
+            self.assertFalse(window.apply_indexes_button.isEnabled())
+            self.assertFalse(window.rollback_indexes_button.isEnabled())
             self.assertFalse(window.accept_structural_button.isEnabled())
             self.assertFalse(window.reject_structural_button.isEnabled())
+            self.assertFalse(window.structural_before_spin.isEnabled())
+            self.assertFalse(window.structural_after_spin.isEnabled())
             self.assertFalse(window.save_structural_measurement_button.isEnabled())
             self.assertFalse(window.validate_structural_button.isEnabled())
             self.assertEqual(
@@ -100,7 +105,7 @@ class DesktopTests(unittest.TestCase):
 
         text = _format_prediction(prediction)
 
-        self.assertIn("оценка модели", text)
+        self.assertIn("среднее время по модели", text)
         self.assertIn("0.00–25.58 мс", text)
 
     def test_structural_recommendation_is_readable(self):
@@ -143,6 +148,8 @@ class DesktopTests(unittest.TestCase):
             self.assertFalse(window.save_structural_measurement_button.isEnabled())
             window.structural_feedback_state[42] = "accepted"
             window._sync_structural_feedback_controls()
+            self.assertTrue(window.structural_before_spin.isEnabled())
+            self.assertTrue(window.structural_after_spin.isEnabled())
             self.assertTrue(window.save_structural_measurement_button.isEnabled())
             self.assertTrue(window.validate_structural_button.isEnabled())
         finally:

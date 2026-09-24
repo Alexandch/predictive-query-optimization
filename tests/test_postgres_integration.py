@@ -1,5 +1,6 @@
 import hashlib
 import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,7 +11,9 @@ from pqo.explain import collect_explain
 from pqo.dqn_features import collect_action_database_context
 from pqo.index_actions import IndexAction
 from pqo.index_environment import IndexExperimentEnvironment
+from pqo.managed_indexes import apply_verified_indexes, rollback_verified_indexes
 from pqo.query_generator import AviationQueryGenerator
+from pqo.sequential_recommendation import recommend_sequential_indexes
 from pqo.sequential_environment import SequentialIndexEnvironment
 from pqo.sql_rewrite import evaluate_sql_rewrites
 from pqo.structural_feedback import (
@@ -35,6 +38,61 @@ from pqo.structural_validation import (
 )
 class PostgreSQLIntegrationTests(unittest.TestCase):
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+    def test_regular_then_deep_analysis_without_calibration(self):
+        query = (
+            "SELECT flight_id, scheduled_departure FROM aviation.flights "
+            "WHERE departure_airport = 'MSQ' ORDER BY scheduled_departure"
+        )
+        analysis = analyze_query(
+            query,
+            self.PROJECT_ROOT / "models/xgboost/xgboost_query_time.joblib",
+            self.PROJECT_ROOT / "models/dqn/dqn_index_advisor.pt",
+            recommendation_threshold_ms=5,
+            persist=False,
+            calibration_profile_path=None,
+            strategy_model_path=(
+                self.PROJECT_ROOT / "models/strategy/strategy_selector.joblib"
+            ),
+        )
+        plan = recommend_sequential_indexes(
+            query,
+            self.PROJECT_ROOT
+            / "models/sequential_dqn/sequential_dqn_index_advisor.pt",
+            max_steps=2,
+            repetitions=1,
+            minimum_baseline_time_ms=5,
+            minimum_absolute_improvement_ms=5,
+            minimum_improvement_ratio=0.05,
+            persist=False,
+        )
+
+        self.assertGreater(analysis.prediction.predicted_time_ms, 0)
+        self.assertEqual(analysis.prediction.calibration_factor, 1.0)
+        self.assertGreater(plan.baseline_time_ms, 0)
+
+    def test_applies_measures_and_rolls_back_user_approved_index(self):
+        query = (
+            "SELECT flight_id, scheduled_departure FROM aviation.flights "
+            "WHERE departure_airport = 'MSQ' ORDER BY scheduled_departure"
+        )
+        action = IndexAction.create(
+            "aviation", "flights", ("departure_airport", "scheduled_departure")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "active-plan.json"
+            deployment = apply_verified_indexes(
+                query, (action,), record, repetitions=1
+            )
+            try:
+                self.assertTrue(record.is_file())
+                self.assertGreater(deployment.baseline_time_ms, 0)
+                self.assertGreater(deployment.indexed_time_ms, 0)
+            finally:
+                rollback = rollback_verified_indexes(record, repetitions=1)
+            self.assertEqual(rollback.dropped_indexes, deployment.indexes)
+            self.assertGreater(rollback.restored_time_ms, 0)
+            self.assertFalse(record.exists())
 
     def test_proves_and_measures_count_to_exists_rewrite(self):
         result = evaluate_sql_rewrites(
