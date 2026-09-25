@@ -268,22 +268,24 @@ def train_sequential_dqn(
     )
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state_dict": online.state_dict(),
-            "input_size": int(train_x.shape[1]),
-            "state_size": state_size,
-            "action_size": action_size,
-            "hidden_sizes": (128, 64),
-            "feature_mean": torch.tensor(feature_mean, dtype=torch.float32),
-            "feature_std": torch.tensor(feature_std, dtype=torch.float32),
-            "gamma": gamma,
-            "ranking_weight": ranking_weight,
-            "decision_threshold": decision_threshold,
-            "action_encoding_version": SEQUENTIAL_ACTION_ENCODING,
-            "training_kind": "offline-sequential-bellman-dqn",
-        },
-        destination / "sequential_dqn_index_advisor.pt",
+    artifact = {
+        "model_state_dict": online.state_dict(),
+        "input_size": int(train_x.shape[1]),
+        "state_size": state_size,
+        "action_size": action_size,
+        "hidden_sizes": (128, 64),
+        "feature_mean": torch.tensor(feature_mean, dtype=torch.float32),
+        "feature_std": torch.tensor(feature_std, dtype=torch.float32),
+        "gamma": gamma,
+        "ranking_weight": ranking_weight,
+        "decision_threshold": decision_threshold,
+        "action_encoding_version": SEQUENTIAL_ACTION_ENCODING,
+        "training_kind": "offline-sequential-bellman-dqn",
+    }
+    model_path = destination / "sequential_dqn_index_advisor.pt"
+    torch.save(artifact, model_path)
+    _save_numpy_inference_artifact(
+        artifact, model_path.with_suffix(".npz"), np
     )
     (destination / "metrics.json").write_text(
         json.dumps(asdict(metrics), ensure_ascii=False, indent=2), encoding="utf-8"
@@ -296,24 +298,54 @@ def predict_sequential_action_values(
     state: list[float],
     action_features: list[list[float]],
 ) -> list[float]:
-    """Score available actions and enforce the exact terminal value of STOP."""
+    """Score actions with a NumPy sidecar, avoiding PyTorch in the GUI runtime."""
     import numpy as np
-    import torch
 
-    model, feature_mean, feature_std = _load_prediction_model(
+    artifact = _load_numpy_prediction_model(
         str(Path(model_path).resolve())
     )
     combined = np.asarray(
         [state + action for action in action_features], dtype=np.float32
     )
-    normalized = (combined - feature_mean) / feature_std
-    with torch.no_grad():
-        values = model(torch.tensor(normalized, dtype=torch.float32)).squeeze(1)
-    result = [float(value) for value in values]
+    normalized = (combined - artifact["feature_mean"]) / artifact["feature_std"]
+    hidden = np.maximum(
+        normalized @ artifact["weight_0"].T + artifact["bias_0"], 0.0
+    )
+    hidden = np.maximum(
+        hidden @ artifact["weight_2"].T + artifact["bias_2"], 0.0
+    )
+    values = hidden @ artifact["weight_4"].T + artifact["bias_4"]
+    result = [float(value) for value in values[:, 0]]
     for index, action in enumerate(action_features):
         if action[-1] >= 0.5:
             result[index] = 0.0
     return result
+
+
+def sequential_inference_metadata(model_path: str | Path) -> dict[str, object]:
+    """Return validated metadata without importing PyTorch."""
+    artifact = _load_numpy_prediction_model(str(Path(model_path).resolve()))
+    return {
+        "training_kind": artifact["training_kind"],
+        "action_encoding_version": artifact["action_encoding_version"],
+        "decision_threshold": artifact["decision_threshold"],
+        "input_size": artifact["input_size"],
+    }
+
+
+def export_sequential_numpy_artifact(
+    model_path: str | Path, output_path: str | Path | None = None
+) -> Path:
+    """Convert a trusted project ``.pt`` artifact into runtime-only NumPy data."""
+    import numpy as np
+    import torch
+
+    source = Path(model_path)
+    artifact = torch.load(source, map_location="cpu", weights_only=True)
+    destination = Path(output_path) if output_path else source.with_suffix(".npz")
+    _save_numpy_inference_artifact(artifact, destination, np)
+    _load_numpy_prediction_model.cache_clear()
+    return destination
 
 
 def evaluate_sequential_dqn_control(
@@ -416,6 +448,63 @@ def _control_decision_rows(records, predictions, returns, threshold, np):
             }
         )
     return rows
+
+
+def _numpy_inference_path(model_path: str | Path) -> Path:
+    path = Path(model_path)
+    return path if path.suffix.lower() == ".npz" else path.with_suffix(".npz")
+
+
+def _save_numpy_inference_artifact(artifact, output_path: Path, np) -> None:
+    if artifact.get("training_kind") != "offline-sequential-bellman-dqn":
+        raise ValueError("Not a sequential Bellman DQN artifact")
+    state = artifact["model_state_dict"]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        output_path,
+        training_kind=np.asarray(artifact["training_kind"]),
+        action_encoding_version=np.asarray(artifact["action_encoding_version"]),
+        decision_threshold=np.asarray(
+            artifact["decision_threshold"], dtype=np.float32
+        ),
+        input_size=np.asarray(artifact["input_size"], dtype=np.int64),
+        feature_mean=artifact["feature_mean"].detach().cpu().numpy(),
+        feature_std=artifact["feature_std"].detach().cpu().numpy(),
+        weight_0=state["0.weight"].detach().cpu().numpy(),
+        bias_0=state["0.bias"].detach().cpu().numpy(),
+        weight_2=state["2.weight"].detach().cpu().numpy(),
+        bias_2=state["2.bias"].detach().cpu().numpy(),
+        weight_4=state["4.weight"].detach().cpu().numpy(),
+        bias_4=state["4.bias"].detach().cpu().numpy(),
+    )
+
+
+@lru_cache(maxsize=4)
+def _load_numpy_prediction_model(model_path: str) -> dict[str, object]:
+    import numpy as np
+
+    sidecar = _numpy_inference_path(model_path)
+    if not sidecar.is_file():
+        raise FileNotFoundError(
+            f"Sequential DQN NumPy artifact not found: {sidecar}"
+        )
+    with np.load(sidecar, allow_pickle=False) as stored:
+        artifact = {name: stored[name].copy() for name in stored.files}
+    artifact["training_kind"] = str(artifact["training_kind"].item())
+    artifact["action_encoding_version"] = str(
+        artifact["action_encoding_version"].item()
+    )
+    artifact["decision_threshold"] = float(
+        artifact["decision_threshold"].item()
+    )
+    artifact["input_size"] = int(artifact["input_size"].item())
+    if artifact["training_kind"] != "offline-sequential-bellman-dqn":
+        raise ValueError("Not a sequential Bellman DQN NumPy artifact")
+    if artifact["action_encoding_version"] != SEQUENTIAL_ACTION_ENCODING:
+        raise ValueError("Sequential DQN NumPy artifact has incompatible features")
+    if artifact["weight_0"].shape[1] != artifact["input_size"]:
+        raise ValueError("Sequential DQN NumPy artifact has invalid dimensions")
+    return artifact
 
 
 @lru_cache(maxsize=4)

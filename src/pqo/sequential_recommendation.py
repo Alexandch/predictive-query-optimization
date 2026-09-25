@@ -14,7 +14,10 @@ from .dqn_features import (
     encode_sequential_state,
 )
 from .index_actions import IndexAction, IndexActionKind
-from .sequential_dqn import predict_sequential_action_values
+from .sequential_dqn import (
+    predict_sequential_action_values,
+    sequential_inference_metadata,
+)
 from .sequential_environment import SequentialIndexEnvironment
 
 
@@ -69,7 +72,6 @@ def recommend_sequential_indexes(
 ) -> SequentialRecommendationPlan:
     """Measure a model-selected plan and discard all trial indexes on exit."""
     import psycopg
-    import torch
 
     if min(
         minimum_baseline_time_ms,
@@ -79,7 +81,7 @@ def recommend_sequential_indexes(
         raise ValueError("Recommendation time thresholds must be non-negative")
     settings = settings or DatabaseSettings.from_env()
     resolved_model = str(Path(model_path).resolve())
-    artifact = torch.load(resolved_model, map_location="cpu", weights_only=True)
+    artifact = sequential_inference_metadata(resolved_model)
     if artifact.get("action_encoding_version") != SEQUENTIAL_ACTION_ENCODING:
         raise ValueError("Select a generic-v4-sequential DQN model")
     threshold = float(artifact["decision_threshold"])

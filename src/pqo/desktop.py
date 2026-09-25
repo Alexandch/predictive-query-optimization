@@ -2078,8 +2078,11 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     smoke_test = "--smoke-test" in sys.argv
+    deep_smoke_test = "--deep-smoke-test" in sys.argv
     if smoke_test:
         sys.argv.remove("--smoke-test")
+    if deep_smoke_test:
+        sys.argv.remove("--deep-smoke-test")
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
     crash_stream = (ARTIFACT_ROOT / "desktop-crash.log").open(
         "a", encoding="utf-8"
@@ -2098,6 +2101,7 @@ def main() -> int:
             DEFAULT_XGB_MODEL,
             DEFAULT_DQN_MODEL,
             DEFAULT_SEQUENTIAL_DQN_MODEL,
+            DEFAULT_SEQUENTIAL_DQN_MODEL.with_suffix(".npz"),
             DEFAULT_STRATEGY_MODEL,
             DEFAULT_DATASET,
         )
@@ -2111,9 +2115,9 @@ def main() -> int:
         try:
             smoke_log.write_text("Loading Python dependencies...", encoding="utf-8")
             import joblib
-            import torch
 
             from .dqn import dqn_action_encoding_version
+            from .sequential_dqn import sequential_inference_metadata
             from .sql_features import extract_sql_features
 
             smoke_log.write_text("Checking PostgreSQL SQL parser...", encoding="utf-8")
@@ -2142,12 +2146,10 @@ def main() -> int:
                     "Strategy artifact has no classifier.", encoding="utf-8"
                 )
                 return 3
-            sequential_artifact = torch.load(
-                DEFAULT_SEQUENTIAL_DQN_MODEL,
-                map_location="cpu",
-                weights_only=True,
+            sequential_artifact = sequential_inference_metadata(
+                DEFAULT_SEQUENTIAL_DQN_MODEL
             )
-            if sequential_artifact.get("training_kind") != (
+            if sequential_artifact["training_kind"] != (
                 "offline-sequential-bellman-dqn"
             ):
                 smoke_log.write_text(
@@ -2161,6 +2163,31 @@ def main() -> int:
             return 3
         smoke_log.write_text(
             "OK: GUI, SQL parser, XGBoost, DQN, sequential DQN and strategy selector loaded.",
+            encoding="utf-8",
+        )
+        return 0
+    if deep_smoke_test:
+        deep_smoke_log = ARTIFACT_ROOT / "deep-smoke-test.log"
+        try:
+            plan = recommend_sequential_indexes(
+                "SELECT flight_id, scheduled_departure FROM aviation.flights "
+                "WHERE departure_airport = 'MSQ' ORDER BY scheduled_departure",
+                DEFAULT_SEQUENTIAL_DQN_MODEL,
+                DatabaseSettings.from_env(),
+                max_steps=2,
+                repetitions=1,
+                minimum_baseline_time_ms=0,
+                minimum_absolute_improvement_ms=0,
+                minimum_improvement_ratio=0,
+                persist=False,
+            )
+        except Exception:
+            deep_smoke_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
+        deep_smoke_log.write_text(
+            "OK: isolated sequential inference and PostgreSQL index experiment; "
+            f"baseline={plan.baseline_time_ms:.3f} ms; steps={len(plan.steps)}; "
+            f"reason={plan.terminal_reason}",
             encoding="utf-8",
         )
         return 0
