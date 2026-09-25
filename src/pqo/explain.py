@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 from typing import Any
 
 from .config import DatabaseSettings
@@ -13,6 +14,27 @@ from .plan_features import PlanFeatures, extract_plan_features
 class ExplainResult:
     plan_json: Any
     features: PlanFeatures
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionMeasurement:
+    """A warm-cache execution measurement based on several real runs."""
+
+    samples_ms: tuple[float, ...]
+    warmup_runs: int
+    last_result: ExplainResult
+
+    @property
+    def median_time_ms(self) -> float:
+        return float(median(self.samples_ms))
+
+    @property
+    def minimum_time_ms(self) -> float:
+        return min(self.samples_ms)
+
+    @property
+    def maximum_time_ms(self) -> float:
+        return max(self.samples_ms)
 
 
 def _assert_read_only_query(sql_text: str) -> str:
@@ -102,4 +124,49 @@ def collect_explain(
     return ExplainResult(
         plan_json=plan_json,
         features=extract_plan_features(plan_json),
+    )
+
+
+def measure_query_execution(
+    sql_text: str,
+    settings: DatabaseSettings | None = None,
+    *,
+    warmup_runs: int = 1,
+    repetitions: int = 5,
+    connection=None,
+) -> ExecutionMeasurement:
+    """Warm the query once, then return a robust median and observed range."""
+    if warmup_runs < 0:
+        raise ValueError("warmup_runs must be non-negative")
+    if repetitions < 1:
+        raise ValueError("repetitions must be positive")
+    settings = settings or DatabaseSettings.from_env()
+
+    try:
+        import psycopg
+    except ImportError as exc:  # pragma: no cover - optional runtime dependency
+        raise RuntimeError("Install project dependencies before connecting to PostgreSQL") from exc
+
+    owns_connection = connection is None
+    connection = connection or psycopg.connect(**settings.connection_kwargs())
+    try:
+        for _ in range(warmup_runs):
+            collect_explain(sql_text, settings=settings, analyze=True, connection=connection)
+        results = tuple(
+            collect_explain(sql_text, settings=settings, analyze=True, connection=connection)
+            for _ in range(repetitions)
+        )
+    finally:
+        if owns_connection:
+            connection.close()
+
+    samples = tuple(
+        result.features.actual_total_time_ms for result in results
+    )
+    if any(value is None for value in samples):
+        raise RuntimeError("EXPLAIN ANALYZE returned no execution time")
+    return ExecutionMeasurement(
+        samples_ms=tuple(float(value) for value in samples),
+        warmup_runs=warmup_runs,
+        last_result=results[-1],
     )

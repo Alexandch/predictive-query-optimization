@@ -818,7 +818,7 @@ class MainWindow(QMainWindow):
             "активна, MAE улучшена"
             if profile.improves_mae
             else (
-                "не активна: MAE не улучшена"
+                "общая MAE улучшена недостаточно; точечная — после 3 замеров SQL"
                 if profile.ready
                 else f"нужно {MINIMUM_ACTIVE_SAMPLES} разных SQL"
             )
@@ -846,8 +846,10 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Выполнить запрос для калибровки?",
-            "Будет выполнен EXPLAIN ANALYZE: PostgreSQL реально запустит этот "
-            "SELECT в read-only-транзакции с заданным таймаутом. Продолжить?",
+            "PostgreSQL реально выполнит этот SELECT через EXPLAIN ANALYZE: "
+            "один прогревочный запуск и пять измерений. В профиль попадут "
+            "медиана и диапазон. Все запуски read-only и ограничены таймаутом. "
+            "Продолжить?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -873,7 +875,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Калибровочное измерение добавлено: "
             f"прогноз {result.observation.predicted_time_ms:.2f} мс, "
-            f"факт {result.observation.actual_time_ms:.2f} мс"
+            f"медиана {result.observation.actual_time_ms:.2f} мс "
+            f"из {result.observation.measurement_count} замеров "
+            f"({result.observation.actual_min_time_ms:.2f}–"
+            f"{result.observation.actual_max_time_ms:.2f} мс)"
         )
 
     def _start_batch_calibration(self) -> None:
@@ -904,8 +909,9 @@ class MainWindow(QMainWindow):
             self,
             "Запустить пакетную калибровку?",
             f"Будут последовательно выполнены {len(queries)} read-only запросов "
-            "через EXPLAIN ANALYZE. Каждый запрос ограничен statement_timeout. "
-            "Продолжить?",
+            "через EXPLAIN ANALYZE. Для каждого: один прогрев и пять измерений; "
+            "операция может занять заметное время. Каждый запуск ограничен "
+            "statement_timeout. Продолжить?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1343,7 +1349,7 @@ class MainWindow(QMainWindow):
             self._database_settings(),
             max_steps=2,
             storage_budget_bytes=64 * 1024 * 1024,
-            repetitions=1,
+            repetitions=5,
             minimum_baseline_time_ms=self.threshold_spin.value(),
             minimum_absolute_improvement_ms=self.minimum_gain_spin.value(),
             minimum_improvement_ratio=(
@@ -1375,7 +1381,10 @@ class MainWindow(QMainWindow):
             else f"средний ML-прогноз {self.last_prediction_ms:.2f} мс"
         )
         self.predicted_value.setText(
-            f"{prediction_text}\nфакт {plan.baseline_time_ms:.2f} мс"
+            f"{prediction_text}\n"
+            f"факт, медиана {plan.baseline_time_ms:.2f} мс\n"
+            f"{len(plan.baseline_samples_ms)} замеров: "
+            f"{plan.baseline_min_time_ms:.2f}–{plan.baseline_max_time_ms:.2f} мс"
         )
         if not plan.steps:
             reasons = {
@@ -1401,7 +1410,10 @@ class MainWindow(QMainWindow):
             self.recommendation_text.setPlainText(
                 "Создавать новые индексы не рекомендуется.\n"
                 f"Причина: {reason}.\n"
-                f"Фактическое исходное время: {plan.baseline_time_ms:.2f} мс."
+                f"Фактическое исходное время: медиана "
+                f"{plan.baseline_time_ms:.2f} мс; диапазон "
+                f"{plan.baseline_min_time_ms:.2f}–"
+                f"{plan.baseline_max_time_ms:.2f} мс."
             )
             if self.managed_index_deployment is None:
                 self.index_management_status.setText(

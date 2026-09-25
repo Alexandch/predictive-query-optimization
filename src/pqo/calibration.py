@@ -19,6 +19,10 @@ MINIMUM_SEGMENT_SAMPLES = 3
 SEGMENT_SHRINKAGE = 5.0
 MINIMUM_FACTOR = 0.05
 MAXIMUM_FACTOR = 20.0
+MINIMUM_MAE_IMPROVEMENT_MS = 0.5
+MINIMUM_MAE_IMPROVEMENT_RATIO = 0.02
+EXACT_QUERY_MINIMUM_SAMPLES = 3
+EXACT_QUERY_RECENT_WINDOW = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +33,10 @@ class CalibrationObservation:
     measured_at: str
     segment: str = ""
     shape_hash: str = ""
+    actual_min_time_ms: float | None = None
+    actual_max_time_ms: float | None = None
+    measurement_count: int = 1
+    warmup_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,12 +116,14 @@ class CalibrationProfile:
     def improves_mae(self) -> bool:
         base = self.base_mae_ms
         calibrated = self.calibrated_mae_ms
-        return bool(
-            self.ready
-            and base is not None
-            and calibrated is not None
-            and calibrated < base
+        if not self.ready or base is None or calibrated is None or base <= 0:
+            return False
+        improvement = base - calibrated
+        required = max(
+            MINIMUM_MAE_IMPROVEMENT_MS,
+            base * MINIMUM_MAE_IMPROVEMENT_RATIO,
         )
+        return improvement >= required
 
     @property
     def mae_improvement_percent(self) -> float | None:
@@ -202,6 +212,18 @@ def load_profile(path: str | Path) -> CalibrationProfile:
             measured_at=str(item["measured_at"]),
             segment=str(item.get("segment", "")),
             shape_hash=str(item.get("shape_hash", "")),
+            actual_min_time_ms=(
+                float(item["actual_min_time_ms"])
+                if item.get("actual_min_time_ms") is not None
+                else None
+            ),
+            actual_max_time_ms=(
+                float(item["actual_max_time_ms"])
+                if item.get("actual_max_time_ms") is not None
+                else None
+            ),
+            measurement_count=int(item.get("measurement_count", 1)),
+            warmup_count=int(item.get("warmup_count", 0)),
         )
         for item in data.get("observations", ())
     )
@@ -210,6 +232,23 @@ def load_profile(path: str | Path) -> CalibrationProfile:
         or item.actual_time_ms < 0
         or not math.isfinite(item.predicted_time_ms)
         or not math.isfinite(item.actual_time_ms)
+        or item.measurement_count < 1
+        or item.warmup_count < 0
+        or (
+            item.actual_min_time_ms is not None
+            and (
+                item.actual_min_time_ms < 0
+                or not math.isfinite(item.actual_min_time_ms)
+                or item.actual_min_time_ms > item.actual_time_ms
+            )
+        )
+        or (
+            item.actual_max_time_ms is not None
+            and (
+                not math.isfinite(item.actual_max_time_ms)
+                or item.actual_max_time_ms < item.actual_time_ms
+            )
+        )
         for item in observations
     ):
         raise ValueError("Calibration observations must contain finite non-negative times")
@@ -237,11 +276,26 @@ def add_observation(
     sql_text: str,
     predicted_time_ms: float,
     actual_time_ms: float,
+    *,
+    actual_min_time_ms: float | None = None,
+    actual_max_time_ms: float | None = None,
+    measurement_count: int = 1,
+    warmup_count: int = 0,
 ) -> tuple[CalibrationProfile, CalibrationObservation]:
     if min(predicted_time_ms, actual_time_ms) < 0:
         raise ValueError("Calibration times must be non-negative")
     if not all(math.isfinite(value) for value in (predicted_time_ms, actual_time_ms)):
         raise ValueError("Calibration times must be finite")
+    if measurement_count < 1 or warmup_count < 0:
+        raise ValueError("Calibration run counts are invalid")
+    actual_min_time_ms = (
+        actual_time_ms if actual_min_time_ms is None else actual_min_time_ms
+    )
+    actual_max_time_ms = (
+        actual_time_ms if actual_max_time_ms is None else actual_max_time_ms
+    )
+    if not 0 <= actual_min_time_ms <= actual_time_ms <= actual_max_time_ms:
+        raise ValueError("Calibration measurement range is invalid")
     observation = CalibrationObservation(
         sql_hash=hashlib.sha256(sql_text.strip().encode()).hexdigest(),
         predicted_time_ms=float(predicted_time_ms),
@@ -249,6 +303,10 @@ def add_observation(
         measured_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         segment=query_segment(sql_text, predicted_time_ms),
         shape_hash=query_shape_hash(sql_text),
+        actual_min_time_ms=float(actual_min_time_ms),
+        actual_max_time_ms=float(actual_max_time_ms),
+        measurement_count=measurement_count,
+        warmup_count=warmup_count,
     )
     return (
         CalibrationProfile(
@@ -347,6 +405,17 @@ def factor_for_query(
     sql_text: str,
     predicted_time_ms: float,
 ) -> float:
+    normalized_hash = hashlib.sha256(sql_text.strip().encode()).hexdigest()
+    exact = [
+        item for item in profile.observations if item.sql_hash == normalized_hash
+    ][-EXACT_QUERY_RECENT_WINDOW:]
+    if len(exact) >= EXACT_QUERY_MINIMUM_SAMPLES:
+        predicted = median(item.predicted_time_ms for item in exact)
+        actual = median(item.actual_time_ms for item in exact)
+        return min(
+            MAXIMUM_FACTOR,
+            max(MINIMUM_FACTOR, (actual + 1.0) / (predicted + 1.0)),
+        )
     if not profile.improves_mae:
         return 1.0
     shape_hash = query_shape_hash(sql_text)
@@ -364,12 +433,10 @@ def apply_calibration(
     profile: CalibrationProfile,
     sql_text: str | None = None,
 ) -> float:
-    if not profile.improves_mae:
-        return float(predicted_time_ms)
     factor = (
         factor_for_query(profile, sql_text, predicted_time_ms)
         if sql_text is not None
-        else profile.factor
+        else (profile.factor if profile.improves_mae else 1.0)
     )
     return _apply_factor(predicted_time_ms, factor)
 
@@ -381,7 +448,7 @@ def calibrate_query(
     settings: DatabaseSettings | None = None,
 ) -> CalibrationResult:
     """Execute one read-only query and append its measured calibration pair."""
-    from .explain import collect_explain
+    from .explain import measure_query_execution
     from .prediction import predict_sql_query
 
     settings = settings or DatabaseSettings.from_env()
@@ -393,15 +460,17 @@ def calibrate_query(
         profile = new_profile(settings, model_path)
 
     prediction = predict_sql_query(sql_text, model_path, settings=settings)
-    measured = collect_explain(sql_text, settings=settings, analyze=True)
-    actual_time = measured.features.actual_total_time_ms
-    if actual_time is None:
-        raise RuntimeError("EXPLAIN ANALYZE returned no execution time")
+    measured = measure_query_execution(sql_text, settings=settings)
+    actual_time = measured.median_time_ms
     profile, observation = add_observation(
         profile,
         sql_text,
         prediction.predicted_time_ms,
         actual_time,
+        actual_min_time_ms=measured.minimum_time_ms,
+        actual_max_time_ms=measured.maximum_time_ms,
+        measurement_count=len(measured.samples_ms),
+        warmup_count=measured.warmup_runs,
     )
     save_profile(profile, profile_file)
     return CalibrationResult(profile=profile, observation=observation)
@@ -447,7 +516,7 @@ def calibrate_workload(
     settings: DatabaseSettings | None = None,
 ) -> CalibrationBatchResult:
     """Measure a bounded read-only workload and update one calibration profile."""
-    from .explain import _assert_read_only_query, collect_explain
+    from .explain import _assert_read_only_query, measure_query_execution
     from .prediction import predict_sql_query
 
     if not 1 <= len(queries) <= 30:
@@ -466,15 +535,17 @@ def calibrate_workload(
 
     for sql_text in normalized_queries:
         prediction = predict_sql_query(sql_text, model_path, settings=settings)
-        measured = collect_explain(sql_text, settings=settings, analyze=True)
-        actual_time = measured.features.actual_total_time_ms
-        if actual_time is None:
-            raise RuntimeError("EXPLAIN ANALYZE returned no execution time")
+        measured = measure_query_execution(sql_text, settings=settings)
+        actual_time = measured.median_time_ms
         profile, _ = add_observation(
             profile,
             sql_text,
             prediction.predicted_time_ms,
             actual_time,
+            actual_min_time_ms=measured.minimum_time_ms,
+            actual_max_time_ms=measured.maximum_time_ms,
+            measurement_count=len(measured.samples_ms),
+            warmup_count=measured.warmup_runs,
         )
         save_profile(profile, profile_file)
 

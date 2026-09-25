@@ -9,11 +9,11 @@ PyInstaller, а затем упаковывается в установщик In
 
 Локальный установщик создаётся по пути:
 
-`dist\installer\PredictiveQueryOptimization-Setup-0.8.4.exe`
+`dist\installer\PredictiveQueryOptimization-Setup-0.8.5.exe`
 
 SHA-256 текущей сборки:
 
-`5A7018AC51FEE8962CF0D5DFB7259FE1AEEDA536FD8F69602494B45AB7315882`
+`3681829BD7892A5B02C839496FAF2BAC7D113B5292E438C42407E42639303C7D`
 
 Стандартный каталог установки:
 

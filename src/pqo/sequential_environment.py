@@ -30,6 +30,7 @@ class SequentialIndexState:
     selected_index_bytes: tuple[int, ...]
     cumulative_improvement_ratio: float
     done: bool
+    baseline_samples_ms: tuple[float, ...] = ()
 
     @property
     def remaining_budget_bytes(self) -> int:
@@ -148,6 +149,7 @@ class SequentialIndexEnvironment:
                 selected_index_bytes=(),
                 cumulative_improvement_ratio=0.0,
                 done=False,
+                baseline_samples_ms=tuple(times),
             ),
         )
 
@@ -313,6 +315,7 @@ class SequentialIndexEpisode:
             selected_index_bytes=(*previous.selected_index_bytes, index_size),
             cumulative_improvement_ratio=cumulative,
             done=done,
+            baseline_samples_ms=previous.baseline_samples_ms,
         )
         return SequentialIndexTransition(
             previous_state=previous,
@@ -343,6 +346,7 @@ class SequentialIndexEpisode:
             selected_index_bytes=state.selected_index_bytes,
             cumulative_improvement_ratio=state.cumulative_improvement_ratio,
             done=done,
+            baseline_samples_ms=state.baseline_samples_ms,
         )
 
     def _index_name(self, action: IndexAction, step: int) -> str:

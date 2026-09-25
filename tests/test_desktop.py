@@ -108,6 +108,26 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("среднее время по модели", text)
         self.assertIn("0.00–25.58 мс", text)
 
+    def test_deep_measurement_plan_reports_median_range(self):
+        from pqo.sequential_recommendation import SequentialRecommendationPlan
+
+        plan = SequentialRecommendationPlan(
+            steps=(),
+            baseline_time_ms=6.0,
+            final_time_ms=6.0,
+            storage_budget_bytes=1024,
+            used_budget_bytes=0,
+            candidate_count=1,
+            decision_threshold=0.1,
+            minimum_baseline_time_ms=5.0,
+            minimum_absolute_improvement_ms=1.0,
+            terminal_reason="model_stop",
+            baseline_samples_ms=(8.0, 4.0, 6.0, 5.0, 7.0),
+        )
+
+        self.assertEqual(plan.baseline_min_time_ms, 4.0)
+        self.assertEqual(plan.baseline_max_time_ms, 8.0)
+
     def test_structural_recommendation_is_readable(self):
         text = _format_structural_recommendations(
             (

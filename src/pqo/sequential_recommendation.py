@@ -48,6 +48,15 @@ class SequentialRecommendationPlan:
     query_run_id: int | None = None
     sequential_analysis_id: int | None = None
     minimum_improvement_ratio: float = 0.05
+    baseline_samples_ms: tuple[float, ...] = ()
+
+    @property
+    def baseline_min_time_ms(self) -> float:
+        return min(self.baseline_samples_ms, default=self.baseline_time_ms)
+
+    @property
+    def baseline_max_time_ms(self) -> float:
+        return max(self.baseline_samples_ms, default=self.baseline_time_ms)
 
     @property
     def measured_improvement_ratio(self) -> float:
@@ -187,6 +196,7 @@ def recommend_sequential_indexes(
         minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
         terminal_reason=terminal_reason,
         minimum_improvement_ratio=minimum_improvement_ratio,
+        baseline_samples_ms=episode.state.baseline_samples_ms,
     )
     if persist:
         from .repository import save_sequential_analysis

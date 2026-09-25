@@ -57,6 +57,32 @@ class CalibrationTests(unittest.TestCase):
             self.assertFalse(profile.ready)
             self.assertEqual(apply_calibration(10.0, profile), 10.0)
 
+    def test_three_recent_measurements_enable_query_specific_calibration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "model.joblib"
+            model.write_bytes(b"model-a")
+            profile = new_profile(self.settings, model)
+            for actual in (9.0, 5.0, 7.0):
+                profile, _ = add_observation(
+                    profile,
+                    "SELECT value FROM sample WHERE id = 1",
+                    11.0,
+                    actual,
+                    actual_min_time_ms=actual - 0.5,
+                    actual_max_time_ms=actual + 0.5,
+                    measurement_count=5,
+                    warmup_count=1,
+                )
+
+            self.assertFalse(profile.ready)
+            self.assertAlmostEqual(
+                apply_calibration(
+                    11.0, profile, "SELECT value FROM sample WHERE id = 1"
+                ),
+                7.0,
+            )
+            self.assertEqual(profile.observations[-1].measurement_count, 5)
+
     def test_profile_is_not_applied_when_it_worsens_mae(self):
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory) / "model.joblib"
@@ -177,10 +203,16 @@ class CalibrationTests(unittest.TestCase):
             legacy_data = json.loads(path.read_text(encoding="utf-8"))
             legacy_data["observations"][0].pop("segment")
             legacy_data["observations"][0].pop("shape_hash")
+            legacy_data["observations"][0].pop("actual_min_time_ms")
+            legacy_data["observations"][0].pop("actual_max_time_ms")
+            legacy_data["observations"][0].pop("measurement_count")
+            legacy_data["observations"][0].pop("warmup_count")
             path.write_text(json.dumps(legacy_data), encoding="utf-8")
             legacy = load_profile(path)
             self.assertEqual(legacy.observations[0].segment, "")
             self.assertEqual(legacy.observations[0].shape_hash, "")
+            self.assertIsNone(legacy.observations[0].actual_min_time_ms)
+            self.assertEqual(legacy.observations[0].measurement_count, 1)
 
 
 if __name__ == "__main__":
