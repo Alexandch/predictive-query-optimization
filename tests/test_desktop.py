@@ -46,9 +46,12 @@ class DesktopTests(unittest.TestCase):
                 ["Анализ", "История", "Эксперименты", "Настройки", "Обучение"],
             )
             self.assertTrue(window.analyze_button.isEnabled())
+            self.assertEqual(
+                window.analyze_button.text(), "Анализировать и измерить"
+            )
             self.assertIn("SELECT", window.sql_editor.toPlainText())
             self.assertIsNotNone(window.persist_check)
-            self.assertIsNotNone(window.calibrate_button)
+            self.assertTrue(window.calibrate_button.isHidden())
             self.assertTrue(window.batch_calibrate_button.isEnabled())
             self.assertTrue(window.deep_analyze_button.isEnabled())
             self.assertTrue(window.rewrite_analyze_button.isEnabled())
@@ -64,7 +67,8 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(
                 Path(window.strategy_model_edit.text()), DEFAULT_STRATEGY_MODEL
             )
-            self.assertFalse(window.use_calibration_check.isChecked())
+            self.assertTrue(window.use_calibration_check.isChecked())
+            self.assertTrue(window.use_calibration_check.isHidden())
             self.assertGreaterEqual(window.minimum_gain_spin.value(), 0)
             self.assertGreaterEqual(window.minimum_gain_percent_spin.value(), 0)
         finally:
@@ -105,8 +109,26 @@ class DesktopTests(unittest.TestCase):
 
         text = _format_prediction(prediction)
 
-        self.assertIn("среднее время по модели", text)
+        self.assertIn("среднее время по ML-модели", text)
         self.assertIn("0.00–25.58 мс", text)
+
+    def test_prediction_labels_automatic_database_profile(self):
+        prediction = QueryTimePrediction(
+            sql_text="SELECT 1",
+            predicted_time_ms=4.1,
+            estimated_total_cost=1.0,
+            estimated_plan_rows=1.0,
+            root_node_type="Result",
+            plan_node_count=1,
+            uncalibrated_time_ms=11.4,
+            calibration_factor=4.1 / 11.4,
+            calibration_sample_count=1,
+        )
+
+        text = _format_prediction(prediction)
+
+        self.assertIn("адаптивная оценка ML + профиль БД", text)
+        self.assertIn("до калибровки 11.40 мс", text)
 
     def test_deep_measurement_plan_reports_median_range(self):
         from pqo.sequential_recommendation import SequentialRecommendationPlan

@@ -10,6 +10,7 @@ from pqo.calibration import (
     load_profile,
     new_profile,
     parse_calibration_workload,
+    query_specific_error_ms,
     save_profile,
     suggested_profile_path,
     validate_profile,
@@ -57,22 +58,21 @@ class CalibrationTests(unittest.TestCase):
             self.assertFalse(profile.ready)
             self.assertEqual(apply_calibration(10.0, profile), 10.0)
 
-    def test_three_recent_measurements_enable_query_specific_calibration(self):
+    def test_one_robust_measurement_enables_query_specific_calibration(self):
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory) / "model.joblib"
             model.write_bytes(b"model-a")
             profile = new_profile(self.settings, model)
-            for actual in (9.0, 5.0, 7.0):
-                profile, _ = add_observation(
-                    profile,
-                    "SELECT value FROM sample WHERE id = 1",
-                    11.0,
-                    actual,
-                    actual_min_time_ms=actual - 0.5,
-                    actual_max_time_ms=actual + 0.5,
-                    measurement_count=5,
-                    warmup_count=1,
-                )
+            profile, _ = add_observation(
+                profile,
+                "SELECT value FROM sample WHERE id = 1",
+                11.0,
+                7.0,
+                actual_min_time_ms=6.5,
+                actual_max_time_ms=7.5,
+                measurement_count=5,
+                warmup_count=1,
+            )
 
             self.assertFalse(profile.ready)
             self.assertAlmostEqual(
@@ -82,6 +82,12 @@ class CalibrationTests(unittest.TestCase):
                 7.0,
             )
             self.assertEqual(profile.observations[-1].measurement_count, 5)
+            self.assertAlmostEqual(
+                query_specific_error_ms(
+                    profile, "SELECT value FROM sample WHERE id = 1"
+                ),
+                0.5,
+            )
 
     def test_profile_is_not_applied_when_it_worsens_mae(self):
         with tempfile.TemporaryDirectory() as directory:

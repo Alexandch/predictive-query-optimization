@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .analysis_service import QueryAnalysis, analyze_query
+from .analysis_service import QueryAnalysis, analyze_query_adaptive
 from .app_paths import resource_root, writable_root
 from .calibration import (
     MINIMUM_ACTIVE_SAMPLES,
@@ -178,7 +178,11 @@ def _format_structural_recommendations(recommendations) -> str:
 def _format_prediction(prediction) -> str:
     lines = [
         f"{prediction.predicted_time_ms:.2f} мс",
-        "среднее время по модели",
+        (
+            "адаптивная оценка ML + профиль БД"
+            if prediction.calibration_sample_count
+            else "среднее время по ML-модели"
+        ),
     ]
     if prediction.uncertainty_lower_ms is not None:
         lines.append(
@@ -265,8 +269,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sql_editor)
 
         controls = QHBoxLayout()
-        self.analyze_button = QPushButton("Анализировать")
+        self.analyze_button = QPushButton("Анализировать и измерить")
         self.analyze_button.setObjectName("primaryButton")
+        self.analyze_button.setToolTip(
+            "Автоматически выполняет один прогрев и пять read-only замеров, "
+            "обновляет профиль этой БД и объединяет результат с ML-прогнозом."
+        )
         self.analyze_button.clicked.connect(self._start_analysis)
         controls.addWidget(self.analyze_button)
         self.deep_analyze_button = QPushButton("Глубокий анализ индексов")
@@ -331,15 +339,16 @@ class MainWindow(QMainWindow):
 
         calibration_controls = QHBoxLayout()
         self.use_calibration_check = QCheckBox("Использовать калибровку этой БД")
-        self.use_calibration_check.setChecked(
-            str(self.preferences.value("use_calibration", "false")).lower()
-            in {"1", "true", "yes"}
-        )
+        self.use_calibration_check.setChecked(True)
+        self.use_calibration_check.setVisible(False)
         calibration_controls.addWidget(self.use_calibration_check)
         self.calibrate_button = QPushButton("Добавить текущий SQL в калибровку")
         self.calibrate_button.clicked.connect(self._start_calibration)
+        self.calibrate_button.setVisible(False)
         calibration_controls.addWidget(self.calibrate_button)
-        self.batch_calibrate_button = QPushButton("Калибровать по файлу SQL")
+        self.batch_calibrate_button = QPushButton(
+            "Предварительно калибровать по файлу SQL"
+        )
         self.batch_calibrate_button.setToolTip(
             "Выполняет до 30 разделённых точкой с запятой SELECT/WITH-запросов "
             "и сравнивает MAE до и после калибровки."
@@ -354,11 +363,12 @@ class MainWindow(QMainWindow):
 
         metrics = QGridLayout()
         self.predicted_value = self._metric_card(
-            metrics, 0, "Среднее прогнозируемое время (ML, не замер)", "—"
+            metrics, 0, "Адаптивное прогнозируемое время", "—"
         )
         self.predicted_value.setToolTip(
-            "Оценка XGBoost без выполнения SELECT. Диапазон строится по средней "
-            "абсолютной ошибке модели или локальной калибровки."
+            "При анализе запрос реально измеряется в read-only режиме: один "
+            "прогрев и пять запусков. Оценка объединяет XGBoost и локальный "
+            "профиль подключённой БД."
         )
         self.cost_value = self._metric_card(metrics, 1, "Стоимость плана", "—")
         self.rows_value = self._metric_card(metrics, 2, "Строки плана", "—")
@@ -807,7 +817,7 @@ class MainWindow(QMainWindow):
             path = self._calibration_path()
             if not path.is_file():
                 self.calibration_status.setText(
-                    f"Калибровка: 0/{MINIMUM_ACTIVE_SAMPLES} разных SQL"
+                    "Автокалибровка: профиль создастся при первом анализе"
                 )
                 return
             profile = load_profile(path)
@@ -818,9 +828,12 @@ class MainWindow(QMainWindow):
             "активна, MAE улучшена"
             if profile.improves_mae
             else (
-                "общая MAE улучшена недостаточно; точечная — после 3 замеров SQL"
+                "общая MAE улучшена недостаточно; точечная автокалибровка активна"
                 if profile.ready
-                else f"нужно {MINIMUM_ACTIVE_SAMPLES} разных SQL"
+                else (
+                    "точечная автокалибровка активна; для общего профиля нужно "
+                    f"{MINIMUM_ACTIVE_SAMPLES} разных SQL"
+                )
             )
         )
         self.calibration_status.setText(
@@ -936,11 +949,12 @@ class MainWindow(QMainWindow):
         self.batch_calibrate_button.setEnabled(True)
         self._refresh_calibration_status()
         if result.profile.improves_mae:
-            self.use_calibration_check.setChecked(True)
             verdict = "профиль активирован"
         else:
-            self.use_calibration_check.setChecked(False)
-            verdict = "профиль не активирован: MAE не улучшена"
+            verdict = (
+                "общий профиль не активирован: MAE не улучшена; "
+                "точечные устойчивые замеры всё равно применяются"
+            )
         improvement = (
             "—"
             if result.mae_improvement_percent is None
@@ -982,20 +996,18 @@ class MainWindow(QMainWindow):
 
         self._set_query_actions_enabled(False)
         self._reset_structural_feedback()
-        self.statusBar().showMessage("Анализ запроса…")
+        self.statusBar().showMessage(
+            "Автокалибровка: прогрев и пять read-only измерений…"
+        )
         worker = Worker(
-            analyze_query,
+            analyze_query_adaptive,
             sql_text,
             xgb_path,
             dqn_path,
+            self._calibration_path(),
             self._database_settings(),
             recommendation_threshold_ms=self.threshold_spin.value(),
             persist=self.persist_check.isChecked(),
-            calibration_profile_path=(
-                self._calibration_path()
-                if self.use_calibration_check.isChecked()
-                else None
-            ),
             strategy_model_path=strategy_path,
         )
         worker.signals.succeeded.connect(self._show_analysis)
@@ -1008,12 +1020,21 @@ class MainWindow(QMainWindow):
         self.last_prediction_ms = prediction.predicted_time_ms
         self.last_query_run_id = analysis.query_run_id
         self.last_analyzed_sql = prediction.sql_text
-        self.predicted_value.setText(_format_prediction(prediction))
+        prediction_text = _format_prediction(prediction)
+        observation = analysis.calibration_observation
+        if observation is not None:
+            prediction_text += (
+                f"\nавтозамер, медиана {observation.actual_time_ms:.2f} мс"
+                f"\n{observation.measurement_count} замеров: "
+                f"{observation.actual_min_time_ms:.2f}–"
+                f"{observation.actual_max_time_ms:.2f} мс"
+            )
+        self.predicted_value.setText(prediction_text)
         if prediction.error_source:
             self.predicted_value.setToolTip(
-                "Это оценка без выполнения SELECT. Ориентир основан на: "
-                f"{prediction.error_source}. Фактическое время зависит от кэша, "
-                "нагрузки и конфигурации PostgreSQL."
+                "Адаптивная оценка основана на XGBoost и автоматическом локальном "
+                f"замере ({prediction.error_source}). Время остаётся статистической "
+                "оценкой: на него влияют кэш и текущая нагрузка PostgreSQL."
             )
         self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
         self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
@@ -1022,7 +1043,10 @@ class MainWindow(QMainWindow):
         )
         recommendation = analysis.recommendation
         if recommendation is None:
-            text = "Прогноз ниже заданного порога — индексный анализ не запускался."
+            text = (
+                "Адаптивное время ниже заданного порога — индексный анализ "
+                "не запускался."
+            )
         elif recommendation.action.kind is IndexActionKind.NOOP:
             text = (
                 "NOOP — новый индекс не рекомендуется.\n"
@@ -1073,8 +1097,10 @@ class MainWindow(QMainWindow):
         self.recommendation_text.setPlainText(text)
         self._configure_structural_feedback(analysis.structural_recommendations)
         self.analyze_button.setEnabled(True)
+        self._refresh_calibration_status()
         self.statusBar().showMessage(
-            f"Анализ завершён · запись #{analysis.query_run_id or 'не сохранена'}"
+            "Анализ и автокалибровка завершены · запись #"
+            f"{analysis.query_run_id or 'не сохранена'}"
         )
 
     def _reset_structural_feedback(self) -> None:
@@ -1378,7 +1404,7 @@ class MainWindow(QMainWindow):
         prediction_text = (
             "—"
             if self.last_prediction_ms is None
-            else f"средний ML-прогноз {self.last_prediction_ms:.2f} мс"
+            else f"адаптивный прогноз {self.last_prediction_ms:.2f} мс"
         )
         self.predicted_value.setText(
             f"{prediction_text}\n"
@@ -1914,9 +1940,7 @@ class MainWindow(QMainWindow):
             "minimum_gain_percent", self.minimum_gain_percent_spin.value()
         )
         self.preferences.setValue("persist_analysis", self.persist_check.isChecked())
-        self.preferences.setValue(
-            "use_calibration", self.use_calibration_check.isChecked()
-        )
+        self.preferences.setValue("use_calibration", True)
         self.preferences.sync()
         self._refresh_calibration_status()
         self._refresh_managed_index_state()

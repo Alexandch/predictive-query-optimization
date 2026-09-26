@@ -23,6 +23,7 @@ MINIMUM_MAE_IMPROVEMENT_MS = 0.5
 MINIMUM_MAE_IMPROVEMENT_RATIO = 0.02
 EXACT_QUERY_MINIMUM_SAMPLES = 3
 EXACT_QUERY_RECENT_WINDOW = 3
+ROBUST_EXACT_MEASUREMENT_RUNS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,13 +406,10 @@ def factor_for_query(
     sql_text: str,
     predicted_time_ms: float,
 ) -> float:
-    normalized_hash = hashlib.sha256(sql_text.strip().encode()).hexdigest()
-    exact = [
-        item for item in profile.observations if item.sql_hash == normalized_hash
-    ][-EXACT_QUERY_RECENT_WINDOW:]
-    if len(exact) >= EXACT_QUERY_MINIMUM_SAMPLES:
-        predicted = median(item.predicted_time_ms for item in exact)
-        actual = median(item.actual_time_ms for item in exact)
+    selected_exact = _selected_exact_observations(profile, sql_text)
+    if selected_exact:
+        predicted = median(item.predicted_time_ms for item in selected_exact)
+        actual = median(item.actual_time_ms for item in selected_exact)
         return min(
             MAXIMUM_FACTOR,
             max(MINIMUM_FACTOR, (actual + 1.0) / (predicted + 1.0)),
@@ -422,6 +420,45 @@ def factor_for_query(
     if not any(item.shape_hash == shape_hash for item in profile.observations):
         return 1.0
     return factor_for_segment(profile, query_segment(sql_text, predicted_time_ms))
+
+
+def query_specific_error_ms(
+    profile: CalibrationProfile,
+    sql_text: str,
+) -> float | None:
+    """Estimate local uncertainty from recent robust runs of the exact SQL."""
+    selected = _selected_exact_observations(profile, sql_text)
+    if not selected:
+        return None
+    center = median(item.actual_time_ms for item in selected)
+    deviations = []
+    for item in selected:
+        deviations.append(abs(item.actual_time_ms - center))
+        if item.actual_min_time_ms is not None:
+            deviations.append(abs(item.actual_min_time_ms - center))
+        if item.actual_max_time_ms is not None:
+            deviations.append(abs(item.actual_max_time_ms - center))
+    return max(deviations, default=0.0)
+
+
+def _selected_exact_observations(
+    profile: CalibrationProfile,
+    sql_text: str,
+) -> list[CalibrationObservation]:
+    normalized_hash = hashlib.sha256(sql_text.strip().encode()).hexdigest()
+    exact = [
+        item for item in profile.observations if item.sql_hash == normalized_hash
+    ]
+    robust_exact = [
+        item
+        for item in exact
+        if item.measurement_count >= ROBUST_EXACT_MEASUREMENT_RUNS
+    ][-EXACT_QUERY_RECENT_WINDOW:]
+    if robust_exact:
+        return robust_exact
+    if len(exact) >= EXACT_QUERY_MINIMUM_SAMPLES:
+        return exact[-EXACT_QUERY_RECENT_WINDOW:]
+    return []
 
 
 def _apply_factor(predicted_time_ms: float, factor: float) -> float:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .calibration import CalibrationObservation, calibrate_query
 from .config import DatabaseSettings
 from .database_features import collect_database_features
 from .dqn import dqn_action_encoding_version, predict_action_values
@@ -34,6 +35,42 @@ class QueryAnalysis:
     query_run_id: int | None
     strategy_prediction: dict | None = None
     structural_recommendations: tuple[StructuralRecommendation, ...] = ()
+    calibration_observation: CalibrationObservation | None = None
+
+
+def analyze_query_adaptive(
+    sql_text: str,
+    xgboost_model_path: str | Path,
+    dqn_model_path: str | Path,
+    calibration_profile_path: str | Path,
+    settings: DatabaseSettings | None = None,
+    *,
+    recommendation_threshold_ms: float = 50.0,
+    persist: bool = True,
+    strategy_model_path: str | Path | None = None,
+) -> QueryAnalysis:
+    """Measure, update the local profile, then return a calibrated analysis."""
+    settings = settings or DatabaseSettings.from_env()
+    calibration = calibrate_query(
+        sql_text,
+        xgboost_model_path,
+        calibration_profile_path,
+        settings,
+    )
+    analysis = analyze_query(
+        sql_text,
+        xgboost_model_path,
+        dqn_model_path,
+        settings,
+        recommendation_threshold_ms=recommendation_threshold_ms,
+        persist=persist,
+        calibration_profile_path=calibration_profile_path,
+        strategy_model_path=strategy_model_path,
+    )
+    return replace(
+        analysis,
+        calibration_observation=calibration.observation,
+    )
 
 
 def analyze_query(
@@ -77,6 +114,7 @@ def analyze_query(
             apply_calibration,
             factor_for_query,
             load_profile,
+            query_specific_error_ms,
             validate_profile,
         )
 
@@ -87,7 +125,11 @@ def analyze_query(
             profile, normalized_sql, uncalibrated_time
         )
         calibration_sample_count = profile.sample_count
-        if profile.improves_mae and profile.calibrated_mae_ms is not None:
+        local_error = query_specific_error_ms(profile, normalized_sql)
+        if local_error is not None:
+            error_mae_ms = local_error
+            error_source = "автокалибровка точного SQL"
+        elif profile.improves_mae and profile.calibrated_mae_ms is not None:
             error_mae_ms = profile.calibrated_mae_ms
             error_source = (
                 f"локальная калибровка, {profile.unique_query_count} разных SQL"
