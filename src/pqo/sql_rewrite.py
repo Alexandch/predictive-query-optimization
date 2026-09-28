@@ -67,6 +67,16 @@ def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
             "Заменить две границы диапазона на BETWEEN",
             _rewrite_ranges,
         ),
+        (
+            "subquery-order-without-limit",
+            "Удалить лишний ORDER BY из подзапроса без LIMIT",
+            _rewrite_subquery_orders,
+        ),
+        (
+            "non-aggregate-having-filter",
+            "Перенести неагрегатный фильтр из HAVING в WHERE",
+            _rewrite_non_aggregate_having,
+        ),
     )
     candidates = []
     seen_sql = {normalized}
@@ -302,6 +312,61 @@ def _rewrite_ranges(expression):
         )
 
     return expression.transform(transform), changed
+
+
+def _rewrite_subquery_orders(expression):
+    """Remove ordering that cannot affect the outer query result."""
+    from sqlglot import exp
+
+    changed = False
+    for select in expression.find_all(exp.Select):
+        if select is expression:
+            continue
+        if select.args.get("order") is not None and select.args.get("limit") is None:
+            select.set("order", None)
+            changed = True
+    return expression, changed
+
+
+def _rewrite_non_aggregate_having(expression):
+    """Move safe non-aggregate HAVING terms into WHERE."""
+    from sqlglot import exp
+
+    changed = False
+    for select in expression.find_all(exp.Select):
+        having = select.args.get("having")
+        if having is None:
+            continue
+        terms = _flatten_boolean(having.this, exp.And)
+        movable = [
+            term
+            for term in terms
+            if not any(isinstance(node, exp.AggFunc) for node in term.walk())
+        ]
+        retained = [term for term in terms if term not in movable]
+        if not movable:
+            continue
+        movable_expression = _combine_and(movable, exp)
+        existing_where = select.args.get("where")
+        where_expression = (
+            exp.and_(existing_where.this, movable_expression)
+            if existing_where is not None
+            else movable_expression
+        )
+        select.set("where", exp.Where(this=where_expression))
+        select.set(
+            "having",
+            exp.Having(this=_combine_and(retained, exp)) if retained else None,
+        )
+        changed = True
+    return expression, changed
+
+
+def _combine_and(nodes, exp):
+    combined = nodes[0].copy()
+    for node in nodes[1:]:
+        combined = exp.and_(combined, node.copy())
+    return combined
 
 
 def _flatten_boolean(node, expression_type):

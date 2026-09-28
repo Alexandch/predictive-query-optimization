@@ -82,6 +82,33 @@ class SQLRewriteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Only SELECT"):
             generate_sql_rewrites("DELETE FROM public.orders")
 
+    def test_removes_order_from_subquery_without_limit(self):
+        candidates = generate_sql_rewrites(
+            "SELECT q.id FROM (SELECT id FROM public.orders ORDER BY id) AS q"
+        )
+
+        candidate = next(
+            item
+            for item in candidates
+            if item.rule_id == "subquery-order-without-limit"
+        )
+        self.assertNotIn("ORDER BY", candidate.sql_text)
+
+    def test_moves_non_aggregate_having_term_to_where(self):
+        candidates = generate_sql_rewrites(
+            "SELECT customer_id, COUNT(*) FROM public.orders "
+            "GROUP BY customer_id HAVING customer_id > 10 AND COUNT(*) > 1"
+        )
+
+        candidate = next(
+            item
+            for item in candidates
+            if item.rule_id == "non-aggregate-having-filter"
+        )
+        self.assertIn("WHERE", candidate.sql_text)
+        self.assertIn("HAVING", candidate.sql_text)
+        self.assertIn("COUNT(*) > 1", candidate.sql_text)
+
 
 if __name__ == "__main__":
     unittest.main()

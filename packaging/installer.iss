@@ -1,5 +1,5 @@
 #define AppName "Predictive Query Optimization"
-#define AppVersion "0.8.7"
+#define AppVersion "0.8.8"
 #define AppPublisher "Alexandch"
 #define AppExeName "PredictiveQueryOptimization.exe"
 

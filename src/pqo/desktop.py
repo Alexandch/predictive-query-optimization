@@ -305,6 +305,10 @@ class MainWindow(QMainWindow):
         self.last_sequential_plan: SequentialRecommendationPlan | None = None
         self.managed_index_deployment: ManagedIndexDeployment | None = None
         self.structural_feedback_state: dict[int, str] = {}
+        self.verified_rewrite_original_sql: str | None = None
+        self.verified_rewrite_sql: str | None = None
+        self.applied_rewrite_original_sql: str | None = None
+        self.applied_rewrite_sql: str | None = None
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
@@ -506,6 +510,34 @@ class MainWindow(QMainWindow):
         self.index_management_status.setObjectName("mutedLabel")
         index_management_row.addWidget(self.index_management_status, 2)
         recommendation_layout.addLayout(index_management_row)
+
+        rewrite_management_row = QHBoxLayout()
+        self.apply_rewrite_button = QPushButton(
+            "Применить проверенный SQL и измерить"
+        )
+        self.apply_rewrite_button.setEnabled(False)
+        self.apply_rewrite_button.setToolTip(
+            "Заменяет текст в редакторе на доказанно эквивалентный вариант и "
+            "повторяет фактический анализ. Схема и данные БД не изменяются."
+        )
+        self.apply_rewrite_button.clicked.connect(self._apply_verified_rewrite)
+        rewrite_management_row.addWidget(self.apply_rewrite_button)
+        self.rollback_rewrite_button = QPushButton(
+            "Вернуть исходный SQL и измерить"
+        )
+        self.rollback_rewrite_button.setEnabled(False)
+        self.rollback_rewrite_button.setToolTip(
+            "Возвращает исходный текст запроса в редактор и повторяет измерение."
+        )
+        self.rollback_rewrite_button.clicked.connect(self._rollback_applied_rewrite)
+        rewrite_management_row.addWidget(self.rollback_rewrite_button)
+        self.rewrite_management_status = QLabel(
+            "Сначала выполните проверку переписывания SQL."
+        )
+        self.rewrite_management_status.setObjectName("mutedLabel")
+        self.rewrite_management_status.setWordWrap(True)
+        rewrite_management_row.addWidget(self.rewrite_management_status, 2)
+        recommendation_layout.addLayout(rewrite_management_row)
 
         feedback_explanation = QLabel(
             "Обратная связь по структурным советам (не управление индексами). "
@@ -1435,6 +1467,13 @@ class MainWindow(QMainWindow):
             f"{result.candidate_time_ms:.2f} мс "
             f"({result.improvement_ratio:+.1%}){creation}; rollback выполнен."
         )
+        rewritten_sql = result.details.get("rewritten_sql")
+        if result.accepted and rewritten_sql:
+            self._set_verified_rewrite(
+                self.last_analyzed_sql,
+                rewritten_sql,
+                "Структурное переписывание проверено автоматически.",
+            )
         self.statusBar().showMessage(
             f"Автопроверка #{result.validation_id} завершена; изменения откачены"
         )
@@ -1757,6 +1796,7 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._clear_verified_rewrite()
         self._set_query_actions_enabled(False)
         self.recommendation_text.setPlainText(
             "Формирую варианты, проверяю эквивалентность и измеряю время…"
@@ -1787,6 +1827,11 @@ class MainWindow(QMainWindow):
         )
         if plan.recommended is not None:
             result = plan.recommended
+            self._set_verified_rewrite(
+                plan.original_sql,
+                result.candidate.sql_text,
+                "Переписывание проверено: эквивалентность и ускорение подтверждены.",
+            )
             self.recommendation_text.setPlainText(
                 "ПРОВЕРЕННОЕ ПЕРЕПИСЫВАНИЕ SQL:\n"
                 f"Правило: {result.candidate.title}\n"
@@ -1842,6 +1887,80 @@ class MainWindow(QMainWindow):
         )
         self.recommendation_text.setPlainText("\n".join(lines))
         self.statusBar().showMessage("Безопасное ускоряющее переписывание не найдено")
+
+    def _clear_verified_rewrite(self) -> None:
+        self.verified_rewrite_original_sql = None
+        self.verified_rewrite_sql = None
+        self.apply_rewrite_button.setEnabled(False)
+        if self.applied_rewrite_sql is None:
+            self.rewrite_management_status.setText(
+                "Проверенное ускоряющее переписывание пока не найдено."
+            )
+
+    def _set_verified_rewrite(
+        self, original_sql: str | None, rewritten_sql: str, status: str
+    ) -> None:
+        if not original_sql or original_sql.strip() == rewritten_sql.strip():
+            return
+        self.verified_rewrite_original_sql = original_sql.strip()
+        self.verified_rewrite_sql = rewritten_sql.strip()
+        self.apply_rewrite_button.setEnabled(
+            self.applied_rewrite_sql is None
+            and self.sql_editor.toPlainText().strip()
+            == self.verified_rewrite_original_sql
+        )
+        self.rewrite_management_status.setText(
+            status + " Его можно применить к тексту запроса и затем вернуть."
+        )
+
+    def _apply_verified_rewrite(self) -> None:
+        original_sql = self.verified_rewrite_original_sql
+        rewritten_sql = self.verified_rewrite_sql
+        if original_sql is None or rewritten_sql is None:
+            return
+        if self.sql_editor.toPlainText().strip() != original_sql:
+            QMessageBox.warning(
+                self,
+                "SQL изменён",
+                "Текст в редакторе отличается от проверенного исходного запроса. "
+                "Запустите проверку переписывания заново.",
+            )
+            self.apply_rewrite_button.setEnabled(False)
+            return
+        self.applied_rewrite_original_sql = original_sql
+        self.applied_rewrite_sql = rewritten_sql
+        self.sql_editor.setPlainText(rewritten_sql)
+        self.apply_rewrite_button.setEnabled(False)
+        self.rollback_rewrite_button.setEnabled(True)
+        self.rewrite_management_status.setText(
+            "Проверенный вариант установлен в редакторе; выполняется повторный замер. "
+            "Исходный SQL сохранён для возврата."
+        )
+        self._start_analysis()
+
+    def _rollback_applied_rewrite(self) -> None:
+        original_sql = self.applied_rewrite_original_sql
+        applied_sql = self.applied_rewrite_sql
+        if original_sql is None or applied_sql is None:
+            return
+        if self.sql_editor.toPlainText().strip() != applied_sql:
+            answer = QMessageBox.question(
+                self,
+                "Вернуть исходный SQL?",
+                "После применения текст запроса был изменён вручную. Вернуть сохранённый "
+                "исходный вариант и потерять текущие правки редактора?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.sql_editor.setPlainText(original_sql)
+        self.applied_rewrite_original_sql = None
+        self.applied_rewrite_sql = None
+        self.rollback_rewrite_button.setEnabled(False)
+        self.apply_rewrite_button.setEnabled(self.verified_rewrite_sql is not None)
+        self.rewrite_management_status.setText(
+            "Исходный SQL возвращён; выполняется контрольный замер."
+        )
+        self._start_analysis()
 
     def _refresh_history(self) -> None:
         self.statusBar().showMessage("Загрузка истории…")

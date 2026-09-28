@@ -60,6 +60,8 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(window.analysis_scroll.widgetResizable())
             self.assertFalse(window.apply_indexes_button.isEnabled())
             self.assertFalse(window.rollback_indexes_button.isEnabled())
+            self.assertFalse(window.apply_rewrite_button.isEnabled())
+            self.assertFalse(window.rollback_rewrite_button.isEnabled())
             self.assertFalse(window.accept_structural_button.isEnabled())
             self.assertFalse(window.reject_structural_button.isEnabled())
             self.assertFalse(window.structural_before_spin.isEnabled())
@@ -73,6 +75,27 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(window.use_calibration_check.isHidden())
             self.assertGreaterEqual(window.minimum_gain_spin.value(), 0)
             self.assertGreaterEqual(window.minimum_gain_percent_spin.value(), 0)
+        finally:
+            window.close()
+
+    def test_verified_rewrite_can_be_applied_and_rolled_back(self):
+        window = MainWindow()
+        try:
+            original = "SELECT * FROM (SELECT id FROM aviation.flights ORDER BY id) q"
+            rewritten = "SELECT * FROM (SELECT id FROM aviation.flights) q"
+            window.sql_editor.setPlainText(original)
+            window._set_verified_rewrite(original, rewritten, "Проверено.")
+            window._start_analysis = lambda: None
+
+            self.assertTrue(window.apply_rewrite_button.isEnabled())
+            window._apply_verified_rewrite()
+            self.assertEqual(window.sql_editor.toPlainText(), rewritten)
+            self.assertTrue(window.rollback_rewrite_button.isEnabled())
+
+            window._rollback_applied_rewrite()
+            self.assertEqual(window.sql_editor.toPlainText(), original)
+            self.assertFalse(window.rollback_rewrite_button.isEnabled())
+            self.assertTrue(window.apply_rewrite_button.isEnabled())
         finally:
             window.close()
 
