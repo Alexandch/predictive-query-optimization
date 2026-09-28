@@ -71,6 +71,15 @@ class SequentialRecommendationPlan:
         )
 
 
+def _should_measure_candidate(
+    predicted_q: float,
+    decision_threshold: float,
+    accepted_step_count: int,
+) -> bool:
+    """Always verify one best candidate during an explicit deep analysis."""
+    return predicted_q > decision_threshold or accepted_step_count == 0
+
+
 def recommend_sequential_indexes(
     sql_text: str,
     model_path: str | Path,
@@ -121,13 +130,31 @@ def recommend_sequential_indexes(
             while not episode.state.done:
                 if terminal_reason == "below_runtime_threshold":
                     break
-                actions = list(episode.available_actions)
-                candidate_count = max(candidate_count, len(actions))
+                generated_actions = list(episode.available_actions)
                 encoded_state = encode_sequential_state(base_state, episode.state)
-                action_contexts = [
+                generated_contexts = [
                     collect_action_database_context(action, connection=connection)
-                    for action in actions
+                    for action in generated_actions
                 ]
+                eligible = [
+                    (action, context)
+                    for action, context in zip(
+                        generated_actions, generated_contexts, strict=True
+                    )
+                    if action.kind is not IndexActionKind.CREATE
+                    or (
+                        not context["exact_index_exists"]
+                        and not context["prefix_index_exists"]
+                    )
+                ]
+                actions = [action for action, _context in eligible]
+                action_contexts = [context for _action, context in eligible]
+                candidate_count = max(
+                    candidate_count,
+                    sum(
+                        action.kind is IndexActionKind.CREATE for action in actions
+                    ),
+                )
                 action_features = [
                     encode_action(
                         action,
@@ -149,9 +176,15 @@ def recommend_sequential_indexes(
                     terminal_reason = "no_candidates"
                     break
                 best_index = max(create_indices, key=values.__getitem__)
-                if values[best_index] <= threshold:
+                if not _should_measure_candidate(
+                    values[best_index], threshold, len(accepted_steps)
+                ):
                     terminal_reason = "model_stop"
                     break
+                # A deep analysis is an explicit empirical verification. For a
+                # slow query, verify the model's strongest eligible candidate
+                # once even when its Q value is below the learned threshold.
+                # The measured gain criteria below remain authoritative.
                 previous_time = episode.state.current_time_ms
                 transition = episode.step(actions[best_index])
                 if not transition.accepted:

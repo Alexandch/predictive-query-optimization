@@ -127,6 +127,28 @@ class IndexActionTests(unittest.TestCase):
         self.assertNotIn("flights", indexed_columns)
         self.assertNotIn("daily_flights", indexed_columns)
 
+    def test_large_join_keeps_candidates_for_late_tables(self):
+        actions = generate_index_actions(
+            """
+            SELECT COUNT(DISTINCT o.order_id), COUNT(DISTINCT s.shipment_id)
+            FROM retail.customer_orders o
+            JOIN retail.customers c ON c.customer_id = o.customer_id
+            JOIN retail.addresses a ON a.address_id = o.shipping_address_id
+            JOIN retail.order_items oi ON oi.order_id = o.order_id
+            LEFT JOIN retail.payments p ON p.order_id = o.order_id
+            LEFT JOIN retail.shipments s ON s.order_id = o.order_id
+            WHERE o.order_status <> 'cancelled'
+            GROUP BY a.region, c.segment
+            ORDER BY COUNT(DISTINCT o.order_id) DESC
+            """,
+            allowed_schemas=frozenset({"retail"}),
+        )
+
+        self.assertIn(
+            IndexAction.create("retail", "shipments", ("order_id",)),
+            actions,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

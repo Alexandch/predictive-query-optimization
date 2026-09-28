@@ -155,20 +155,58 @@ def _recommend_aggregation_fixes(
                 )
             )
 
+    fanout_detected = _recommend_aggregate_join_fanout(
+        destination, tree, joins, estimated_rows_all, exp
+    )
+
     distinct_aggregates = []
     for aggregate in tree.find_all(exp.AggFunc):
         if aggregate.find(exp.Distinct) is not None:
-            distinct_aggregates.append(aggregate.sql(dialect="postgres"))
-    if distinct_aggregates and joins and estimated_rows_all >= 10_000:
+            distinct_aggregates.append(aggregate)
+    if (
+        distinct_aggregates
+        and joins
+        and estimated_rows_all >= 10_000
+        and not fanout_detected
+    ):
+        source_aliases = sorted(
+            {
+                column.table
+                for aggregate in distinct_aggregates
+                for column in aggregate.find_all(exp.Column)
+                if column.table
+            }
+        )
+        alias_labels = {
+            table.alias_or_name: (
+                f"{table.db + '.' if table.db else ''}{table.name}"
+                + (
+                    f" ({table.alias_or_name})"
+                    if table.alias_or_name != table.name
+                    else ""
+                )
+            )
+            for table in tree.find_all(exp.Table)
+        }
+        sources = ", ".join(
+            alias_labels.get(alias, alias) for alias in source_aliases
+        )
+        expressions = ", ".join(
+            aggregate.sql(dialect="postgres")
+            for aggregate in distinct_aggregates[:4]
+        )
         destination.append(
             StructuralRecommendation(
                 RecommendationCategory.AGGREGATION,
                 "distinct-after-large-join",
                 RecommendationPriority.MEDIUM,
-                "Сократить поток перед COUNT/SUM DISTINCT",
-                "DISTINCT-агрегат выполняется после соединений; оценочный поток плана "
+                "Предварительно агрегировать источники DISTINCT",
+                f"После соединений вычисляются {expressions}; источники: "
+                f"{sources or 'не определены'}. Оценочный поток всех узлов плана "
                 f"содержит {estimated_rows_all:,.0f} строк.",
-                "Рассмотрите предварительное выделение уникальных ключей в CTE/подзапросе до широкого JOIN.",
+                "Сначала сгруппируйте перечисленные дочерние таблицы по ключам "
+                "соединения в отдельных CTE, затем присоедините компактные итоги. "
+                "Не удаляйте DISTINCT без проверки эквивалентности.",
                 "Сравните HashAggregate/Sort memory, временные блоки и Execution Time через EXPLAIN ANALYZE.",
             )
         )
@@ -204,6 +242,91 @@ def _recommend_aggregation_fixes(
                 )
             )
             break
+
+
+def _recommend_aggregate_join_fanout(
+    destination, tree, joins, estimated_rows_all, exp
+) -> bool:
+    """Warn about several child streams being multiplied before aggregation.
+
+    This is intentionally more specific than the general DISTINCT advice.  A
+    query joining, for example, items, payments and shipments by order may
+    multiply those rows with each other.  DISTINCT can hide that for counts,
+    while SUM/AVG over the same joined stream can still be both slow and
+    semantically inflated.
+    """
+    if len(joins) < 2 or estimated_rows_all < 10_000:
+        return False
+
+    joined_sources: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for join in joins:
+        source = join.this
+        if not isinstance(source, exp.Table):
+            continue
+        alias = source.alias_or_name
+        label = (
+            f"{source.db + '.' if source.db else ''}{source.name}"
+            + (f" ({alias})" if alias != source.name else "")
+        )
+        keys = tuple(
+            sorted(
+                {
+                    column.sql(dialect="postgres")
+                    for column in (join.args.get("on") or exp.Null()).find_all(
+                        exp.Column
+                    )
+                    if column.table == alias
+                }
+            )
+        )
+        joined_sources[alias] = (label, keys)
+
+    aggregate_sources: set[str] = set()
+    sensitive_aggregates: list[str] = []
+    for aggregate in tree.find_all(exp.AggFunc):
+        aliases = {
+            column.table
+            for column in aggregate.find_all(exp.Column)
+            if column.table in joined_sources
+        }
+        aggregate_sources.update(aliases)
+        if isinstance(aggregate, (exp.Sum, exp.Avg)):
+            sensitive_aggregates.append(aggregate.sql(dialect="postgres"))
+
+    affected = sorted(aggregate_sources)
+    if len(affected) < 2 or not sensitive_aggregates:
+        return False
+
+    source_descriptions = []
+    aggregation_steps = []
+    for alias in affected:
+        label, keys = joined_sources[alias]
+        key_text = ", ".join(keys) if keys else "ключу соединения"
+        source_descriptions.append(f"{label} по {key_text}")
+        aggregation_steps.append(f"{label} по {key_text}")
+
+    destination.append(
+        StructuralRecommendation(
+            RecommendationCategory.AGGREGATION,
+            "aggregate-after-multiple-one-to-many-joins",
+            RecommendationPriority.HIGH,
+            "Устранить размножение строк до итоговой агрегации",
+            "Несколько дочерних потоков участвуют в агрегатах после общего JOIN: "
+            f"{'; '.join(source_descriptions)}. Поток плана содержит примерно "
+            f"{estimated_rows_all:,.0f} строк. Выражения "
+            f"{', '.join(sensitive_aggregates[:3])} могут суммировать повторённые "
+            "строки; DISTINCT защищает только те агрегаты, где он указан явно.",
+            "Сначала сформируйте отдельные CTE для дочерних источников ("
+            f"{'; '.join(aggregation_steps)}), сократите каждый до требуемых "
+            "ключей/итогов и только затем присоедините результаты к основной "
+            "таблице. Для COUNT(DISTINCT ...) сохраните сами уникальные ключи, "
+            "если итоговая группировка шире одного заказа.",
+            "Сначала зафиксируйте ожидаемую бизнес-семантику сумм: исходный запрос "
+            "уже может завышать их из-за JOIN. Затем сравните итоги по нескольким "
+            "заказам и группам и измерьте оба варианта через EXPLAIN ANALYZE.",
+        )
+    )
+    return True
 
 
 def _recommend_join_plan_fixes(destination, nodes) -> None:
@@ -313,20 +436,18 @@ def _recommend_materialized_view(
     if _contains_volatile_function(tree, exp):
         return
 
+    # A filtered report usually needs a parameterized summary rather than a
+    # materialized copy of one concrete query. Do not emit the same generic
+    # suggestion when the advisor cannot produce a directly usable definition.
+    where = tree.find(exp.Where)
+    if where is not None:
+        return
+
     digest = hashlib.sha256(normalized_sql.encode()).hexdigest()[:10]
     view_name = f"pqo_summary_{digest}"
-    where = tree.find(exp.Where)
-    suggested_sql = None
-    if where is None:
-        suggested_sql = (
-            f'CREATE MATERIALIZED VIEW "{view_name}" AS\n'
-            f"{normalized_sql}\nWITH NO DATA;"
-        )
-    filter_note = (
-        " Запрос содержит WHERE: представление следует обобщить и оставить "
-        "изменяемый фильтр во внешнем запросе."
-        if where is not None
-        else ""
+    suggested_sql = (
+        f'CREATE MATERIALIZED VIEW "{view_name}" AS\n'
+        f"{normalized_sql}\nWITH NO DATA;"
     )
     destination.append(
         StructuralRecommendation(
@@ -335,7 +456,7 @@ def _recommend_materialized_view(
             RecommendationPriority.MEDIUM,
             "Рассмотреть материализованное представление для сводного запроса",
             f"Агрегация соединяет {len(physical_tables)} таблицы; Total Cost={estimated_cost:,.2f}, "
-            f"прогноз={float(predicted_time_ms or 0):,.2f} мс.{filter_note}",
+            f"прогноз={float(predicted_time_ms or 0):,.2f} мс.",
             "Используйте materialized view только для часто повторяемого и допустимо устаревающего отчёта; задайте расписание REFRESH.",
             "Измерьте чтение из представления, стоимость REFRESH, размер и допустимую задержку данных на отдельной копии БД.",
             suggested_sql,

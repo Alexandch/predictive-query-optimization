@@ -16,7 +16,7 @@ from .dqn_features import (
     GENERIC_V3_ACTION_ENCODING,
 )
 from .explain import collect_explain
-from .index_actions import IndexAction, generate_index_actions
+from .index_actions import IndexAction, IndexActionKind, generate_index_actions
 from .prediction import QueryTimePrediction, model_error_mae_ms
 from .recommendation import IndexRecommendation
 from .repository import save_analysis, save_optimization_result
@@ -171,10 +171,17 @@ def analyze_query(
                 )
                 for action in actions[1:]
             }
+        actions = (
+            actions[0],
+            *(
+                action
+                for action in actions[1:]
+                if not action_contexts[action]["exact_index_exists"]
+                and not action_contexts[action]["prefix_index_exists"]
+            ),
+        )
         eligible_index_count = sum(
-            not context["exact_index_exists"]
-            and not context["prefix_index_exists"]
-            for context in action_contexts.values()
+            1 for action in actions if action.kind is IndexActionKind.CREATE
         )
         strategy_prediction = predict_strategy(
             strategy_model_path,

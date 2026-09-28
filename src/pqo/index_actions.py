@@ -81,7 +81,7 @@ def generate_index_actions(
     sql_text: str,
     *,
     allowed_schemas: frozenset[str] = frozenset({"aviation"}),
-    max_actions: int = 24,
+    max_actions: int = 48,
 ) -> tuple[IndexAction, ...]:
     """Derive deterministic index candidates from predicates and ordering."""
     query = _assert_read_only_query(sql_text)
@@ -162,7 +162,7 @@ def generate_sequential_index_actions(
     sql_text: str,
     *,
     allowed_schemas: frozenset[str] = frozenset({"aviation"}),
-    max_actions: int = 24,
+    max_actions: int = 48,
 ) -> tuple[IndexAction, ...]:
     """Return STOP followed by the same safe CREATE candidates as one-step mode."""
     actions = generate_index_actions(

@@ -63,6 +63,69 @@ class StructuralAdvisorTests(unittest.TestCase):
 
         self.assertIn("distinct-after-large-join", rules)
 
+    def test_distinct_advice_names_the_actual_source(self):
+        plan = [{"Plan": {"Node Type": "Aggregate", "Total Cost": 5000,
+                           "Plan Rows": 100, "Plans": [
+                               {"Node Type": "Hash Join", "Plan Rows": 20000}
+                           ]}}]
+        recommendations = analyze_query_structure(
+            "SELECT COUNT(DISTINCT i.product_id) "
+            "FROM retail.customer_orders o JOIN retail.order_items i "
+            "ON i.order_id = o.order_id",
+            plan_json=plan,
+        )
+        advice = next(
+            item for item in recommendations
+            if item.rule_id == "distinct-after-large-join"
+        )
+
+        self.assertIn("retail.order_items (i)", advice.evidence)
+        self.assertIn("COUNT(DISTINCT i.product_id)", advice.evidence)
+
+    def test_detects_aggregate_fanout_across_multiple_child_tables(self):
+        plan = [{"Plan": {"Node Type": "Aggregate", "Total Cost": 150000,
+                           "Plan Rows": 100, "Plans": [
+                               {"Node Type": "Hash Join", "Plan Rows": 500000}
+                           ]}}]
+        recommendations = analyze_query_structure(
+            "SELECT o.order_id, SUM(i.quantity * i.unit_price), "
+            "COUNT(DISTINCT p.payment_id), COUNT(DISTINCT s.shipment_id) "
+            "FROM retail.customer_orders o "
+            "JOIN retail.order_items i ON i.order_id = o.order_id "
+            "LEFT JOIN retail.payments p ON p.order_id = o.order_id "
+            "LEFT JOIN retail.shipments s ON s.order_id = o.order_id "
+            "GROUP BY o.order_id",
+            plan_json=plan,
+        )
+        advice = next(
+            item for item in recommendations
+            if item.rule_id == "aggregate-after-multiple-one-to-many-joins"
+        )
+
+        self.assertEqual("high", advice.priority)
+        self.assertIn("retail.order_items (i) по i.order_id", advice.evidence)
+        self.assertIn("retail.payments (p) по p.order_id", advice.evidence)
+        self.assertIn("retail.shipments (s) по s.order_id", advice.evidence)
+        self.assertIn("могут суммировать повторённые строки", advice.evidence)
+
+    def test_specific_fanout_advice_replaces_generic_distinct_advice(self):
+        plan = [{"Plan": {"Node Type": "Aggregate", "Total Cost": 150000,
+                           "Plan Rows": 100, "Plans": [
+                               {"Node Type": "Hash Join", "Plan Rows": 500000}
+                           ]}}]
+        rules = rule_ids(
+            "SELECT o.order_id, SUM(i.quantity), "
+            "COUNT(DISTINCT p.payment_id) "
+            "FROM retail.customer_orders o "
+            "JOIN retail.order_items i ON i.order_id = o.order_id "
+            "LEFT JOIN retail.payments p ON p.order_id = o.order_id "
+            "GROUP BY o.order_id",
+            plan_json=plan,
+        )
+
+        self.assertIn("aggregate-after-multiple-one-to-many-joins", rules)
+        self.assertNotIn("distinct-after-large-join", rules)
+
     def test_detects_large_offset(self):
         rules = rule_ids(
             "SELECT order_id FROM retail.customer_orders "
@@ -122,6 +185,20 @@ class StructuralAdvisorTests(unittest.TestCase):
 
         self.assertIn("CREATE MATERIALIZED VIEW", materialized.suggested_sql)
         self.assertIn("WITH NO DATA", materialized.suggested_sql)
+
+    def test_does_not_recommend_materialized_copy_of_filtered_report(self):
+        plan = [{"Plan": {"Node Type": "Aggregate", "Total Cost": 25000,
+                           "Plan Rows": 20}}]
+        rules = rule_ids(
+            "SELECT o.order_status, SUM(i.quantity * i.unit_price) AS revenue "
+            "FROM retail.customer_orders o JOIN retail.order_items i "
+            "ON i.order_id = o.order_id WHERE o.order_status = 'paid' "
+            "GROUP BY o.order_status",
+            plan_json=plan,
+            predicted_time_ms=250,
+        )
+
+        self.assertNotIn("expensive-summary-materialization", rules)
 
     def test_rejects_data_changing_sql(self):
         with self.assertRaisesRegex(ValueError, "Only SELECT"):
