@@ -31,6 +31,12 @@ class SequentialRecommendationStep:
     index_size_bytes: int
     creation_time_ms: float
     used_by_postgresql: bool
+    target_relation_rows: float = 0.0
+    target_relation_size_bytes: int = 0
+    target_existing_index_count: int = 0
+    target_insert_count: int = 0
+    target_update_count: int = 0
+    target_delete_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,16 +124,18 @@ def recommend_sequential_indexes(
                 actions = list(episode.available_actions)
                 candidate_count = max(candidate_count, len(actions))
                 encoded_state = encode_sequential_state(base_state, episode.state)
+                action_contexts = [
+                    collect_action_database_context(action, connection=connection)
+                    for action in actions
+                ]
                 action_features = [
                     encode_action(
                         action,
                         sql_text,
                         encoding_version=SEQUENTIAL_ACTION_ENCODING,
-                        database_context=collect_action_database_context(
-                            action, connection=connection
-                        ),
+                        database_context=context,
                     )
-                    for action in actions
+                    for action, context in zip(actions, action_contexts, strict=True)
                 ]
                 values = predict_sequential_action_values(
                     resolved_model, encoded_state, action_features
@@ -177,6 +185,24 @@ def recommend_sequential_indexes(
                         index_size_bytes=transition.index_size_bytes,
                         creation_time_ms=transition.creation_time_ms,
                         used_by_postgresql=transition.candidate_uses_created_index,
+                        target_relation_rows=float(
+                            action_contexts[best_index]["target_relation_rows"]
+                        ),
+                        target_relation_size_bytes=int(
+                            action_contexts[best_index]["target_relation_size_bytes"]
+                        ),
+                        target_existing_index_count=int(
+                            action_contexts[best_index]["target_index_count"]
+                        ),
+                        target_insert_count=int(
+                            action_contexts[best_index]["target_insert_count"]
+                        ),
+                        target_update_count=int(
+                            action_contexts[best_index]["target_update_count"]
+                        ),
+                        target_delete_count=int(
+                            action_contexts[best_index]["target_delete_count"]
+                        ),
                     )
                 )
                 final_time = transition.next_state.current_time_ms

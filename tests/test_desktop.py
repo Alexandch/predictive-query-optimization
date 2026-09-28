@@ -15,11 +15,13 @@ from pqo.desktop import (
     DEFAULT_XGB_MODEL,
     MainWindow,
     _format_index_action,
+    _format_index_impact,
     _format_prediction,
     _format_structural_recommendations,
 )
 from pqo.index_actions import IndexAction
 from pqo.prediction import QueryTimePrediction
+from pqo.sequential_recommendation import SequentialRecommendationStep
 from pqo.history import (
     HistoryRecord,
     HistorySequentialStep,
@@ -128,7 +130,36 @@ class DesktopTests(unittest.TestCase):
         text = _format_prediction(prediction)
 
         self.assertIn("адаптивная оценка ML + профиль БД", text)
-        self.assertIn("до калибровки 11.40 мс", text)
+        self.assertNotIn("до калибровки", text)
+
+    def test_index_impact_discloses_write_and_storage_tradeoffs(self):
+        step = SequentialRecommendationStep(
+            action=IndexAction.create(
+                "aviation", "tickets", ("book_ref",), ("ticket_no",)
+            ),
+            predicted_q=0.8,
+            measured_reward=0.4,
+            before_time_ms=150.0,
+            after_time_ms=50.0,
+            index_size_bytes=5 * 1024 * 1024,
+            creation_time_ms=42.0,
+            used_by_postgresql=True,
+            target_relation_size_bytes=100 * 1024 * 1024,
+            target_existing_index_count=1,
+            target_insert_count=100,
+            target_update_count=20,
+            target_delete_count=5,
+        )
+
+        text = _format_index_impact(step)
+
+        self.assertIn("5.0%", text)
+        self.assertIn("после применения будет 2", text)
+        self.assertIn("INSERT=100", text)
+        self.assertIn("UPDATE индексируемых", text)
+        self.assertIn("CREATE INDEX CONCURRENTLY", text)
+        self.assertIn("только для текущего SQL", text)
+        self.assertIn("влияние на задержку записи — не определено", text)
 
     def test_deep_measurement_plan_reports_median_range(self):
         from pqo.sequential_recommendation import SequentialRecommendationPlan
@@ -166,6 +197,7 @@ class DesktopTests(unittest.TestCase):
         )
 
         self.assertIn("Сортировка", text)
+        self.assertIn("требуют отдельной проверки", text)
         self.assertIn("приоритет: высокий", text)
         self.assertIn("OFFSET 5000", text)
 

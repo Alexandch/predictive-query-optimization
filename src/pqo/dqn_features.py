@@ -285,6 +285,9 @@ def collect_action_database_context(
         "target_relation_rows": 0.0,
         "target_relation_size_bytes": 0,
         "target_index_count": 0,
+        "target_insert_count": 0,
+        "target_update_count": 0,
+        "target_delete_count": 0,
         "exact_index_exists": False,
         "prefix_index_exists": False,
     }
@@ -300,9 +303,13 @@ def collect_action_database_context(
         relation = connection.execute(
             """
             SELECT c.oid, greatest(c.reltuples, 0)::double precision,
-                   pg_total_relation_size(c.oid)
+                   pg_total_relation_size(c.oid),
+                   coalesce(s.n_tup_ins, 0),
+                   coalesce(s.n_tup_upd, 0),
+                   coalesce(s.n_tup_del, 0)
             FROM pg_class AS c
             JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_user_tables AS s ON s.relid = c.oid
             WHERE n.nspname = %s AND c.relname = %s
               AND c.relkind IN ('r', 'p')
             """,
@@ -336,6 +343,9 @@ def collect_action_database_context(
         "target_relation_rows": float(relation[1]),
         "target_relation_size_bytes": int(relation[2]),
         "target_index_count": len(indexes),
+        "target_insert_count": int(relation[3]),
+        "target_update_count": int(relation[4]),
+        "target_delete_count": int(relation[5]),
         "exact_index_exists": any(keys == wanted for keys in indexes),
         "prefix_index_exists": any(keys[: len(wanted)] == wanted for keys in indexes),
     }

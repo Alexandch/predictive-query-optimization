@@ -133,6 +133,9 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
 
         self.assertGreater(context["target_relation_rows"], 0)
         self.assertGreater(context["target_relation_size_bytes"], 0)
+        self.assertIn("target_insert_count", context)
+        self.assertIn("target_update_count", context)
+        self.assertIn("target_delete_count", context)
         self.assertTrue(context["exact_index_exists"])
         self.assertTrue(context["prefix_index_exists"])
 

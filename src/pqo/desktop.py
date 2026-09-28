@@ -70,6 +70,7 @@ from .managed_indexes import (
 )
 from .sequential_recommendation import (
     SequentialRecommendationPlan,
+    SequentialRecommendationStep,
     recommend_sequential_indexes,
 )
 from .sql_rewrite import SQLRewritePlan, evaluate_sql_rewrites
@@ -151,7 +152,7 @@ def _format_index_action(action) -> str:
 
 def _format_structural_recommendations(recommendations) -> str:
     if not recommendations:
-        return "Дополнительный структурный анализ: рекомендаций не найдено."
+        return "Структурные рекомендации: обоснованных гипотез не найдено."
     categories = {
         "aggregation": "Агрегация",
         "join": "JOIN",
@@ -159,7 +160,9 @@ def _format_structural_recommendations(recommendations) -> str:
         "materialized_view": "Материализованное представление",
     }
     priorities = {"high": "высокий", "medium": "средний", "low": "низкий"}
-    lines = ["Дополнительные структурные рекомендации:"]
+    lines = [
+        "СТРУКТУРНЫЕ РЕКОМЕНДАЦИИ — гипотезы, требуют отдельной проверки:"
+    ]
     for position, item in enumerate(recommendations, start=1):
         lines.extend(
             (
@@ -189,8 +192,101 @@ def _format_prediction(prediction) -> str:
             f"ориентир {prediction.uncertainty_lower_ms:.2f}–"
             f"{prediction.uncertainty_upper_ms:.2f} мс"
         )
-    if abs(prediction.calibration_factor - 1.0) > 1e-12:
-        lines.append(f"до калибровки {prediction.uncalibrated_time_ms:.2f} мс")
+    return "\n".join(lines)
+
+
+def _format_index_impact(step: SequentialRecommendationStep) -> str:
+    index_mib = step.index_size_bytes / 1024 / 1024
+    relation_mib = step.target_relation_size_bytes / 1024 / 1024
+    storage_ratio = (
+        step.index_size_bytes / step.target_relation_size_bytes
+        if step.target_relation_size_bytes > 0
+        else None
+    )
+    storage_text = f"+{index_mib:.2f} МиБ"
+    if storage_ratio is not None:
+        storage_text += (
+            f" ({storage_ratio:.1%} от текущего полного размера таблицы "
+            f"{relation_mib:.2f} МиБ)"
+        )
+        if storage_ratio >= 0.25:
+            storage_risk = "заметный"
+        elif storage_ratio >= 0.10:
+            storage_risk = "умеренный"
+        else:
+            storage_risk = "небольшой"
+    else:
+        storage_risk = "не определён"
+    writes = (
+        step.target_insert_count
+        + step.target_update_count
+        + step.target_delete_count
+    )
+    if writes:
+        activity = (
+            f"статистика PostgreSQL: INSERT={step.target_insert_count:,}, "
+            f"UPDATE={step.target_update_count:,}, "
+            f"DELETE={step.target_delete_count:,}"
+        )
+    else:
+        activity = (
+            "PostgreSQL не зарегистрировал операции записи после последнего "
+            "сброса статистики"
+        )
+    return "\n".join(
+        (
+            "   Оценка влияния на другие операции:",
+            f"   • Диск: {storage_text}.",
+            (
+                f"   • Индексов на таблице: сейчас "
+                f"{step.target_existing_index_count}, после применения будет "
+                f"{step.target_existing_index_count + 1}."
+            ),
+            (
+                "   • Запись: каждый INSERT/DELETE и UPDATE индексируемых "
+                "столбцов потребует обслуживания ещё одного B-tree; фактическая "
+                "задержка записи этим тестом не измерялась."
+            ),
+            f"   • Наблюдаемая активность таблицы: {activity}.",
+            (
+                f"   • Построение в тесте: {step.creation_time_ms:.2f} мс; обычный "
+                "CREATE INDEX может блокировать запись, поэтому в production "
+                "нужно окно обслуживания или CREATE INDEX CONCURRENTLY."
+            ),
+            (
+                "   • Другие SELECT: PostgreSQL может не использовать индекс, "
+                "но дополнительный индекс занимает диск и кэш. Ускорение доказано "
+                "только для текущего SQL; влияние на общую нагрузку не измерено."
+            ),
+            (
+                f"   • Итог риска: влияние на хранилище — {storage_risk}; "
+                "влияние на задержку записи — не определено без отдельного "
+                "теста репрезентативной нагрузки."
+            ),
+        )
+    )
+
+
+def _format_verified_index_summary(
+    plan: SequentialRecommendationPlan | None,
+) -> str:
+    if plan is None or not plan.steps:
+        return ""
+    lines = [
+        "ПРОВЕРЕННЫЙ ИНДЕКСНЫЙ ПЛАН — остаётся действующей рекомендацией:",
+        (
+            f"Фактическое время: {plan.baseline_time_ms:.2f} → "
+            f"{plan.final_time_ms:.2f} мс "
+            f"({plan.measured_improvement_ratio:+.1%})."
+        ),
+    ]
+    for number, step in enumerate(plan.steps, start=1):
+        lines.extend(
+            (
+                f"{number}. {_format_index_action(step.action)}",
+                _format_index_impact(step),
+            )
+        )
     return "\n".join(lines)
 
 
@@ -994,6 +1090,8 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self.last_sequential_plan = None
+        self.apply_indexes_button.setEnabled(False)
         self._set_query_actions_enabled(False)
         self._reset_structural_feedback()
         self.statusBar().showMessage(
@@ -1041,60 +1139,66 @@ class MainWindow(QMainWindow):
         self.node_value.setText(
             f"{prediction.root_node_type}\n{prediction.plan_node_count} узл."
         )
+        lines = [
+            "ПРЕДВАРИТЕЛЬНЫЙ АНАЛИЗ — кандидаты ещё не проверены фактически.",
+            "Окончательное решение формируется глубоким анализом или проверкой SQL.",
+            "",
+            "ИНДЕКСНЫЙ КАНДИДАТ:",
+        ]
         recommendation = analysis.recommendation
         if recommendation is None:
-            text = (
-                "Адаптивное время ниже заданного порога — индексный анализ "
-                "не запускался."
+            lines.append(
+                "Не оценивался: адаптивное время ниже заданного порога."
             )
         elif recommendation.action.kind is IndexActionKind.NOOP:
-            text = (
-                "NOOP — новый индекс не рекомендуется.\n"
-                f"Оценка действия: {recommendation.predicted_reward:.4f}"
+            lines.extend(
+                (
+                    "Быстрая индексная модель не выбрала убедительный кандидат.",
+                    "Это не запрет на оптимизацию: глубокий анализ проверяет "
+                    "кандидаты фактическими замерами.",
+                    f"Оценка действия: {recommendation.predicted_reward:.4f}",
+                )
             )
         else:
-            action = recommendation.action
-            keys = ", ".join(f'"{name}"' for name in action.key_columns)
-            ddl = f'CREATE INDEX ON "{action.schema_name}"."{action.table_name}" ({keys})'
-            if action.include_columns:
-                includes = ", ".join(
-                    f'"{name}"' for name in action.include_columns
+            lines.extend(
+                (
+                    _format_index_action(recommendation.action),
+                    f"ML-оценка улучшения: {recommendation.predicted_reward:.4f}",
+                    f"Рассмотрено кандидатов: {recommendation.candidate_count}",
+                    "Для решения нажмите «Глубокий анализ индексов»: только он "
+                    "создаёт пробный индекс, измеряет эффект и выполняет ROLLBACK.",
                 )
-                ddl += f" INCLUDE ({includes})"
-            text = (
-                f"{ddl};\nОценка улучшения: {recommendation.predicted_reward:.4f}\n"
-                f"Рассмотрено кандидатов: {recommendation.candidate_count}"
             )
         strategy = analysis.strategy_prediction
         if strategy is not None:
             selected = strategy["strategy"]
             titles = {
-                "NOOP": "ничего не менять",
-                "CREATE_INDEX": "проверить создание индекса",
-                "REWRITE_QUERY": "проверить переписывание SQL",
-            }
-            hints = {
-                "NOOP": "Существенная оптимизация по известным стратегиям маловероятна.",
-                "CREATE_INDEX": "Для фактической проверки используйте глубокий анализ индексов.",
-                "REWRITE_QUERY": "Нажмите «Проверить переписывание SQL» для доказательства эквивалентности и замера.",
+                "NOOP": "модель не выбрала приоритетное направление",
+                "CREATE_INDEX": "сначала проверить индекс",
+                "REWRITE_QUERY": "сначала проверить переписывание SQL",
             }
             probabilities = strategy["probabilities"]
             probability_text = ", ".join(
                 f"{name}={probabilities[name] * 100:.1f}%"
                 for name in ("NOOP", "CREATE_INDEX", "REWRITE_QUERY")
             )
-            text = (
-                "Рекомендуемая стратегия: "
-                f"{titles[selected]} ({probabilities[selected] * 100:.1f}%).\n"
-                f"{hints[selected]}\n"
-                f"Вероятности модели: {probability_text}\n\n"
-                f"Предварительная индексная оценка:\n{text}"
+            lines.extend(
+                (
+                    "",
+                    "ML-НАВИГАЦИЯ (справочно, не итоговая рекомендация):",
+                    f"{titles[selected]} ({probabilities[selected] * 100:.1f}%).",
+                    f"Вероятности: {probability_text}.",
+                )
             )
-        text = (
-            f"{text}\n\n"
-            f"{_format_structural_recommendations(analysis.structural_recommendations)}"
+        lines.extend(
+            (
+                "",
+                _format_structural_recommendations(
+                    analysis.structural_recommendations
+                ),
+            )
         )
-        self.recommendation_text.setPlainText(text)
+        self.recommendation_text.setPlainText("\n".join(lines))
         self._configure_structural_feedback(analysis.structural_recommendations)
         self.analyze_button.setEnabled(True)
         self._refresh_calibration_status()
@@ -1433,13 +1537,19 @@ class MainWindow(QMainWindow):
                 "budget_exceeded": "кандидат превысил лимит 64 МиБ",
             }
             reason = reasons.get(plan.terminal_reason, plan.terminal_reason)
-            self.recommendation_text.setPlainText(
-                "Создавать новые индексы не рекомендуется.\n"
+            index_result = (
+                "ГЛУБОКАЯ ПРОВЕРКА ИНДЕКСОВ: новые индексы не рекомендуются.\n"
                 f"Причина: {reason}.\n"
                 f"Фактическое исходное время: медиана "
                 f"{plan.baseline_time_ms:.2f} мс; диапазон "
                 f"{plan.baseline_min_time_ms:.2f}–"
-                f"{plan.baseline_max_time_ms:.2f} мс."
+                f"{plan.baseline_max_time_ms:.2f} мс.\n"
+                "Вывод относится только к индексам; структурные рекомендации "
+                "ниже оцениваются отдельно."
+            )
+            self.recommendation_text.setPlainText(
+                f"{index_result}\n\n"
+                f"{_format_structural_recommendations(self.last_structural_recommendations)}"
             )
             if self.managed_index_deployment is None:
                 self.index_management_status.setText(
@@ -1447,11 +1557,16 @@ class MainWindow(QMainWindow):
                 )
         else:
             lines = [
+                "ГЛУБОКАЯ ПРОВЕРКА ИНДЕКСОВ — фактический результат:",
                 f"Проверенный план: {len(plan.steps)} индекс(а/ов)",
                 (
                     f"Фактическое время: {plan.baseline_time_ms:.2f} → "
                     f"{plan.final_time_ms:.2f} мс "
                     f"({plan.measured_improvement_ratio:+.1%})"
+                ),
+                (
+                    "Этот измеренный результат имеет приоритет над "
+                    "предварительным классом ML/NOOP."
                 ),
             ]
             for number, step in enumerate(plan.steps, start=1):
@@ -1464,6 +1579,7 @@ class MainWindow(QMainWindow):
                             f"{step.measured_reward:+.4f}; размер="
                             f"{step.index_size_bytes / 1024 / 1024:.2f} МиБ"
                         ),
+                        _format_index_impact(step),
                     )
                 )
             lines.extend(
@@ -1471,6 +1587,10 @@ class MainWindow(QMainWindow):
                     "",
                     "Индексы были только проверены и откачены; команда выше "
                     "сама базу не изменяет.",
+                    "",
+                    _format_structural_recommendations(
+                        self.last_structural_recommendations
+                    ),
                 )
             )
             self.recommendation_text.setPlainText("\n".join(lines))
@@ -1509,12 +1629,20 @@ class MainWindow(QMainWindow):
         statements = "\n".join(
             _format_index_action(step.action) for step in plan.steps
         )
+        total_size_mib = sum(
+            step.index_size_bytes for step in plan.steps
+        ) / 1024 / 1024
         answer = QMessageBox.question(
             self,
             "Применить индексы к базе данных?",
             "Следующие индексы будут созданы постоянно, а запрос будет повторно "
             "измерен три раза:\n\n"
             f"{statements}\n\n"
+            f"Дополнительный объём: примерно {total_size_mib:.2f} МиБ.\n"
+            "Индексы ускорили текущий SELECT, но увеличивают стоимость INSERT, "
+            "DELETE и UPDATE индексируемых столбцов. Влияние на общую рабочую "
+            "нагрузку автоматически не измерено. Обычный CREATE INDEX может "
+            "блокировать запись во время построения.\n\n"
             "Приложение запишет точные имена созданных индексов, чтобы их можно "
             "было удалить кнопкой «Откатить применённые индексы». Продолжить?",
         )
@@ -1651,16 +1779,24 @@ class MainWindow(QMainWindow):
 
     def _show_rewrite_analysis(self, plan: SQLRewritePlan) -> None:
         self._set_query_actions_enabled(True)
+        verified_indexes = _format_verified_index_summary(
+            self.last_sequential_plan
+        )
+        preserved_index_text = (
+            f"\n\n{verified_indexes}" if verified_indexes else ""
+        )
         if plan.recommended is not None:
             result = plan.recommended
             self.recommendation_text.setPlainText(
-                "Проверенное переписывание SQL:\n"
+                "ПРОВЕРЕННОЕ ПЕРЕПИСЫВАНИЕ SQL:\n"
                 f"Правило: {result.candidate.title}\n"
                 f"Фактическое время: {result.baseline_time_ms:.2f} → "
                 f"{result.rewritten_time_ms:.2f} мс "
                 f"({result.improvement_ratio:+.1%})\n\n"
                 f"{result.candidate.sql_text}\n\n"
                 "Эквивалентность результатов подтверждена через EXCEPT ALL."
+                f"{preserved_index_text}\n\n"
+                f"{_format_structural_recommendations(self.last_structural_recommendations)}"
             )
             self.statusBar().showMessage(
                 "Найдено и измерено безопасное переписывание SQL"
@@ -1677,8 +1813,9 @@ class MainWindow(QMainWindow):
             ),
         }
         lines = [
-            "Переписывать SQL не рекомендуется.",
+            "ПРОВЕРКА ПЕРЕПИСЫВАНИЯ: ускоряющий вариант не найден.",
             f"Причина: {reasons.get(plan.terminal_reason, plan.terminal_reason)}.",
+            "Вывод относится только к поддерживаемым правилам переписывания.",
         ]
         for evaluation in plan.evaluations:
             if evaluation.equivalent and evaluation.baseline_time_ms is not None:
@@ -1693,6 +1830,16 @@ class MainWindow(QMainWindow):
                     f"{evaluation.candidate.title}: "
                     f"{evaluation.rejection_reason or 'отклонено'}."
                 )
+        lines.extend(
+            (
+                "",
+                verified_indexes,
+                "" if verified_indexes else "",
+                _format_structural_recommendations(
+                    self.last_structural_recommendations
+                ),
+            )
+        )
         self.recommendation_text.setPlainText("\n".join(lines))
         self.statusBar().showMessage("Безопасное ускоряющее переписывание не найдено")
 
