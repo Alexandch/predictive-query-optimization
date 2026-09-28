@@ -74,12 +74,17 @@ from .sequential_recommendation import (
     SequentialRecommendationStep,
     recommend_sequential_indexes,
 )
-from .sql_rewrite import SQLRewritePlan, evaluate_sql_rewrites
+from .sql_rewrite import (
+    SQLRewritePlan,
+    evaluate_sql_rewrites,
+    generate_sql_rewrites,
+)
 from .structural_feedback import (
     RecommendationDecision,
     record_recommendation_decision,
     record_recommendation_measurement,
 )
+from .structural_advisor import RecommendationPriority
 from .structural_validation import (
     automatic_validation_supported,
     validate_and_save_structural_recommendation,
@@ -444,7 +449,9 @@ class MainWindow(QMainWindow):
         )
         self.deep_analyze_button.clicked.connect(self._start_sequential_analysis)
         controls.addWidget(self.deep_analyze_button)
-        self.rewrite_analyze_button = QPushButton("Проверить переписывание SQL")
+        self.rewrite_analyze_button = QPushButton(
+            "Проверить безопасное переписывание SQL"
+        )
         self.rewrite_analyze_button.setToolTip(
             "Формирует безопасные варианты SQL, доказывает эквивалентность "
             "результатов и измеряет фактическое время выполнения."
@@ -1282,12 +1289,42 @@ class MainWindow(QMainWindow):
         self.node_value.setText(
             f"{prediction.root_node_type}\n{prediction.plan_node_count} узл."
         )
+        strategy = analysis.strategy_prediction
+        strategy_prefers_noop = (
+            strategy is not None and strategy["strategy"] == "NOOP"
+        )
+        high_priority_structural = next(
+            (
+                item
+                for item in analysis.structural_recommendations
+                if item.priority is RecommendationPriority.HIGH
+            ),
+            None,
+        )
         lines = [
             "ПРЕДВАРИТЕЛЬНЫЙ АНАЛИЗ — кандидаты ещё не проверены фактически.",
             "Окончательное решение формируется глубоким анализом или проверкой SQL.",
-            "",
-            "ИНДЕКСНЫЙ КАНДИДАТ:",
         ]
+        if strategy_prefers_noop:
+            noop_probability = strategy["probabilities"]["NOOP"] * 100
+            lines.extend(
+                (
+                    "",
+                    "ОБЫЧНЫЙ ИНДЕКС ПРЕДВАРИТЕЛЬНО НЕ РЕКОМЕНДУЕТСЯ.",
+                    f"Модель выбора стратегии предпочла не менять индексы "
+                    f"({noop_probability:.1f}%).",
+                )
+            )
+            if high_priority_structural is not None:
+                lines.extend(
+                    (
+                        "ПРИОРИТЕТНОЕ НАПРАВЛЕНИЕ: структурная проверка запроса.",
+                        f"Причина: {high_priority_structural.title}.",
+                    )
+                )
+            lines.extend(("", "СЛАБЫЙ ИНДЕКСНЫЙ КАНДИДАТ — только справочно:"))
+        else:
+            lines.extend(("", "ИНДЕКСНЫЙ КАНДИДАТ:"))
         recommendation = analysis.recommendation
         if recommendation is None:
             lines.append(
@@ -1312,7 +1349,6 @@ class MainWindow(QMainWindow):
                     "создаёт пробный индекс, измеряет эффект и выполняет ROLLBACK.",
                 )
             )
-        strategy = analysis.strategy_prediction
         if strategy is not None:
             selected = strategy["strategy"]
             titles = {
@@ -1949,9 +1985,24 @@ class MainWindow(QMainWindow):
         if not sql_text:
             QMessageBox.warning(self, "Нет SQL", "Введите SQL-запрос.")
             return
+        candidates = generate_sql_rewrites(sql_text)
+        if not candidates:
+            self._clear_verified_rewrite()
+            self._show_rewrite_analysis(
+                SQLRewritePlan(
+                    sql_text,
+                    (),
+                    None,
+                    self.threshold_spin.value(),
+                    self.minimum_gain_spin.value(),
+                    self.minimum_gain_percent_spin.value() / 100.0,
+                    "no_candidates",
+                )
+            )
+            return
         answer = QMessageBox.question(
             self,
-            "Проверить переписывание SQL?",
+            "Проверить безопасное переписывание SQL?",
             "PostgreSQL реально выполнит исходный и переписанные SELECT через "
             "EXPLAIN ANALYZE. Результаты будут сравнены в транзакции только для "
             "чтения. Для тяжёлого запроса операция может занять время.",
@@ -2020,8 +2071,28 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if plan.terminal_reason == "no_candidates":
+            self.recommendation_text.setPlainText(
+                "АВТОМАТИЧЕСКАЯ ФАКТИЧЕСКАЯ ПРОВЕРКА НЕ ЗАПУСКАЛАСЬ.\n"
+                "Для этого SQL генератор не сформировал ни одного "
+                "семантически безопасного варианта. Поэтому PostgreSQL не "
+                "выполнялся, и результат появился сразу.\n\n"
+                "Это не означает, что запрос нельзя улучшить. Автоматический "
+                "режим проверяет только преобразования, которые обязаны "
+                "сохранить тот же набор строк и могут быть доказаны через "
+                "EXCEPT ALL.\n\n"
+                "Обнаруженная предварительная агрегация дочерних таблиц относится "
+                "к структурной переработке: она может исправить размножение строк "
+                "и изменить завышенные SUM/AVG. Такое изменение нельзя выдавать "
+                "за эквивалентное без подтверждения требуемой бизнес-семантики."
+                f"{preserved_index_text}"
+            )
+            self.statusBar().showMessage(
+                "Фактическая проверка не запускалась: безопасных вариантов нет"
+            )
+            return
+
         reasons = {
-            "no_candidates": "для этого SQL нет поддерживаемых безопасных правил",
             "below_runtime_threshold": (
                 "фактическое время запроса ниже установленного порога"
             ),

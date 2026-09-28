@@ -22,9 +22,10 @@ from pqo.desktop import (
     _format_structural_recommendations,
     _sql_editor_identity,
 )
-from pqo.analysis_service import analyze_query
+from pqo.analysis_service import QueryAnalysis, analyze_query
 from pqo.index_actions import IndexAction
 from pqo.prediction import QueryTimePrediction
+from pqo.recommendation import IndexRecommendation
 from pqo.sequential_recommendation import SequentialRecommendationStep
 from pqo.history import (
     HistoryRecord,
@@ -66,6 +67,10 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(window.batch_calibrate_button.isEnabled())
             self.assertTrue(window.deep_analyze_button.isEnabled())
             self.assertTrue(window.rewrite_analyze_button.isEnabled())
+            self.assertEqual(
+                window.rewrite_analyze_button.text(),
+                "Проверить безопасное переписывание SQL",
+            )
             self.assertTrue(window.analysis_scroll.widgetResizable())
             self.assertFalse(window.apply_indexes_button.isEnabled())
             self.assertFalse(window.rollback_indexes_button.isEnabled())
@@ -198,6 +203,29 @@ class DesktopTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_no_rewrite_candidates_says_database_was_not_executed(self):
+        window = MainWindow()
+        try:
+            plan = SQLRewritePlan(
+                "SELECT * FROM retail.customer_orders",
+                (),
+                None,
+                50.0,
+                5.0,
+                0.05,
+                "no_candidates",
+            )
+
+            window._show_rewrite_analysis(plan)
+
+            text = window.recommendation_text.toPlainText()
+            self.assertIn("ФАКТИЧЕСКАЯ ПРОВЕРКА НЕ ЗАПУСКАЛАСЬ", text)
+            self.assertIn("PostgreSQL не выполнялся", text)
+            self.assertIn("структурной переработке", text)
+            self.assertNotIn("ускоряющий вариант не найден", text)
+        finally:
+            window.close()
+
     def test_default_models_are_part_of_repository(self):
         self.assertTrue(DEFAULT_XGB_MODEL.is_file())
         self.assertTrue(DEFAULT_DQN_MODEL.is_file())
@@ -322,6 +350,64 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("требуют отдельной проверки", text)
         self.assertIn("приоритет: высокий", text)
         self.assertIn("OFFSET 5000", text)
+
+    def test_fast_analysis_does_not_present_weak_index_as_recommendation(self):
+        window = MainWindow()
+        try:
+            prediction = QueryTimePrediction(
+                sql_text="SELECT * FROM retail.customer_orders",
+                predicted_time_ms=1000.0,
+                estimated_total_cost=100.0,
+                estimated_plan_rows=1000.0,
+                root_node_type="Seq Scan",
+                plan_node_count=1,
+                uncalibrated_time_ms=1000.0,
+                calibration_factor=1.0,
+                calibration_sample_count=0,
+            )
+            structural = StructuralRecommendation(
+                RecommendationCategory.AGGREGATION,
+                "aggregate-after-multiple-one-to-many-joins",
+                RecommendationPriority.HIGH,
+                "Устранить размножение строк до итоговой агрегации",
+                "Несколько дочерних потоков.",
+                "Предварительно агрегировать.",
+                "Сравнить результаты.",
+            )
+            candidate = IndexRecommendation(
+                IndexAction.create(
+                    "retail", "customer_orders", ("shipping_address_id",)
+                ),
+                0.03,
+                21,
+            )
+            analysis = QueryAnalysis(
+                prediction,
+                candidate,
+                50.0,
+                None,
+                strategy_prediction={
+                    "strategy": "NOOP",
+                    "probabilities": {
+                        "NOOP": 0.678,
+                        "CREATE_INDEX": 0.258,
+                        "REWRITE_QUERY": 0.064,
+                    },
+                },
+                structural_recommendations=(structural,),
+            )
+
+            window._show_analysis(analysis)
+
+            text = window.recommendation_text.toPlainText()
+            self.assertIn(
+                "ОБЫЧНЫЙ ИНДЕКС ПРЕДВАРИТЕЛЬНО НЕ РЕКОМЕНДУЕТСЯ", text
+            )
+            self.assertIn("ПРИОРИТЕТНОЕ НАПРАВЛЕНИЕ: структурная проверка", text)
+            self.assertIn("СЛАБЫЙ ИНДЕКСНЫЙ КАНДИДАТ — только справочно", text)
+            self.assertNotIn("\nИНДЕКСНЫЙ КАНДИДАТ:\n", text)
+        finally:
+            window.close()
 
     def test_persisted_structural_recommendation_enables_feedback(self):
         window = MainWindow()
