@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .analysis_service import QueryAnalysis, analyze_query_adaptive
+from .analysis_service import QueryAnalysis, analyze_query, analyze_query_adaptive
 from .app_paths import resource_root, writable_root
 from .calibration import (
     MINIMUM_ACTIVE_SAMPLES,
@@ -218,20 +218,12 @@ def _sql_editor_identity(sql_text: str) -> str:
 
 
 def _format_prediction(prediction) -> str:
-    lines = [
-        f"{prediction.predicted_time_ms:.2f} мс",
-        (
-            "адаптивная оценка ML + профиль БД"
-            if prediction.calibration_sample_count
-            else "среднее время по ML-модели"
-        ),
-    ]
-    if prediction.uncertainty_lower_ms is not None:
-        lines.append(
-            f"ориентир {prediction.uncertainty_lower_ms:.2f}–"
-            f"{prediction.uncertainty_upper_ms:.2f} мс"
-        )
-    return "\n".join(lines)
+    source = (
+        "ML + профиль БД"
+        if prediction.calibration_sample_count
+        else "ML-модель"
+    )
+    return f"{prediction.predicted_time_ms:.2f} мс\nпрогноз: {source}"
 
 
 def _format_index_impact(step: SequentialRecommendationStep) -> str:
@@ -352,6 +344,7 @@ class MainWindow(QMainWindow):
         self.verified_rewrite_baseline_ms: float | None = None
         self.verified_rewrite_candidate_ms: float | None = None
         self.rewrite_measurement_operation: str | None = None
+        self._query_operation_active = False
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
@@ -383,9 +376,26 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def _set_query_actions_enabled(self, enabled: bool) -> None:
+        self._query_operation_active = not enabled
         self.analyze_button.setEnabled(enabled)
         self.deep_analyze_button.setEnabled(enabled)
         self.rewrite_analyze_button.setEnabled(enabled)
+        if not enabled:
+            self.apply_indexes_button.setEnabled(False)
+            self.rollback_indexes_button.setEnabled(False)
+            self.apply_rewrite_button.setEnabled(False)
+            self.rollback_rewrite_button.setEnabled(False)
+            return
+        self.apply_indexes_button.setEnabled(
+            self.managed_index_deployment is None
+            and self.last_sequential_plan is not None
+            and bool(self.last_sequential_plan.steps)
+        )
+        self.rollback_indexes_button.setEnabled(
+            self.managed_index_deployment is not None
+        )
+        self._sync_rewrite_apply_button()
+        self.rollback_rewrite_button.setEnabled(self.applied_rewrite_sql is not None)
 
     def _query_action_failed(self, message: str) -> None:
         self._set_query_actions_enabled(True)
@@ -419,11 +429,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sql_editor)
 
         controls = QHBoxLayout()
-        self.analyze_button = QPushButton("Анализировать и измерить")
+        self.analyze_button = QPushButton("Быстрый ML-прогноз")
         self.analyze_button.setObjectName("primaryButton")
         self.analyze_button.setToolTip(
-            "Автоматически выполняет один прогрев и пять read-only замеров, "
-            "обновляет профиль этой БД и объединяет результат с ML-прогнозом."
+            "Строит оценочный EXPLAIN-план, собирает признаки SQL и БД и "
+            "выдаёт ML-прогноз без выполнения запроса."
         )
         self.analyze_button.clicked.connect(self._start_analysis)
         controls.addWidget(self.analyze_button)
@@ -513,12 +523,11 @@ class MainWindow(QMainWindow):
 
         metrics = QGridLayout()
         self.predicted_value = self._metric_card(
-            metrics, 0, "Адаптивное прогнозируемое время", "—"
+            metrics, 0, "ML-прогноз (без выполнения SQL)", "—"
         )
         self.predicted_value.setToolTip(
-            "При анализе запрос реально измеряется в read-only режиме: один "
-            "прогрев и пять запусков. Оценка объединяет XGBoost и локальный "
-            "профиль подключённой БД."
+            "Оценка строится по EXPLAIN без ANALYZE, признакам SQL, "
+            "плана и подключённой БД. Сам SELECT не выполняется."
         )
         self.cost_value = self._metric_card(metrics, 1, "Стоимость плана", "—")
         self.rows_value = self._metric_card(metrics, 2, "Строки плана", "—")
@@ -1162,6 +1171,8 @@ class MainWindow(QMainWindow):
         self._task_failed(message)
 
     def _start_analysis(self) -> None:
+        if self._query_operation_active:
+            return
         sql_text = self.sql_editor.toPlainText().strip()
         if not sql_text:
             QMessageBox.warning(self, "Нет SQL", "Введите SQL-запрос.")
@@ -1183,8 +1194,44 @@ class MainWindow(QMainWindow):
         self.apply_indexes_button.setEnabled(False)
         self._set_query_actions_enabled(False)
         self._reset_structural_feedback()
+        self.statusBar().showMessage("Строю план и рассчитываю ML-прогноз…")
+        worker = Worker(
+            analyze_query,
+            sql_text,
+            xgb_path,
+            dqn_path,
+            self._database_settings(),
+            recommendation_threshold_ms=self.threshold_spin.value(),
+            persist=self.persist_check.isChecked(),
+            calibration_profile_path=self._calibration_path(),
+            strategy_model_path=strategy_path,
+        )
+        worker.signals.succeeded.connect(self._show_analysis)
+        worker.signals.failed.connect(self._query_action_failed)
+        self._start_worker(worker)
+
+    def _start_rewrite_control_measurement(self) -> None:
+        """Measure only after an explicit apply/rollback action."""
+        if self._query_operation_active:
+            return
+        sql_text = self.sql_editor.toPlainText().strip()
+        xgb_path = Path(self.xgb_model_edit.text())
+        dqn_path = Path(self.dqn_model_edit.text())
+        strategy_path = Path(self.strategy_model_edit.text())
+        if not sql_text or not all(
+            path.is_file() for path in (xgb_path, dqn_path, strategy_path)
+        ):
+            self.rewrite_measurement_operation = None
+            QMessageBox.warning(
+                self,
+                "Контрольный замер не запущен",
+                "Проверьте SQL и пути к моделям в настройках.",
+            )
+            return
+        self._set_query_actions_enabled(False)
+        self._reset_structural_feedback()
         self.statusBar().showMessage(
-            "Автокалибровка: прогрев и пять read-only измерений…"
+            "Контрольный замер после изменения SQL…"
         )
         worker = Worker(
             analyze_query_adaptive,
@@ -1212,17 +1259,23 @@ class MainWindow(QMainWindow):
         observation = analysis.calibration_observation
         if observation is not None:
             prediction_text += (
-                f"\nавтозамер, медиана {observation.actual_time_ms:.2f} мс"
+                f"\nконтрольный замер: {observation.actual_time_ms:.2f} мс"
                 f"\n{observation.measurement_count} замеров: "
                 f"{observation.actual_min_time_ms:.2f}–"
                 f"{observation.actual_max_time_ms:.2f} мс"
             )
         self.predicted_value.setText(prediction_text)
         if prediction.error_source:
+            uncertainty = ""
+            if prediction.uncertainty_lower_ms is not None:
+                uncertainty = (
+                    f" Оценочный диапазон: "
+                    f"{prediction.uncertainty_lower_ms:.2f}–"
+                    f"{prediction.uncertainty_upper_ms:.2f} мс."
+                )
             self.predicted_value.setToolTip(
-                "Адаптивная оценка основана на XGBoost и автоматическом локальном "
-                f"замере ({prediction.error_source}). Время остаётся статистической "
-                "оценкой: на него влияют кэш и текущая нагрузка PostgreSQL."
+                "Прогноз построен без выполнения SQL. "
+                f"Источник ошибки: {prediction.error_source}.{uncertainty}"
             )
         self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
         self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
@@ -1238,7 +1291,7 @@ class MainWindow(QMainWindow):
         recommendation = analysis.recommendation
         if recommendation is None:
             lines.append(
-                "Не оценивался: адаптивное время ниже заданного порога."
+                "Не оценивался: ML-прогноз ниже заданного порога."
             )
         elif recommendation.action.kind is IndexActionKind.NOOP:
             lines.extend(
@@ -1338,7 +1391,7 @@ class MainWindow(QMainWindow):
         status_prefix = (
             "Контрольный замер SQL завершён"
             if rewrite_operation is not None
-            else "Анализ и автокалибровка завершены"
+            else "Быстрый ML-прогноз завершён"
         )
         self.statusBar().showMessage(
             f"{status_prefix} · запись #{analysis.query_run_id or 'не сохранена'}"
@@ -1664,7 +1717,7 @@ class MainWindow(QMainWindow):
         prediction_text = (
             "—"
             if self.last_prediction_ms is None
-            else f"адаптивный прогноз {self.last_prediction_ms:.2f} мс"
+            else f"ML-прогноз {self.last_prediction_ms:.2f} мс"
         )
         self.predicted_value.setText(
             f"{prediction_text}\n"
@@ -1814,8 +1867,8 @@ class MainWindow(QMainWindow):
         self._start_worker(worker)
 
     def _indexes_applied(self, deployment: ManagedIndexDeployment) -> None:
-        self._set_query_actions_enabled(True)
         self.managed_index_deployment = deployment
+        self._set_query_actions_enabled(True)
         self.rollback_indexes_button.setEnabled(True)
         names = ", ".join(item.index_name for item in deployment.indexes)
         self.index_management_status.setText(
@@ -2042,6 +2095,8 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_verified_rewrite(self) -> None:
+        if self._query_operation_active:
+            return
         original_sql = self.verified_rewrite_original_sql
         rewritten_sql = self.verified_rewrite_sql
         if original_sql is None or rewritten_sql is None:
@@ -2066,12 +2121,13 @@ class MainWindow(QMainWindow):
             "Проверенный вариант установлен в редакторе; выполняется повторный замер. "
             "Исходный SQL сохранён для возврата."
         )
-        self._start_analysis()
+        self._start_rewrite_control_measurement()
 
     def _sync_rewrite_apply_button(self) -> None:
         original_sql = self.verified_rewrite_original_sql
         self.apply_rewrite_button.setEnabled(
-            original_sql is not None
+            not self._query_operation_active
+            and original_sql is not None
             and self.verified_rewrite_sql is not None
             and self.applied_rewrite_sql is None
             and _sql_editor_identity(self.sql_editor.toPlainText())
@@ -2079,6 +2135,8 @@ class MainWindow(QMainWindow):
         )
 
     def _rollback_applied_rewrite(self) -> None:
+        if self._query_operation_active:
+            return
         original_sql = self.applied_rewrite_original_sql
         applied_sql = self.applied_rewrite_sql
         if original_sql is None or applied_sql is None:
@@ -2103,7 +2161,7 @@ class MainWindow(QMainWindow):
         self.rewrite_management_status.setText(
             "Исходный SQL возвращён; выполняется контрольный замер."
         )
-        self._start_analysis()
+        self._start_rewrite_control_measurement()
 
     def _refresh_history(self) -> None:
         self.statusBar().showMessage("Загрузка истории…")

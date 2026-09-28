@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -21,6 +22,7 @@ from pqo.desktop import (
     _format_structural_recommendations,
     _sql_editor_identity,
 )
+from pqo.analysis_service import analyze_query
 from pqo.index_actions import IndexAction
 from pqo.prediction import QueryTimePrediction
 from pqo.sequential_recommendation import SequentialRecommendationStep
@@ -56,7 +58,7 @@ class DesktopTests(unittest.TestCase):
             )
             self.assertTrue(window.analyze_button.isEnabled())
             self.assertEqual(
-                window.analyze_button.text(), "Анализировать и измерить"
+                window.analyze_button.text(), "Быстрый ML-прогноз"
             )
             self.assertIn("SELECT", window.sql_editor.toPlainText())
             self.assertIsNotNone(window.persist_check)
@@ -93,7 +95,7 @@ class DesktopTests(unittest.TestCase):
             rewritten = "SELECT * FROM (SELECT id FROM aviation.flights) q"
             window.sql_editor.setPlainText(original)
             window._set_verified_rewrite(normalized_original, rewritten, "Проверено.")
-            window._start_analysis = lambda: None
+            window._start_rewrite_control_measurement = lambda: None
 
             self.assertTrue(window.apply_rewrite_button.isEnabled())
             window._apply_verified_rewrite()
@@ -104,6 +106,45 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(window.sql_editor.toPlainText(), original)
             self.assertFalse(window.rollback_rewrite_button.isEnabled())
             self.assertTrue(window.apply_rewrite_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_query_operation_disables_analysis_and_rewrite_controls(self):
+        window = MainWindow()
+        try:
+            original = "SELECT * FROM aviation.flights;"
+            rewritten = "SELECT flight_id FROM aviation.flights"
+            window.sql_editor.setPlainText(original)
+            window._set_verified_rewrite(original, rewritten, "Проверено.")
+            window.applied_rewrite_original_sql = original
+            window.applied_rewrite_sql = rewritten
+            window.rollback_rewrite_button.setEnabled(True)
+
+            window._set_query_actions_enabled(False)
+
+            self.assertFalse(window.analyze_button.isEnabled())
+            self.assertFalse(window.deep_analyze_button.isEnabled())
+            self.assertFalse(window.rewrite_analyze_button.isEnabled())
+            self.assertFalse(window.apply_rewrite_button.isEnabled())
+            self.assertFalse(window.rollback_rewrite_button.isEnabled())
+
+            window._set_query_actions_enabled(True)
+            self.assertTrue(window.analyze_button.isEnabled())
+            self.assertTrue(window.rollback_rewrite_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_primary_analysis_uses_prediction_without_execution(self):
+        window = MainWindow()
+        try:
+            window._start_worker = lambda _worker: None
+            with patch("pqo.desktop.Worker") as worker_class:
+                window._start_analysis()
+
+            self.assertIs(worker_class.call_args.args[0], analyze_query)
+            self.assertNotIn("repetitions", worker_class.call_args.kwargs)
+            self.assertTrue(window._query_operation_active)
+            self.assertFalse(window.analyze_button.isEnabled())
         finally:
             window.close()
 
@@ -192,8 +233,8 @@ class DesktopTests(unittest.TestCase):
 
         text = _format_prediction(prediction)
 
-        self.assertIn("среднее время по ML-модели", text)
-        self.assertIn("0.00–25.58 мс", text)
+        self.assertIn("прогноз: ML-модель", text)
+        self.assertNotIn("ориентир", text)
 
     def test_prediction_labels_automatic_database_profile(self):
         prediction = QueryTimePrediction(
@@ -210,7 +251,7 @@ class DesktopTests(unittest.TestCase):
 
         text = _format_prediction(prediction)
 
-        self.assertIn("адаптивная оценка ML + профиль БД", text)
+        self.assertIn("прогноз: ML + профиль БД", text)
         self.assertNotIn("до калибровки", text)
 
     def test_index_impact_discloses_write_and_storage_tradeoffs(self):
