@@ -206,6 +206,17 @@ def _format_sql_rewrite_diff(original_sql: str, rewritten_sql: str) -> str:
     return "\n".join(changes) if changes else "Изменений текста не обнаружено."
 
 
+def _sql_editor_identity(sql_text: str) -> str:
+    """Normalize harmless formatting and a trailing semicolon for UI state checks."""
+    from sqlglot import parse_one
+
+    normalized = sql_text.strip().removesuffix(";").strip()
+    try:
+        return parse_one(normalized, read="postgres").sql(dialect="postgres")
+    except Exception:
+        return " ".join(normalized.split())
+
+
 def _format_prediction(prediction) -> str:
     lines = [
         f"{prediction.predicted_time_ms:.2f} мс",
@@ -404,6 +415,7 @@ class MainWindow(QMainWindow):
         )
         self.sql_editor.setMinimumHeight(210)
         self.sql_editor.setFont(QFont("Cascadia Mono", 10))
+        self.sql_editor.textChanged.connect(self._sync_rewrite_apply_button)
         layout.addWidget(self.sql_editor)
 
         controls = QHBoxLayout()
@@ -2013,18 +2025,16 @@ class MainWindow(QMainWindow):
         baseline_time_ms: float | None = None,
         candidate_time_ms: float | None = None,
     ) -> None:
-        if not original_sql or original_sql.strip() == rewritten_sql.strip():
+        if not original_sql or _sql_editor_identity(
+            original_sql
+        ) == _sql_editor_identity(rewritten_sql):
             return
         self.verified_rewrite_original_sql = original_sql.strip()
         self.verified_rewrite_sql = rewritten_sql.strip()
         self.verified_rewrite_title = title
         self.verified_rewrite_baseline_ms = baseline_time_ms
         self.verified_rewrite_candidate_ms = candidate_time_ms
-        self.apply_rewrite_button.setEnabled(
-            self.applied_rewrite_sql is None
-            and self.sql_editor.toPlainText().strip()
-            == self.verified_rewrite_original_sql
-        )
+        self._sync_rewrite_apply_button()
         self.rewrite_management_status.setText(
             status
             + " Текст отличается от исходного; точное изменение показано выше. "
@@ -2036,7 +2046,8 @@ class MainWindow(QMainWindow):
         rewritten_sql = self.verified_rewrite_sql
         if original_sql is None or rewritten_sql is None:
             return
-        if self.sql_editor.toPlainText().strip() != original_sql:
+        current_sql = self.sql_editor.toPlainText()
+        if _sql_editor_identity(current_sql) != _sql_editor_identity(original_sql):
             QMessageBox.warning(
                 self,
                 "SQL изменён",
@@ -2045,7 +2056,7 @@ class MainWindow(QMainWindow):
             )
             self.apply_rewrite_button.setEnabled(False)
             return
-        self.applied_rewrite_original_sql = original_sql
+        self.applied_rewrite_original_sql = current_sql
         self.applied_rewrite_sql = rewritten_sql
         self.sql_editor.setPlainText(rewritten_sql)
         self.apply_rewrite_button.setEnabled(False)
@@ -2057,12 +2068,24 @@ class MainWindow(QMainWindow):
         )
         self._start_analysis()
 
+    def _sync_rewrite_apply_button(self) -> None:
+        original_sql = self.verified_rewrite_original_sql
+        self.apply_rewrite_button.setEnabled(
+            original_sql is not None
+            and self.verified_rewrite_sql is not None
+            and self.applied_rewrite_sql is None
+            and _sql_editor_identity(self.sql_editor.toPlainText())
+            == _sql_editor_identity(original_sql)
+        )
+
     def _rollback_applied_rewrite(self) -> None:
         original_sql = self.applied_rewrite_original_sql
         applied_sql = self.applied_rewrite_sql
         if original_sql is None or applied_sql is None:
             return
-        if self.sql_editor.toPlainText().strip() != applied_sql:
+        if _sql_editor_identity(
+            self.sql_editor.toPlainText()
+        ) != _sql_editor_identity(applied_sql):
             answer = QMessageBox.question(
                 self,
                 "Вернуть исходный SQL?",
@@ -2075,7 +2098,7 @@ class MainWindow(QMainWindow):
         self.applied_rewrite_original_sql = None
         self.applied_rewrite_sql = None
         self.rollback_rewrite_button.setEnabled(False)
-        self.apply_rewrite_button.setEnabled(self.verified_rewrite_sql is not None)
+        self._sync_rewrite_apply_button()
         self.rewrite_measurement_operation = "rollback"
         self.rewrite_management_status.setText(
             "Исходный SQL возвращён; выполняется контрольный замер."

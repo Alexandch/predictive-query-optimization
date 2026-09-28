@@ -19,6 +19,7 @@ from pqo.desktop import (
     _format_prediction,
     _format_sql_rewrite_diff,
     _format_structural_recommendations,
+    _sql_editor_identity,
 )
 from pqo.index_actions import IndexAction
 from pqo.prediction import QueryTimePrediction
@@ -87,10 +88,11 @@ class DesktopTests(unittest.TestCase):
     def test_verified_rewrite_can_be_applied_and_rolled_back(self):
         window = MainWindow()
         try:
-            original = "SELECT * FROM (SELECT id FROM aviation.flights ORDER BY id) q"
+            original = "SELECT * FROM (SELECT id FROM aviation.flights ORDER BY id) q;"
+            normalized_original = original.removesuffix(";")
             rewritten = "SELECT * FROM (SELECT id FROM aviation.flights) q"
             window.sql_editor.setPlainText(original)
-            window._set_verified_rewrite(original, rewritten, "Проверено.")
+            window._set_verified_rewrite(normalized_original, rewritten, "Проверено.")
             window._start_analysis = lambda: None
 
             self.assertTrue(window.apply_rewrite_button.isEnabled())
@@ -104,6 +106,14 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(window.apply_rewrite_button.isEnabled())
         finally:
             window.close()
+
+    def test_sql_editor_identity_ignores_formatting_and_final_semicolon(self):
+        compact = "SELECT * FROM aviation.flights;"
+        formatted = "SELECT\n  *\nFROM aviation.flights"
+
+        self.assertEqual(
+            _sql_editor_identity(compact), _sql_editor_identity(formatted)
+        )
 
     def test_rewrite_diff_makes_removed_order_by_explicit(self):
         diff = _format_sql_rewrite_diff(
