@@ -61,7 +61,7 @@ class SequentialIndexEnvironment:
         *,
         allowed_schemas: frozenset[str] = frozenset({"aviation"}),
         repetitions: int = 2,
-        statement_timeout_ms: int = 10_000,
+        statement_timeout_ms: int | None = None,
         max_steps: int = 3,
         storage_budget_bytes: int = 64 * 1024 * 1024,
         storage_penalty_weight: float = 0.05,
@@ -86,7 +86,11 @@ class SequentialIndexEnvironment:
         self.settings = settings or DatabaseSettings.from_env()
         self.allowed_schemas = allowed_schemas
         self.repetitions = repetitions
-        self.statement_timeout_ms = statement_timeout_ms
+        self.statement_timeout_ms = (
+            self.settings.statement_timeout_ms
+            if statement_timeout_ms is None
+            else statement_timeout_ms
+        )
         self.max_steps = max_steps
         self.storage_budget_bytes = storage_budget_bytes
         self.storage_penalty_weight = storage_penalty_weight

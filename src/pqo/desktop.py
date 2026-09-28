@@ -48,6 +48,7 @@ from .calibration import (
     calibrate_workload,
     load_profile,
     parse_calibration_workload,
+    record_measured_observation,
     suggested_profile_path,
 )
 from .charts import AccuracyBarChart, ScatterChart
@@ -335,6 +336,7 @@ class MainWindow(QMainWindow):
         self._active_workers: set[Worker] = set()
         self.history_records = []
         self.last_prediction_ms: float | None = None
+        self.last_uncalibrated_prediction_ms: float | None = None
         self.last_query_run_id: int | None = None
         self.last_analyzed_sql: str | None = None
         self.last_structural_recommendations = ()
@@ -1260,6 +1262,7 @@ class MainWindow(QMainWindow):
         rewrite_operation = self.rewrite_measurement_operation
         prediction = analysis.prediction
         self.last_prediction_ms = prediction.predicted_time_ms
+        self.last_uncalibrated_prediction_ms = prediction.uncalibrated_time_ms
         self.last_query_run_id = analysis.query_run_id
         self.last_analyzed_sql = prediction.sql_text
         prediction_text = _format_prediction(prediction)
@@ -1747,9 +1750,47 @@ class MainWindow(QMainWindow):
         self._set_query_actions_enabled(True)
         self.structural_management_group.setVisible(False)
         self.last_sequential_plan = plan
-        self.last_analyzed_sql = self.sql_editor.toPlainText().strip()
+        measured_sql = self.sql_editor.toPlainText().strip()
+        prediction_matches_sql = (
+            self.last_analyzed_sql is not None
+            and _sql_editor_identity(self.last_analyzed_sql)
+            == _sql_editor_identity(measured_sql)
+        )
+        self.last_analyzed_sql = measured_sql
         if plan.query_run_id is not None:
             self.last_query_run_id = plan.query_run_id
+        calibration_note = ""
+        if (
+            prediction_matches_sql
+            and self.last_uncalibrated_prediction_ms is not None
+            and plan.baseline_time_ms > 0
+            and plan.baseline_samples_ms
+        ):
+            try:
+                record_measured_observation(
+                    self.last_analyzed_sql,
+                    Path(self.xgb_model_edit.text()),
+                    self._calibration_path(),
+                    self.last_uncalibrated_prediction_ms,
+                    plan.baseline_time_ms,
+                    self._database_settings(),
+                    actual_min_time_ms=plan.baseline_min_time_ms,
+                    actual_max_time_ms=plan.baseline_max_time_ms,
+                    measurement_count=len(plan.baseline_samples_ms),
+                    warmup_count=1,
+                )
+                self._refresh_calibration_status()
+                calibration_note = (
+                    f"\nФактические замеры ({len(plan.baseline_samples_ms)}) "
+                    "автоматически добавлены в "
+                    "профиль точного SQL. Следующий быстрый прогноз будет "
+                    "скорректирован без повторного выполнения запроса."
+                )
+            except Exception as exc:
+                self.statusBar().showMessage(
+                    "Глубокий анализ завершён, но профиль прогноза не обновлён: "
+                    f"{exc}"
+                )
         prediction_text = (
             "—"
             if self.last_prediction_ms is None
@@ -1780,6 +1821,10 @@ class MainWindow(QMainWindow):
                     f"{plan.minimum_improvement_ratio:.1%}"
                 ),
                 "budget_exceeded": "кандидат превысил лимит 64 МиБ",
+                "statement_timeout": (
+                    "пробная проверка превысила допустимое время одного этапа "
+                    f"({self._database_settings().statement_timeout_ms / 1000:.0f} с)"
+                ),
             }
             reason = reasons.get(plan.terminal_reason, plan.terminal_reason)
             index_result = (
@@ -1790,6 +1835,7 @@ class MainWindow(QMainWindow):
                 f"{plan.baseline_min_time_ms:.2f}–"
                 f"{plan.baseline_max_time_ms:.2f} мс.\n"
                 "Этот экран содержит только результат проверки индексов."
+                f"{calibration_note}"
             )
             self.recommendation_text.setPlainText(index_result)
             if self.managed_index_deployment is None:
@@ -1830,6 +1876,8 @@ class MainWindow(QMainWindow):
                     "сама базу не изменяет.",
                 )
             )
+            if calibration_note:
+                lines.append(calibration_note.lstrip())
             self.recommendation_text.setPlainText("\n".join(lines))
             if self.managed_index_deployment is None:
                 self.apply_indexes_button.setEnabled(True)

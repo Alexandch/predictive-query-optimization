@@ -513,6 +513,41 @@ def calibrate_query(
     return CalibrationResult(profile=profile, observation=observation)
 
 
+def record_measured_observation(
+    sql_text: str,
+    model_path: str | Path,
+    profile_path: str | Path,
+    predicted_time_ms: float,
+    actual_time_ms: float,
+    settings: DatabaseSettings | None = None,
+    *,
+    actual_min_time_ms: float | None = None,
+    actual_max_time_ms: float | None = None,
+    measurement_count: int = 1,
+    warmup_count: int = 0,
+) -> CalibrationResult:
+    """Reuse an existing robust measurement without executing SQL again."""
+    settings = settings or DatabaseSettings.from_env()
+    profile_file = Path(profile_path)
+    if profile_file.is_file():
+        profile = load_profile(profile_file)
+        validate_profile(profile, settings, model_path)
+    else:
+        profile = new_profile(settings, model_path)
+    profile, observation = add_observation(
+        profile,
+        sql_text,
+        predicted_time_ms,
+        actual_time_ms,
+        actual_min_time_ms=actual_min_time_ms,
+        actual_max_time_ms=actual_max_time_ms,
+        measurement_count=measurement_count,
+        warmup_count=warmup_count,
+    )
+    save_profile(profile, profile_file)
+    return CalibrationResult(profile=profile, observation=observation)
+
+
 def parse_calibration_workload(
     sql_text: str,
     *,

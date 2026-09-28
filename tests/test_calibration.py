@@ -11,6 +11,7 @@ from pqo.calibration import (
     new_profile,
     parse_calibration_workload,
     query_specific_error_ms,
+    record_measured_observation,
     save_profile,
     suggested_profile_path,
     validate_profile,
@@ -219,6 +220,37 @@ class CalibrationTests(unittest.TestCase):
             self.assertEqual(legacy.observations[0].shape_hash, "")
             self.assertIsNone(legacy.observations[0].actual_min_time_ms)
             self.assertEqual(legacy.observations[0].measurement_count, 1)
+
+    def test_records_existing_deep_measurement_without_running_sql(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.joblib"
+            profile_path = root / "profile.json"
+            model.write_bytes(b"model-a")
+
+            result = record_measured_observation(
+                "SELECT * FROM public.large_table",
+                model,
+                profile_path,
+                980.0,
+                2100.0,
+                self.settings,
+                actual_min_time_ms=2050.0,
+                actual_max_time_ms=2200.0,
+                measurement_count=5,
+                warmup_count=1,
+            )
+
+            self.assertTrue(profile_path.is_file())
+            self.assertEqual(result.profile.sample_count, 1)
+            self.assertAlmostEqual(
+                apply_calibration(
+                    980.0,
+                    result.profile,
+                    "SELECT * FROM public.large_table",
+                ),
+                2100.0,
+            )
 
 
 if __name__ == "__main__":

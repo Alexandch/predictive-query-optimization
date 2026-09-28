@@ -186,7 +186,13 @@ def recommend_sequential_indexes(
                 # once even when its Q value is below the learned threshold.
                 # The measured gain criteria below remain authoritative.
                 previous_time = episode.state.current_time_ms
-                transition = episode.step(actions[best_index])
+                try:
+                    transition = episode.step(actions[best_index])
+                except Exception as exc:
+                    if not _is_statement_timeout(exc):
+                        raise
+                    terminal_reason = "statement_timeout"
+                    break
                 if not transition.accepted:
                     terminal_reason = transition.terminal_reason or "rejected"
                     break
@@ -273,3 +279,8 @@ def recommend_sequential_indexes(
             sequential_analysis_id=sequential_analysis_id,
         )
     return plan
+
+
+def _is_statement_timeout(exc: Exception) -> bool:
+    """Recognize PostgreSQL query cancellation without hiding other errors."""
+    return getattr(exc, "sqlstate", None) == "57014"

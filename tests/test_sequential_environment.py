@@ -1,5 +1,6 @@
 import unittest
 
+from pqo.config import DatabaseSettings
 from pqo.sequential_environment import (
     SequentialIndexEnvironment,
     _plan_index_names,
@@ -32,6 +33,13 @@ class SequentialEnvironmentTests(unittest.TestCase):
         ]
 
         self.assertEqual(_plan_index_names(plan), {"pqo_seq_a", "pqo_seq_b"})
+
+    def test_uses_configured_statement_timeout_by_default(self):
+        settings = DatabaseSettings(statement_timeout_ms=45_000)
+
+        environment = SequentialIndexEnvironment(settings)
+
+        self.assertEqual(environment.statement_timeout_ms, 45_000)
 
 
 if __name__ == "__main__":
