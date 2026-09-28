@@ -17,6 +17,7 @@ from pqo.desktop import (
     _format_index_action,
     _format_index_impact,
     _format_prediction,
+    _format_sql_rewrite_diff,
     _format_structural_recommendations,
 )
 from pqo.index_actions import IndexAction
@@ -31,6 +32,11 @@ from pqo.structural_advisor import (
     RecommendationCategory,
     RecommendationPriority,
     StructuralRecommendation,
+)
+from pqo.sql_rewrite import (
+    SQLRewriteCandidate,
+    SQLRewriteEvaluation,
+    SQLRewritePlan,
 )
 
 
@@ -95,6 +101,48 @@ class DesktopTests(unittest.TestCase):
             window._rollback_applied_rewrite()
             self.assertEqual(window.sql_editor.toPlainText(), original)
             self.assertFalse(window.rollback_rewrite_button.isEnabled())
+            self.assertTrue(window.apply_rewrite_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_rewrite_diff_makes_removed_order_by_explicit(self):
+        diff = _format_sql_rewrite_diff(
+            "SELECT * FROM (SELECT id FROM t ORDER BY id) q",
+            "SELECT * FROM (SELECT id FROM t) q",
+        )
+
+        self.assertIn("--- исходный SQL", diff)
+        self.assertIn("+++ переписанный SQL", diff)
+        self.assertIn("-  ORDER BY", diff)
+
+    def test_rewrite_result_does_not_append_structural_hypotheses(self):
+        window = MainWindow()
+        try:
+            original = "SELECT * FROM (SELECT id FROM aviation.flights ORDER BY id) q"
+            rewritten = "SELECT * FROM (SELECT id FROM aviation.flights) q"
+            window.sql_editor.setPlainText(original)
+            candidate = SQLRewriteCandidate(
+                "subquery-order-without-limit",
+                "Удалить ORDER BY",
+                rewritten,
+            )
+            evaluation = SQLRewriteEvaluation(
+                candidate,
+                True,
+                100.0,
+                50.0,
+                0.5,
+                True,
+                None,
+            )
+            plan = SQLRewritePlan(original, (evaluation,), evaluation, 0, 0, 0, "recommended")
+
+            window._show_rewrite_analysis(plan)
+
+            text = window.recommendation_text.toPlainText()
+            self.assertIn("ТОЧНОЕ ИЗМЕНЕНИЕ", text)
+            self.assertNotIn("СТРУКТУРНЫЕ РЕКОМЕНДАЦИИ", text)
+            self.assertTrue(window.structural_management_group.isHidden())
             self.assertTrue(window.apply_rewrite_button.isEnabled())
         finally:
             window.close()

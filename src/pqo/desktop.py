@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from difflib import unified_diff
 import faulthandler
 import json
 from pathlib import Path
@@ -178,6 +179,33 @@ def _format_structural_recommendations(recommendations) -> str:
     return "\n".join(lines)
 
 
+def _format_sql_rewrite_diff(original_sql: str, rewritten_sql: str) -> str:
+    """Show the actual SQL change after normalizing formatting on both sides."""
+    from sqlglot import parse_one
+
+    try:
+        original = parse_one(original_sql, read="postgres").sql(
+            dialect="postgres", pretty=True
+        )
+        rewritten = parse_one(rewritten_sql, read="postgres").sql(
+            dialect="postgres", pretty=True
+        )
+    except Exception:
+        original = original_sql.strip()
+        rewritten = rewritten_sql.strip()
+    changes = list(
+        unified_diff(
+            original.splitlines(),
+            rewritten.splitlines(),
+            fromfile="исходный SQL",
+            tofile="переписанный SQL",
+            lineterm="",
+            n=2,
+        )
+    )
+    return "\n".join(changes) if changes else "Изменений текста не обнаружено."
+
+
 def _format_prediction(prediction) -> str:
     lines = [
         f"{prediction.predicted_time_ms:.2f} мс",
@@ -309,6 +337,10 @@ class MainWindow(QMainWindow):
         self.verified_rewrite_sql: str | None = None
         self.applied_rewrite_original_sql: str | None = None
         self.applied_rewrite_sql: str | None = None
+        self.verified_rewrite_title: str | None = None
+        self.verified_rewrite_baseline_ms: float | None = None
+        self.verified_rewrite_candidate_ms: float | None = None
+        self.rewrite_measurement_operation: str | None = None
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
         self.setWindowTitle("Predictive Query Optimization")
@@ -346,6 +378,12 @@ class MainWindow(QMainWindow):
 
     def _query_action_failed(self, message: str) -> None:
         self._set_query_actions_enabled(True)
+        if self.rewrite_measurement_operation is not None:
+            self.rewrite_measurement_operation = None
+            self.rewrite_management_status.setText(
+                "Текст SQL изменён, но контрольный замер завершился ошибкой. "
+                "Можно повторить анализ или вернуть исходный SQL."
+            )
         self._task_failed(message)
 
     def _build_analysis_tab(self) -> None:
@@ -539,13 +577,19 @@ class MainWindow(QMainWindow):
         rewrite_management_row.addWidget(self.rewrite_management_status, 2)
         recommendation_layout.addLayout(rewrite_management_row)
 
+        self.structural_management_group = QGroupBox(
+            "Структурные рекомендации — отдельная проверка"
+        )
+        structural_management_layout = QVBoxLayout(
+            self.structural_management_group
+        )
         feedback_explanation = QLabel(
             "Обратная связь по структурным советам (не управление индексами). "
             "Становится доступна только для рекомендаций, сохранённых в истории pqo."
         )
         feedback_explanation.setObjectName("mutedLabel")
         feedback_explanation.setWordWrap(True)
-        recommendation_layout.addWidget(feedback_explanation)
+        structural_management_layout.addWidget(feedback_explanation)
 
         feedback_row = QHBoxLayout()
         self.structural_recommendation_combo = QComboBox()
@@ -573,7 +617,7 @@ class MainWindow(QMainWindow):
             )
         )
         feedback_row.addWidget(self.reject_structural_button)
-        recommendation_layout.addLayout(feedback_row)
+        structural_management_layout.addLayout(feedback_row)
 
         measurement_row = QHBoxLayout()
         measurement_row.addWidget(QLabel("Фактический замер, мс: до"))
@@ -610,7 +654,8 @@ class MainWindow(QMainWindow):
         )
         self.structural_feedback_status.setObjectName("mutedLabel")
         measurement_row.addWidget(self.structural_feedback_status, 2)
-        recommendation_layout.addLayout(measurement_row)
+        structural_management_layout.addLayout(measurement_row)
+        recommendation_layout.addWidget(self.structural_management_group)
         layout.addWidget(recommendation_group)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1146,6 +1191,7 @@ class MainWindow(QMainWindow):
 
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
         self._set_query_actions_enabled(True)
+        rewrite_operation = self.rewrite_measurement_operation
         prediction = analysis.prediction
         self.last_prediction_ms = prediction.predicted_time_ms
         self.last_query_run_id = analysis.query_run_id
@@ -1222,21 +1268,68 @@ class MainWindow(QMainWindow):
                     f"Вероятности: {probability_text}.",
                 )
             )
-        lines.extend(
-            (
-                "",
-                _format_structural_recommendations(
-                    analysis.structural_recommendations
-                ),
+        if rewrite_operation is None:
+            lines.extend(
+                (
+                    "",
+                    _format_structural_recommendations(
+                        analysis.structural_recommendations
+                    ),
+                )
             )
-        )
-        self.recommendation_text.setPlainText("\n".join(lines))
-        self._configure_structural_feedback(analysis.structural_recommendations)
+            self.recommendation_text.setPlainText("\n".join(lines))
+            self._configure_structural_feedback(analysis.structural_recommendations)
+        else:
+            actual_time = (
+                observation.actual_time_ms
+                if observation is not None
+                else prediction.predicted_time_ms
+            )
+            if rewrite_operation == "apply":
+                heading = "ПЕРЕПИСЫВАНИЕ ПРИМЕНЕНО К ТЕКСТУ SQL"
+                state = "В редакторе находится проверенный переписанный вариант."
+                action = "Для возврата нажмите «Вернуть исходный SQL и измерить»."
+                self.rewrite_management_status.setText(
+                    f"Переписанный SQL применён. Контрольная медиана: "
+                    f"{actual_time:.2f} мс. Исходный текст сохранён для возврата."
+                )
+            else:
+                heading = "ИСХОДНЫЙ SQL ВОССТАНОВЛЕН"
+                state = "В редактор возвращён первоначальный текст запроса."
+                action = "Проверенный вариант можно применить повторно."
+                self.rewrite_management_status.setText(
+                    f"Исходный SQL восстановлен. Контрольная медиана: "
+                    f"{actual_time:.2f} мс."
+                )
+            verified_pair = ""
+            if (
+                self.verified_rewrite_baseline_ms is not None
+                and self.verified_rewrite_candidate_ms is not None
+            ):
+                verified_pair = (
+                    "\nРанее подтверждённое сравнение: "
+                    f"{self.verified_rewrite_baseline_ms:.2f} → "
+                    f"{self.verified_rewrite_candidate_ms:.2f} мс."
+                )
+            self.recommendation_text.setPlainText(
+                f"{heading}\n{state}\n"
+                f"Контрольный фактический замер: {actual_time:.2f} мс."
+                f"{verified_pair}\n{action}\n\n"
+                "Структурные гипотезы здесь не выводятся: это отдельный результат "
+                "управления переписыванием."
+            )
+            self.rewrite_measurement_operation = None
+            self._reset_structural_feedback()
+            self.structural_management_group.setVisible(False)
         self.analyze_button.setEnabled(True)
         self._refresh_calibration_status()
+        status_prefix = (
+            "Контрольный замер SQL завершён"
+            if rewrite_operation is not None
+            else "Анализ и автокалибровка завершены"
+        )
         self.statusBar().showMessage(
-            "Анализ и автокалибровка завершены · запись #"
-            f"{analysis.query_run_id or 'не сохранена'}"
+            f"{status_prefix} · запись #{analysis.query_run_id or 'не сохранена'}"
         )
 
     def _reset_structural_feedback(self) -> None:
@@ -1257,6 +1350,7 @@ class MainWindow(QMainWindow):
 
     def _configure_structural_feedback(self, recommendations) -> None:
         self._reset_structural_feedback()
+        self.structural_management_group.setVisible(True)
         self.last_structural_recommendations = tuple(recommendations)
         persisted = [
             item for item in recommendations if item.recommendation_id is not None
@@ -1469,10 +1563,18 @@ class MainWindow(QMainWindow):
         )
         rewritten_sql = result.details.get("rewritten_sql")
         if result.accepted and rewritten_sql:
+            selected_recommendation = self._selected_structural_recommendation()
             self._set_verified_rewrite(
                 self.last_analyzed_sql,
                 rewritten_sql,
                 "Структурное переписывание проверено автоматически.",
+                title=(
+                    selected_recommendation.title
+                    if selected_recommendation is not None
+                    else None
+                ),
+                baseline_time_ms=result.baseline_time_ms,
+                candidate_time_ms=result.candidate_time_ms,
             )
         self.statusBar().showMessage(
             f"Автопроверка #{result.validation_id} завершена; изменения откачены"
@@ -1506,6 +1608,8 @@ class MainWindow(QMainWindow):
             return
         self.last_sequential_plan = None
         self.apply_indexes_button.setEnabled(False)
+        self._reset_structural_feedback()
+        self.structural_management_group.setVisible(False)
         self._set_query_actions_enabled(False)
         self.recommendation_text.setPlainText(
             "Проверяю кандидаты в изолированной транзакции…"
@@ -1540,6 +1644,7 @@ class MainWindow(QMainWindow):
         self, plan: SequentialRecommendationPlan
     ) -> None:
         self._set_query_actions_enabled(True)
+        self.structural_management_group.setVisible(False)
         self.last_sequential_plan = plan
         self.last_analyzed_sql = self.sql_editor.toPlainText().strip()
         if plan.query_run_id is not None:
@@ -1583,13 +1688,9 @@ class MainWindow(QMainWindow):
                 f"{plan.baseline_time_ms:.2f} мс; диапазон "
                 f"{plan.baseline_min_time_ms:.2f}–"
                 f"{plan.baseline_max_time_ms:.2f} мс.\n"
-                "Вывод относится только к индексам; структурные рекомендации "
-                "ниже оцениваются отдельно."
+                "Этот экран содержит только результат проверки индексов."
             )
-            self.recommendation_text.setPlainText(
-                f"{index_result}\n\n"
-                f"{_format_structural_recommendations(self.last_structural_recommendations)}"
-            )
+            self.recommendation_text.setPlainText(index_result)
             if self.managed_index_deployment is None:
                 self.index_management_status.setText(
                     "Глубокий анализ не сформировал план для применения."
@@ -1626,10 +1727,6 @@ class MainWindow(QMainWindow):
                     "",
                     "Индексы были только проверены и откачены; команда выше "
                     "сама базу не изменяет.",
-                    "",
-                    _format_structural_recommendations(
-                        self.last_structural_recommendations
-                    ),
                 )
             )
             self.recommendation_text.setPlainText("\n".join(lines))
@@ -1797,6 +1894,8 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._clear_verified_rewrite()
+        self._reset_structural_feedback()
+        self.structural_management_group.setVisible(False)
         self._set_query_actions_enabled(False)
         self.recommendation_text.setPlainText(
             "Формирую варианты, проверяю эквивалентность и измеряю время…"
@@ -1819,6 +1918,7 @@ class MainWindow(QMainWindow):
 
     def _show_rewrite_analysis(self, plan: SQLRewritePlan) -> None:
         self._set_query_actions_enabled(True)
+        self.structural_management_group.setVisible(False)
         verified_indexes = _format_verified_index_summary(
             self.last_sequential_plan
         )
@@ -1831,6 +1931,9 @@ class MainWindow(QMainWindow):
                 plan.original_sql,
                 result.candidate.sql_text,
                 "Переписывание проверено: эквивалентность и ускорение подтверждены.",
+                title=result.candidate.title,
+                baseline_time_ms=result.baseline_time_ms,
+                candidate_time_ms=result.rewritten_time_ms,
             )
             self.recommendation_text.setPlainText(
                 "ПРОВЕРЕННОЕ ПЕРЕПИСЫВАНИЕ SQL:\n"
@@ -1838,10 +1941,14 @@ class MainWindow(QMainWindow):
                 f"Фактическое время: {result.baseline_time_ms:.2f} → "
                 f"{result.rewritten_time_ms:.2f} мс "
                 f"({result.improvement_ratio:+.1%})\n\n"
+                "ТОЧНОЕ ИЗМЕНЕНИЕ («-» удалено, «+» добавлено):\n"
+                f"{_format_sql_rewrite_diff(plan.original_sql, result.candidate.sql_text)}\n\n"
+                "ПЕРЕПИСАННЫЙ SQL:\n"
                 f"{result.candidate.sql_text}\n\n"
-                "Эквивалентность результатов подтверждена через EXCEPT ALL."
-                f"{preserved_index_text}\n\n"
-                f"{_format_structural_recommendations(self.last_structural_recommendations)}"
+                "Эквивалентность результатов подтверждена через EXCEPT ALL.\n"
+                "Для установки этого текста в редактор используйте отдельную кнопку "
+                "«Применить проверенный SQL и измерить»."
+                f"{preserved_index_text}"
             )
             self.statusBar().showMessage(
                 "Найдено и измерено безопасное переписывание SQL"
@@ -1879,10 +1986,6 @@ class MainWindow(QMainWindow):
             (
                 "",
                 verified_indexes,
-                "" if verified_indexes else "",
-                _format_structural_recommendations(
-                    self.last_structural_recommendations
-                ),
             )
         )
         self.recommendation_text.setPlainText("\n".join(lines))
@@ -1891,6 +1994,9 @@ class MainWindow(QMainWindow):
     def _clear_verified_rewrite(self) -> None:
         self.verified_rewrite_original_sql = None
         self.verified_rewrite_sql = None
+        self.verified_rewrite_title = None
+        self.verified_rewrite_baseline_ms = None
+        self.verified_rewrite_candidate_ms = None
         self.apply_rewrite_button.setEnabled(False)
         if self.applied_rewrite_sql is None:
             self.rewrite_management_status.setText(
@@ -1898,19 +2004,31 @@ class MainWindow(QMainWindow):
             )
 
     def _set_verified_rewrite(
-        self, original_sql: str | None, rewritten_sql: str, status: str
+        self,
+        original_sql: str | None,
+        rewritten_sql: str,
+        status: str,
+        *,
+        title: str | None = None,
+        baseline_time_ms: float | None = None,
+        candidate_time_ms: float | None = None,
     ) -> None:
         if not original_sql or original_sql.strip() == rewritten_sql.strip():
             return
         self.verified_rewrite_original_sql = original_sql.strip()
         self.verified_rewrite_sql = rewritten_sql.strip()
+        self.verified_rewrite_title = title
+        self.verified_rewrite_baseline_ms = baseline_time_ms
+        self.verified_rewrite_candidate_ms = candidate_time_ms
         self.apply_rewrite_button.setEnabled(
             self.applied_rewrite_sql is None
             and self.sql_editor.toPlainText().strip()
             == self.verified_rewrite_original_sql
         )
         self.rewrite_management_status.setText(
-            status + " Его можно применить к тексту запроса и затем вернуть."
+            status
+            + " Текст отличается от исходного; точное изменение показано выше. "
+            "Его можно применить и затем вернуть."
         )
 
     def _apply_verified_rewrite(self) -> None:
@@ -1932,6 +2050,7 @@ class MainWindow(QMainWindow):
         self.sql_editor.setPlainText(rewritten_sql)
         self.apply_rewrite_button.setEnabled(False)
         self.rollback_rewrite_button.setEnabled(True)
+        self.rewrite_measurement_operation = "apply"
         self.rewrite_management_status.setText(
             "Проверенный вариант установлен в редакторе; выполняется повторный замер. "
             "Исходный SQL сохранён для возврата."
@@ -1957,6 +2076,7 @@ class MainWindow(QMainWindow):
         self.applied_rewrite_sql = None
         self.rollback_rewrite_button.setEnabled(False)
         self.apply_rewrite_button.setEnabled(self.verified_rewrite_sql is not None)
+        self.rewrite_measurement_operation = "rollback"
         self.rewrite_management_status.setText(
             "Исходный SQL возвращён; выполняется контрольный замер."
         )
