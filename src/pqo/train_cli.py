@@ -31,6 +31,7 @@ def main() -> int:
         action="store_true",
         help="Give every query template equal total weight during fitting",
     )
+    parser.add_argument("--feature-version", choices=("legacy", "sql-v2"), default="legacy")
     args = parser.parse_args()
 
     metrics = train_xgboost(
@@ -40,6 +41,7 @@ def main() -> int:
         tune=not args.no_tune,
         target_transform=args.target_transform,
         template_balanced=args.template_balanced,
+        feature_version=args.feature_version,
     )
     print(json.dumps(asdict(metrics), ensure_ascii=False, indent=2))
     return 0

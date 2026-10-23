@@ -8,6 +8,14 @@ from sqlglot import exp, parse
 from sqlglot.errors import ParseError
 
 
+EXTENDED_SQL_FEATURES = [
+    "cte_count", "materialized_cte_count", "cte_reference_count",
+    "window_function_count", "window_aggregate_count", "ranking_window_count",
+    "window_partition_key_count", "window_order_key_count",
+    "distinct_aggregate_count", "aggregate_filter_count", "group_key_count",
+]
+
+
 @dataclass(frozen=True, slots=True)
 class SQLFeatures:
     query_length: int
@@ -26,6 +34,17 @@ class SQLFeatures:
     right_join_count: int
     full_join_count: int
     cross_join_count: int
+    cte_count: int = 0
+    materialized_cte_count: int = 0
+    cte_reference_count: int = 0
+    window_function_count: int = 0
+    window_aggregate_count: int = 0
+    ranking_window_count: int = 0
+    window_partition_key_count: int = 0
+    window_order_key_count: int = 0
+    distinct_aggregate_count: int = 0
+    aggregate_filter_count: int = 0
+    group_key_count: int = 0
 
     def as_dict(self) -> dict[str, int | bool]:
         return asdict(self)
@@ -76,6 +95,8 @@ def extract_sql_features(sql_text: str) -> SQLFeatures:
         for table in tree.find_all(exp.Table)
         if table.name and table.name.lower() not in cte_names
     ]
+    windows = list(tree.find_all(exp.Window))
+    aggregates = list(tree.find_all(exp.AggFunc))
 
     return SQLFeatures(
         query_length=len(normalized),
@@ -99,4 +120,20 @@ def extract_sql_features(sql_text: str) -> SQLFeatures:
         right_join_count=join_categories.count("right"),
         full_join_count=join_categories.count("full"),
         cross_join_count=join_categories.count("cross"),
+        cte_count=sum(1 for _ in tree.find_all(exp.CTE)),
+        materialized_cte_count=sum(cte.args.get("materialized") is True for cte in tree.find_all(exp.CTE)),
+        cte_reference_count=sum(table.name.lower() in cte_names for table in tree.find_all(exp.Table)),
+        window_function_count=len(windows),
+        window_aggregate_count=sum(
+            isinstance(window.this, exp.AggFunc) and window.this.key not in {
+                "rank", "denserank", "rownumber", "lag", "lead", "ntile",
+                "firstvalue", "lastvalue", "nthvalue", "percentrank", "cumedist",
+            } for window in windows
+        ),
+        ranking_window_count=sum(isinstance(window.this, (exp.Rank, exp.DenseRank, exp.RowNumber)) for window in windows),
+        window_partition_key_count=sum(len(window.args.get("partition_by") or []) for window in windows),
+        window_order_key_count=sum(len(order.expressions) if (order := window.args.get("order")) is not None else 0 for window in windows),
+        distinct_aggregate_count=sum(any(isinstance(arg, exp.Distinct) for arg in aggregate.iter_expressions()) for aggregate in aggregates),
+        aggregate_filter_count=sum(isinstance(item.this, exp.AggFunc) for item in tree.find_all(exp.Filter)),
+        group_key_count=sum(len(group.expressions) for group in tree.find_all(exp.Group)),
     )

@@ -71,13 +71,27 @@ function Assert-NativeSuccess([string]$Operation) {
 
 function Add-DirectoryArchive([string]$Source, [string]$Destination) {
     if (-not (Test-Path -LiteralPath $Source -PathType Container)) { return $false }
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [IO.Compression.ZipFile]::CreateFromDirectory(
-        $Source,
-        $Destination,
-        [IO.Compression.CompressionLevel]::Optimal,
-        $false
+    # Journal files are atomically replaced; in-flight temporary snapshots must
+    # not be enumerated (they may disappear before ZIP opens them).
+    $archive = [IO.Compression.ZipFile]::Open(
+        $Destination, [IO.Compression.ZipArchiveMode]::Create
     )
+    try {
+        $files = @(Get-ChildItem -LiteralPath $Source -Recurse -File -Force |
+            Where-Object { $_.Name -notmatch '^\.(rewrite|batch)-.*\.tmp$' -and $_.Name -ne '.session.lock' })
+        foreach ($file in $files) {
+            $relative = Get-RelativeFilePath $Source $file.FullName
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $archive, $file.FullName, $relative.Replace('\', '/'),
+                [IO.Compression.CompressionLevel]::Optimal
+            ) | Out-Null
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
     return $true
 }
 

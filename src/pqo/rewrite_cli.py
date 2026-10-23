@@ -19,6 +19,7 @@ def main() -> int:
     parser.add_argument("--threshold-ms", type=float, default=50.0)
     parser.add_argument("--minimum-gain-ms", type=float, default=5.0)
     parser.add_argument("--minimum-gain-ratio", type=float, default=0.05)
+    parser.add_argument("--journal-directory", help="Optional local experiment journal (SQL and plans are stored)")
     args = parser.parse_args()
 
     if args.generate_only:
@@ -30,6 +31,8 @@ def main() -> int:
             minimum_baseline_time_ms=args.threshold_ms,
             minimum_absolute_improvement_ms=args.minimum_gain_ms,
             minimum_improvement_ratio=args.minimum_gain_ratio,
+            journal_directory=args.journal_directory,
+            journal_source="cli",
         )
     payload = (
         [asdict(item) for item in result]

@@ -6,11 +6,13 @@ from dataclasses import asdict
 from difflib import unified_diff
 import faulthandler
 import json
+import os
 from pathlib import Path
 import sys
 import traceback
+from threading import Thread
 
-from PyQt6.QtCore import QObject, QRunnable, QSettings, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, pyqtSignal, pyqtSlot, qInstallMessageHandler
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -33,6 +35,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -78,8 +81,10 @@ from .sequential_recommendation import (
 from .sql_rewrite import (
     SQLRewritePlan,
     evaluate_sql_rewrites,
+    evaluate_sql_variant,
     generate_sql_rewrites,
 )
+from .rewrite_journal import journal_summary, export_rewrite_journal
 from .structural_feedback import (
     RecommendationDecision,
     record_recommendation_decision,
@@ -120,11 +125,58 @@ DEFAULT_DQN_STRESS_METRICS = (
 class WorkerSignals(QObject):
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str)
+    prediction_ready = pyqtSignal(object, float)
+    completed = pyqtSignal(object)
 
 
-class Worker(QRunnable):
+def _log_desktop_exception(exc_type, exc_value, exc_traceback) -> str:
+    message = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    try:
+        ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+        with (ARTIFACT_ROOT / "desktop-errors.log").open("a", encoding="utf-8") as stream:
+            stream.write(message + "\n")
+    except OSError:
+        pass
+    return message
+
+
+def _qt_message_handler(message_type, context, message):
+    try:
+        with (ARTIFACT_ROOT / "desktop-qt.log").open("a", encoding="utf-8") as stream:
+            stream.write(f"{message_type.name}: {message}\n")
+    except OSError:
+        pass
+
+
+def _gui_exception_handler(exc_type, exc_value, exc_traceback):
+    """Do not let an uncaught Python slot exception trigger Qt's process abort."""
+    _log_desktop_exception(exc_type, exc_value, exc_traceback)
+    application = QApplication.instance()
+    if application is None:
+        return
+    for widget in application.topLevelWidgets():
+        if isinstance(widget, MainWindow):
+            widget._set_query_actions_enabled(True)
+            widget.recommendation_text.setPlainText(
+                "Не удалось отобразить результат рекомендаций. "
+                "Прогноз сохранён на экране; подробности записаны в desktop-errors.log."
+            )
+            widget.statusBar().showMessage(f"Ошибка интерфейса: {exc_type.__name__}: {exc_value}")
+            break
+
+
+def _warm_inference_models(xgboost_path, dqn_path, strategy_path):
+    from .model_cache import load_joblib_model
+    from .dqn import dqn_action_encoding_version
+
+    load_joblib_model(xgboost_path)
+    load_joblib_model(strategy_path)
+    dqn_action_encoding_version(dqn_path)
+
+
+class Worker:
     def __init__(self, function, *args, **kwargs):
-        super().__init__()
         self.function = function
         self.args = args
         self.kwargs = kwargs
@@ -143,9 +195,12 @@ class Worker(QRunnable):
                     stream.write(traceback.format_exc() + "\n")
             except OSError:
                 pass
-            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+            notes = "\n".join(getattr(exc, "__notes__", []))
+            self.signals.failed.emit(f"{type(exc).__name__}: {exc}" + (f"\n{notes}" if notes else ""))
         else:
             self.signals.succeeded.emit(result)
+        finally:
+            self.signals.completed.emit(self)
 
 
 def _format_index_action(action) -> str:
@@ -224,9 +279,11 @@ def _sql_editor_identity(sql_text: str) -> str:
 
 
 def _format_prediction(prediction) -> str:
+    if prediction.estimate_source == "exact_history":
+        return f"{prediction.predicted_time_ms:.2f} мс\nоценка по предыдущим\nизмерениям этого SQL"
     source = (
         "ML + профиль БД"
-        if prediction.calibration_sample_count
+        if prediction.estimate_source == "database_profile"
         else "ML-модель"
     )
     return f"{prediction.predicted_time_ms:.2f} мс\nпрогноз: {source}"
@@ -332,10 +389,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
         self.preferences = QSettings("PQO", "PredictiveQueryOptimization")
-        self.thread_pool = QThreadPool.globalInstance()
         self._active_workers: set[Worker] = set()
         self.history_records = []
         self.last_prediction_ms: float | None = None
+        self.last_prediction_source = "ml"
         self.last_uncalibrated_prediction_ms: float | None = None
         self.last_query_run_id: int | None = None
         self.last_analyzed_sql: str | None = None
@@ -351,6 +408,8 @@ class MainWindow(QMainWindow):
         self.verified_rewrite_baseline_ms: float | None = None
         self.verified_rewrite_candidate_ms: float | None = None
         self.rewrite_measurement_operation: str | None = None
+        self._rewrite_check_active = False
+        self._rewrite_journal_source = "desktop"
         self._query_operation_active = False
         self.experiment_report: ExperimentReport | None = None
         self.candidate_directories: dict[str, Path] = {}
@@ -372,21 +431,33 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Готово")
 
     def _start_worker(self, worker: Worker) -> None:
-        """Keep background Qt objects alive until their queued signals finish."""
+        """Use Python-owned thread states; deliver results to Qt only via signals."""
         self._active_workers.add(worker)
-        worker.signals.succeeded.connect(
-            lambda _result, current=worker: self._active_workers.discard(current)
+        worker.signals.completed.connect(
+            self._worker_completed, Qt.ConnectionType.QueuedConnection
         )
-        worker.signals.failed.connect(
-            lambda _message, current=worker: self._active_workers.discard(current)
-        )
-        self.thread_pool.start(worker)
+        Thread(target=worker.run, name="pqo-worker", daemon=True).start()
+
+    @pyqtSlot(object)
+    def _worker_completed(self, worker):
+        self._active_workers.discard(worker)
+
+    def closeEvent(self, event):
+        if self._active_workers:
+            self.statusBar().showMessage("Дождитесь завершения фоновой операции перед закрытием.")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _set_query_actions_enabled(self, enabled: bool) -> None:
         self._query_operation_active = not enabled
+        self.sql_editor.setReadOnly(not enabled)
         self.analyze_button.setEnabled(enabled)
         self.deep_analyze_button.setEnabled(enabled)
         self.rewrite_analyze_button.setEnabled(enabled)
+        self.rewrite_editor.setReadOnly(not enabled)
+        self.rewrite_journal_check.setEnabled(enabled)
+        self._sync_variant_button()
         if not enabled:
             self.apply_indexes_button.setEnabled(False)
             self.rollback_indexes_button.setEnabled(False)
@@ -405,7 +476,13 @@ class MainWindow(QMainWindow):
         self.rollback_rewrite_button.setEnabled(self.applied_rewrite_sql is not None)
 
     def _query_action_failed(self, message: str) -> None:
+        self._finish_deep_operation()
         self._set_query_actions_enabled(True)
+        if self._rewrite_check_active:
+            self._rewrite_check_active = False
+            self.variant_status.setText(f"Проверка не завершена: {message}")
+            if self.rewrite_journal_check.isChecked():
+                self._refresh_rewrite_journal()
         if self.rewrite_measurement_operation is not None:
             self.rewrite_measurement_operation = None
             self.rewrite_management_status.setText(
@@ -433,7 +510,46 @@ class MainWindow(QMainWindow):
         self.sql_editor.setMinimumHeight(210)
         self.sql_editor.setFont(QFont("Cascadia Mono", 10))
         self.sql_editor.textChanged.connect(self._sync_rewrite_apply_button)
-        layout.addWidget(self.sql_editor)
+        self.sql_editor.textChanged.connect(self._sync_variant_button)
+        self.sql_splitter = QSplitter(Qt.Orientation.Horizontal)
+        source_group = QGroupBox("Исходный / текущий SQL")
+        source_layout = QVBoxLayout(source_group)
+        source_layout.addWidget(self.sql_editor)
+        self.sql_splitter.addWidget(source_group)
+        variant_group = QGroupBox("Вариант SQL — отдельно от исходного")
+        variant_layout = QVBoxLayout(variant_group)
+        self.rewrite_editor = QPlainTextEdit()
+        self.rewrite_editor.setFont(QFont("Cascadia Mono", 10))
+        self.rewrite_editor.setMinimumHeight(210)
+        self.rewrite_editor.setPlaceholderText(
+            "Здесь появится автоматический вариант. Можно изменить текст или "
+            "вставить свой SELECT, затем отдельно проверить его и измерить."
+        )
+        variant_layout.addWidget(self.rewrite_editor)
+        self.compare_variant_button = QPushButton("Проверить вариант и измерить оба SQL")
+        self.compare_variant_button.setEnabled(False)
+        self.compare_variant_button.clicked.connect(self._start_variant_comparison)
+        variant_layout.addWidget(self.compare_variant_button)
+        self.rewrite_journal_check = QCheckBox("Сохранять проверки SQL в локальный журнал")
+        self.rewrite_journal_check.setChecked(
+            str(self.preferences.value("rewrite_journal_enabled", "true")).lower() in {"1", "true", "yes"}
+        )
+        self.rewrite_journal_check.setToolTip(
+            "Локально сохраняются оба SQL, включая литералы, планы и замеры. "
+            "Пароль подключения не сохраняется. Независимо от истории pqo; "
+            "данные не отправляются наружу и не используются для обучения автоматически."
+        )
+        self.rewrite_journal_check.toggled.connect(
+            lambda checked: self.preferences.setValue("rewrite_journal_enabled", checked)
+        )
+        variant_layout.addWidget(self.rewrite_journal_check)
+        self.variant_status = QLabel("Исходный SQL слева не меняется при сравнении.")
+        self.variant_status.setWordWrap(True)
+        variant_layout.addWidget(self.variant_status)
+        self.rewrite_editor.textChanged.connect(self._variant_edited)
+        self.sql_splitter.addWidget(variant_group)
+        self.sql_splitter.setSizes([600, 600])
+        layout.addWidget(self.sql_splitter)
 
         controls = QHBoxLayout()
         self.analyze_button = QPushButton("Быстрый ML-прогноз")
@@ -451,6 +567,10 @@ class MainWindow(QMainWindow):
         )
         self.deep_analyze_button.clicked.connect(self._start_sequential_analysis)
         controls.addWidget(self.deep_analyze_button)
+        self.cancel_deep_button = QPushButton("Отменить анализ")
+        self.cancel_deep_button.setVisible(False)
+        self.cancel_deep_button.clicked.connect(self._cancel_deep_analysis)
+        controls.addWidget(self.cancel_deep_button)
         self.rewrite_analyze_button = QPushButton(
             "Проверить безопасное переписывание SQL"
         )
@@ -738,7 +858,102 @@ class MainWindow(QMainWindow):
         header_view.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.history_table)
+        journal_group = QGroupBox("Локальный журнал переписываний — без служебной схемы pqo")
+        journal_layout = QVBoxLayout(journal_group)
+        journal_controls = QHBoxLayout()
+        self.rewrite_journal_refresh_button = QPushButton("Обновить журнал")
+        self.rewrite_journal_refresh_button.clicked.connect(self._refresh_rewrite_journal)
+        journal_controls.addWidget(self.rewrite_journal_refresh_button)
+        self.rewrite_journal_export_button = QPushButton("Экспорт журнала JSON/CSV")
+        self.rewrite_journal_export_button.clicked.connect(self._export_rewrite_journal)
+        journal_controls.addWidget(self.rewrite_journal_export_button)
+        journal_controls.addStretch()
+        journal_layout.addLayout(journal_controls)
+        self.rewrite_journal_status = QLabel(str(ARTIFACT_ROOT / "rewrite-journal"))
+        self.rewrite_journal_status.setWordWrap(True)
+        self.rewrite_journal_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        journal_layout.addWidget(self.rewrite_journal_status)
+        self.rewrite_journal_table = QTableWidget(0, 8)
+        self.rewrite_journal_table.setHorizontalHeaderLabels([
+            "Время", "Проверка / вариант", "Правило", "Строки совпали", "До → после, мс",
+            "Выигрыш", "Применим", "Причина / этап",
+        ])
+        self.rewrite_journal_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.rewrite_journal_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.rewrite_journal_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self.rewrite_journal_table.setMinimumHeight(170)
+        journal_layout.addWidget(self.rewrite_journal_table)
+        layout.addWidget(journal_group)
         self.tabs.addTab(page, "История")
+
+    def _rewrite_journal_directory(self):
+        return ARTIFACT_ROOT / "rewrite-journal" if self.rewrite_journal_check.isChecked() else None
+
+    def _refresh_rewrite_journal(self):
+        self.rewrite_journal_refresh_button.setEnabled(False)
+        worker = Worker(journal_summary, ARTIFACT_ROOT / "rewrite-journal")
+        worker.signals.succeeded.connect(self._show_rewrite_journal)
+        worker.signals.failed.connect(self._rewrite_journal_failed)
+        self._start_worker(worker)
+
+    @pyqtSlot(object)
+    def _show_rewrite_journal(self, rows):
+        self.rewrite_journal_refresh_button.setEnabled(True)
+        self.rewrite_journal_table.setRowCount(len(rows))
+        states = {"completed": "завершено", "running": "не завершено", "failed": "ошибка",
+                  "unreadable": "повреждён файл", "pending": "ожидает", "not_checked": "не проверялся", "error": "ошибка"}
+        reasons = {"recommended": "выигрыш подтверждён", "no_candidates": "нет вариантов",
+                   "below_runtime_threshold": "ниже порога", "no_measured_improvement": "нет достаточного выигрыша",
+                   "improvement_too_small": "нет достаточного выигрыша", "result_mismatch": "строки различаются",
+                   "verification_failed": "проверка не завершена", "run_failed": "ошибка операции", "error": "ошибка"}
+        stages = {"baseline_probe": "исходный запрос", "equivalence": "сравнение строк", "measurement": "замеры",
+                  "estimated_plans": "EXPLAIN", "connection": "подключение", "validation": "валидация", "finished": "готово", "pending": "ожидание"}
+        for index, row in enumerate(rows):
+            before, after = row["baseline_time_ms"], row["rewritten_time_ms"]
+            reason = row["rejection_reason"] or row["terminal_reason"] or "—"
+            reason = "тайм-аут" if (row.get("error") or {}).get("timed_out") else reasons.get(reason, reason)
+            values = [row["started_at"] or "—", f"{states.get(row['status'], row['status'])} / {states.get(row['candidate_status'], row['candidate_status']) or '—'}",
+                      row["rule_id"] or "—",
+                      "—" if row["equivalence"] is None else "да" if row["equivalence"] else "нет",
+                      f"{before:.2f} → {after:.2f}" if before is not None and after is not None else "—",
+                      f"{row['improvement_ratio']:+.1%}" if row["improvement_ratio"] is not None else "—",
+                      "да" if row["accepted"] else "нет",
+                      f"{reason} / {stages.get(row.get('stage'), row.get('stage')) or '—'}"]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(f"ID: {row['run_id']}\nИсточник: {row.get('source')}\n"
+                                f"Исходный SQL:\n{row.get('original_sql') or '—'}\n\n"
+                                f"Вариант:\n{row.get('variant_sql') or '—'}\n\nОшибка: {row.get('error') or '—'}")
+                self.rewrite_journal_table.setItem(index, column, item)
+        self.rewrite_journal_status.setText(
+            f"Показано вариантов: {len(rows)} (последние 200 проверок). "
+            f"Планы и все прогоны — в JSON. Каталог: {ARTIFACT_ROOT / 'rewrite-journal'}"
+        )
+
+    def _rewrite_journal_failed(self, message):
+        self.rewrite_journal_refresh_button.setEnabled(True)
+        self.rewrite_journal_status.setText(message)
+
+    def _export_rewrite_journal(self):
+        selected, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт локального журнала", str(ARTIFACT_ROOT / "rewrite-journal-export.json"),
+            "JSON (*.json);;CSV (*.csv)",
+        )
+        if not selected:
+            return
+        self.rewrite_journal_export_button.setEnabled(False)
+        worker = Worker(export_rewrite_journal, ARTIFACT_ROOT / "rewrite-journal", selected)
+        worker.signals.succeeded.connect(self._rewrite_journal_exported)
+        worker.signals.failed.connect(self._rewrite_journal_export_failed)
+        self._start_worker(worker)
+
+    def _rewrite_journal_exported(self, path):
+        self.rewrite_journal_export_button.setEnabled(True)
+        self.rewrite_journal_status.setText(f"Экспорт сохранён: {path}")
+
+    def _rewrite_journal_export_failed(self, message):
+        self.rewrite_journal_export_button.setEnabled(True)
+        self.rewrite_journal_status.setText(message)
 
     def _build_settings_tab(self) -> None:
         page = QWidget()
@@ -1215,9 +1430,20 @@ class MainWindow(QMainWindow):
             calibration_profile_path=self._calibration_path(),
             strategy_model_path=strategy_path,
         )
+        worker.kwargs["prediction_ready"] = worker.signals.prediction_ready.emit
+        worker.signals.prediction_ready.connect(self._show_early_prediction)
         worker.signals.succeeded.connect(self._show_analysis)
         worker.signals.failed.connect(self._query_action_failed)
         self._start_worker(worker)
+
+    @pyqtSlot(object, float)
+    def _show_early_prediction(self, prediction, latency_ms: float) -> None:
+        self.predicted_value.setText(_format_prediction(prediction))
+        self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
+        self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
+        self.node_value.setText(f"{prediction.root_node_type}\n{prediction.plan_node_count} узл.")
+        self.recommendation_text.setPlainText("Прогноз готов. Рассчитываю предварительные рекомендации…")
+        self.statusBar().showMessage(f"Прогноз получен за {latency_ms:.0f} мс; рассчитываются рекомендации…")
 
     def _start_rewrite_control_measurement(self) -> None:
         """Measure only after an explicit apply/rollback action."""
@@ -1257,11 +1483,13 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(self._query_action_failed)
         self._start_worker(worker)
 
+    @pyqtSlot(object)
     def _show_analysis(self, analysis: QueryAnalysis) -> None:
         self._set_query_actions_enabled(True)
         rewrite_operation = self.rewrite_measurement_operation
         prediction = analysis.prediction
         self.last_prediction_ms = prediction.predicted_time_ms
+        self.last_prediction_source = prediction.estimate_source
         self.last_uncalibrated_prediction_ms = prediction.uncalibrated_time_ms
         self.last_query_run_id = analysis.query_run_id
         self.last_analyzed_sql = prediction.sql_text
@@ -1284,8 +1512,13 @@ class MainWindow(QMainWindow):
                     f"{prediction.uncertainty_upper_ms:.2f} мс."
                 )
             self.predicted_value.setToolTip(
-                "Прогноз построен без выполнения SQL. "
-                f"Источник ошибки: {prediction.error_source}.{uncertainty}"
+                (
+                    "Оценка основана на предыдущих измерениях этого SQL; "
+                    "текущий запрос не выполнялся. "
+                    if prediction.estimate_source == "exact_history"
+                    else "Прогноз построен без выполнения SQL. "
+                )
+                + f"Источник ошибки: {prediction.error_source}.{uncertainty}"
             )
         self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
         self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
@@ -1434,6 +1667,9 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(
             f"{status_prefix} · запись #{analysis.query_run_id or 'не сохранена'}"
+            + (f" · расчёт прогноза {analysis.prediction_latency_ms:.0f} мс; "
+               f"весь анализ {analysis.analysis_latency_ms:.0f} мс"
+               if analysis.prediction_latency_ms is not None else "")
         )
 
     def _reset_structural_feedback(self) -> None:
@@ -1689,6 +1925,8 @@ class MainWindow(QMainWindow):
         self._task_failed(message)
 
     def _start_sequential_analysis(self) -> None:
+        if self._query_operation_active:
+            return
         sql_text = self.sql_editor.toPlainText().strip()
         if not sql_text:
             QMessageBox.warning(self, "Нет SQL", "Введите SQL-запрос.")
@@ -1719,6 +1957,12 @@ class MainWindow(QMainWindow):
             "Проверяю кандидаты в изолированной транзакции…"
         )
         self.statusBar().showMessage("Глубокий анализ индексов…")
+        from .analysis_control import AnalysisControl
+
+        self._deep_control = AnalysisControl()
+        self.cancel_deep_button.setVisible(True)
+        self.cancel_deep_button.setEnabled(True)
+        self.cancel_deep_button.setText("Отменить анализ")
         worker = Worker(
             recommend_sequential_indexes,
             sql_text,
@@ -1727,6 +1971,7 @@ class MainWindow(QMainWindow):
             max_steps=2,
             storage_budget_bytes=64 * 1024 * 1024,
             repetitions=5,
+            control=self._deep_control,
             minimum_baseline_time_ms=self.threshold_spin.value(),
             minimum_absolute_improvement_ms=self.minimum_gain_spin.value(),
             minimum_improvement_ratio=(
@@ -1740,13 +1985,42 @@ class MainWindow(QMainWindow):
                 else None
             ),
         )
+        self._deep_control.progress = worker.signals.progress.emit
+        worker.signals.progress.connect(self._show_deep_progress)
         worker.signals.succeeded.connect(self._show_sequential_analysis)
-        worker.signals.failed.connect(self._query_action_failed)
+        worker.signals.failed.connect(self._deep_analysis_failed)
         self._start_worker(worker)
+
+    def _show_deep_progress(self, message: str) -> None:
+        self.statusBar().showMessage(message)
+        self.recommendation_text.setPlainText(message)
+
+    def _cancel_deep_analysis(self) -> None:
+        control = getattr(self, "_deep_control", None)
+        if control is not None:
+            control.cancel()
+            self.cancel_deep_button.setEnabled(False)
+            self.cancel_deep_button.setText("Отмена…")
+            self.statusBar().showMessage("Останавливаю запрос и откатываю пробные изменения…")
+
+    def _finish_deep_operation(self) -> None:
+        self._deep_control = None
+        self.cancel_deep_button.setVisible(False)
+
+    def _deep_analysis_failed(self, message: str) -> None:
+        self._finish_deep_operation()
+        self._set_query_actions_enabled(True)
+        if message.startswith("AnalysisCancelled:"):
+            message = "Анализ отменён пользователем; пробные изменения откачены."
+        elif "55P03" in message or "lock timeout" in message:
+            message = "База занята другой операцией. Ожидание блокировки прекращено; пробные изменения откачены. Повторите анализ позже."
+        self.recommendation_text.setPlainText(message)
+        self.statusBar().showMessage(message)
 
     def _show_sequential_analysis(
         self, plan: SequentialRecommendationPlan
     ) -> None:
+        self._finish_deep_operation()
         self._set_query_actions_enabled(True)
         self.structural_management_group.setVisible(False)
         self.last_sequential_plan = plan
@@ -1794,14 +2068,23 @@ class MainWindow(QMainWindow):
         prediction_text = (
             "—"
             if self.last_prediction_ms is None
-            else f"ML-прогноз {self.last_prediction_ms:.2f} мс"
+            else (f"Оценка по прошлым замерам {self.last_prediction_ms:.2f} мс"
+                  if self.last_prediction_source == "exact_history"
+                  else f"ML-прогноз {self.last_prediction_ms:.2f} мс")
         )
-        self.predicted_value.setText(
-            f"{prediction_text}\n"
-            f"факт, медиана {plan.baseline_time_ms:.2f} мс\n"
-            f"{len(plan.baseline_samples_ms)} замеров: "
-            f"{plan.baseline_min_time_ms:.2f}–{plan.baseline_max_time_ms:.2f} мс"
-        )
+        if plan.baseline_timed_out:
+            baseline_display = (
+                f"факт: более {plan.baseline_time_ms:.0f} мс\n"
+                "исходный запрос остановлен по тайм-ауту"
+            )
+        else:
+            baseline_display = (
+                f"факт, медиана {plan.baseline_time_ms:.2f} мс\n"
+                f"{len(plan.baseline_samples_ms)} замеров: "
+                f"{plan.baseline_min_time_ms:.2f}–"
+                f"{plan.baseline_max_time_ms:.2f} мс"
+            )
+        self.predicted_value.setText(f"{prediction_text}\n{baseline_display}")
         if not plan.steps:
             reasons = {
                 "model_stop": "модель не нашла достаточно надёжного улучшения",
@@ -1827,13 +2110,23 @@ class MainWindow(QMainWindow):
                 ),
             }
             reason = reasons.get(plan.terminal_reason, plan.terminal_reason)
+            if plan.baseline_timed_out:
+                actual_time = (
+                    "Исходный запрос превысил тайм-аут: фактическое время более "
+                    f"{plan.baseline_time_ms:.0f} мс. Транзакция восстановлена, "
+                    "пробные изменения откачены."
+                )
+            else:
+                actual_time = (
+                    "Фактическое исходное время: медиана "
+                    f"{plan.baseline_time_ms:.2f} мс; диапазон "
+                    f"{plan.baseline_min_time_ms:.2f}–"
+                    f"{plan.baseline_max_time_ms:.2f} мс."
+                )
             index_result = (
                 "ГЛУБОКАЯ ПРОВЕРКА ИНДЕКСОВ: новые индексы не рекомендуются.\n"
                 f"Причина: {reason}.\n"
-                f"Фактическое исходное время: медиана "
-                f"{plan.baseline_time_ms:.2f} мс; диапазон "
-                f"{plan.baseline_min_time_ms:.2f}–"
-                f"{plan.baseline_max_time_ms:.2f} мс.\n"
+                f"{actual_time}\n"
                 "Этот экран содержит только результат проверки индексов."
                 f"{calibration_note}"
             )
@@ -1843,19 +2136,34 @@ class MainWindow(QMainWindow):
                     "Глубокий анализ не сформировал план для применения."
                 )
         else:
-            lines = [
-                "ГЛУБОКАЯ ПРОВЕРКА ИНДЕКСОВ — фактический результат:",
-                f"Проверенный план: {len(plan.steps)} индекс(а/ов)",
-                (
+            if plan.baseline_timed_out:
+                measured_result = (
+                    f"Фактическое время: более {plan.baseline_time_ms:.0f} → "
+                    f"{plan.final_time_ms:.2f} мс "
+                    f"(ускорение не менее {plan.measured_improvement_ratio:+.1%})"
+                )
+                baseline_note = (
+                    "Исходный замер достиг statement_timeout; после отката "
+                    "неуспешной транзакции кандидат проверен повторно."
+                )
+            else:
+                measured_result = (
                     f"Фактическое время: {plan.baseline_time_ms:.2f} → "
                     f"{plan.final_time_ms:.2f} мс "
                     f"({plan.measured_improvement_ratio:+.1%})"
-                ),
+                )
+                baseline_note = None
+            lines = [
+                "ГЛУБОКАЯ ПРОВЕРКА ИНДЕКСОВ — фактический результат:",
+                f"Проверенный план: {len(plan.steps)} индекс(а/ов)",
+                measured_result,
                 (
                     "Этот измеренный результат имеет приоритет над "
                     "предварительным классом ML/NOOP."
                 ),
             ]
+            if baseline_note:
+                lines.append(baseline_note)
             for number, step in enumerate(plan.steps, start=1):
                 lines.extend(
                     (
@@ -2029,24 +2337,33 @@ class MainWindow(QMainWindow):
         self._task_failed(message)
 
     def _start_rewrite_analysis(self) -> None:
+        if self._query_operation_active:
+            return
         sql_text = self.sql_editor.toPlainText().strip()
         if not sql_text:
             QMessageBox.warning(self, "Нет SQL", "Введите SQL-запрос.")
             return
-        candidates = generate_sql_rewrites(sql_text)
+        try:
+            candidates = generate_sql_rewrites(sql_text)
+        except ValueError:
+            self._set_query_actions_enabled(False)
+            self._rewrite_check_active = True
+            worker = Worker(evaluate_sql_rewrites, sql_text, self._database_settings(),
+                            journal_directory=self._rewrite_journal_directory(),
+                            journal_source=self._rewrite_journal_source)
+            worker.signals.succeeded.connect(self._show_rewrite_analysis)
+            worker.signals.failed.connect(self._query_action_failed)
+            self._start_worker(worker)
+            return
         if not candidates:
             self._clear_verified_rewrite()
-            self._show_rewrite_analysis(
-                SQLRewritePlan(
-                    sql_text,
-                    (),
-                    None,
-                    self.threshold_spin.value(),
-                    self.minimum_gain_spin.value(),
-                    self.minimum_gain_percent_spin.value() / 100.0,
-                    "no_candidates",
-                )
-            )
+            self._set_query_actions_enabled(False)
+            worker = Worker(evaluate_sql_rewrites, sql_text, self._database_settings(),
+                            journal_directory=self._rewrite_journal_directory(),
+                            journal_source=self._rewrite_journal_source)
+            worker.signals.succeeded.connect(self._show_rewrite_analysis)
+            worker.signals.failed.connect(self._query_action_failed)
+            self._start_worker(worker)
             return
         answer = QMessageBox.question(
             self,
@@ -2058,6 +2375,8 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._clear_verified_rewrite()
+        self.rewrite_editor.setPlainText(candidates[0].sql_text)
+        self.variant_status.setText(f"Кандидатов: {len(candidates)}. Показан: {candidates[0].title}. Проверка выполняется…")
         self._reset_structural_feedback()
         self.structural_management_group.setVisible(False)
         self._set_query_actions_enabled(False)
@@ -2065,6 +2384,7 @@ class MainWindow(QMainWindow):
             "Формирую варианты, проверяю эквивалентность и измеряю время…"
         )
         self.statusBar().showMessage("Проверка переписывания SQL…")
+        self._rewrite_check_active = True
         worker = Worker(
             evaluate_sql_rewrites,
             sql_text,
@@ -2075,14 +2395,73 @@ class MainWindow(QMainWindow):
             minimum_improvement_ratio=(
                 self.minimum_gain_percent_spin.value() / 100.0
             ),
+            journal_directory=self._rewrite_journal_directory(),
+            journal_source=self._rewrite_journal_source,
         )
         worker.signals.succeeded.connect(self._show_rewrite_analysis)
         worker.signals.failed.connect(self._query_action_failed)
         self._start_worker(worker)
 
+    def _variant_edited(self):
+        self._sync_variant_button()
+        self._sync_rewrite_apply_button()
+        if self.rewrite_editor.toPlainText().strip():
+            self.variant_status.setText("Текст варианта изменён. Перед применением сравните результаты и время.")
+
+    def _sync_variant_button(self):
+        if not hasattr(self, "compare_variant_button"):
+            return
+        left = self.sql_editor.toPlainText().strip()
+        right = self.rewrite_editor.toPlainText().strip()
+        self.compare_variant_button.setEnabled(
+            not self._query_operation_active and bool(left and right)
+            and _sql_editor_identity(left) != _sql_editor_identity(right)
+        )
+
+    def _start_variant_comparison(self):
+        if self._query_operation_active:
+            return
+        original = self.sql_editor.toPlainText().strip()
+        variant = self.rewrite_editor.toPlainText().strip()
+        if not original or not variant:
+            return
+        answer = QMessageBox.question(
+            self, "Сравнить два SQL?",
+            "Оба SELECT будут выполнены в транзакции только для чтения. "
+            "Сравнение EXCEPT ALL проверяет мультимножество строк на текущем "
+            "снимке БД, но не доказывает порядок строк или эквивалентность "
+            "на всех возможных данных. Исходный текст слева не изменится.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._clear_verified_rewrite()
+        self._set_query_actions_enabled(False)
+        self.variant_status.setText("Проверяю эквивалентность и измеряю оба SQL…")
+        self._rewrite_check_active = True
+        self.recommendation_text.setPlainText("Сравнение исходного SQL и варианта из правого редактора…")
+        worker = Worker(
+            evaluate_sql_variant, original, variant, self._database_settings(),
+            repetitions=3, minimum_baseline_time_ms=0,
+            minimum_absolute_improvement_ms=self.minimum_gain_spin.value(),
+            minimum_improvement_ratio=self.minimum_gain_percent_spin.value() / 100,
+            journal_directory=self._rewrite_journal_directory(),
+            journal_source=self._rewrite_journal_source,
+        )
+        worker.signals.succeeded.connect(self._show_rewrite_analysis)
+        worker.signals.failed.connect(self._query_action_failed)
+        self._start_worker(worker)
+
+    @pyqtSlot(object)
     def _show_rewrite_analysis(self, plan: SQLRewritePlan) -> None:
+        self._rewrite_check_active = False
         self._set_query_actions_enabled(True)
         self.structural_management_group.setVisible(False)
+        if plan.journal_run_id:
+            self.rewrite_journal_status.setText(f"ID проверки: {plan.journal_run_id}")
+            self._refresh_rewrite_journal()
+        if plan.journal_warning:
+            self.variant_status.setText(plan.journal_warning)
+            QMessageBox.warning(self, "Ошибка сохранения журнала", plan.journal_warning)
         verified_indexes = _format_verified_index_summary(
             self.last_sequential_plan
         )
@@ -2109,7 +2488,8 @@ class MainWindow(QMainWindow):
                 f"{_format_sql_rewrite_diff(plan.original_sql, result.candidate.sql_text)}\n\n"
                 "ПЕРЕПИСАННЫЙ SQL:\n"
                 f"{result.candidate.sql_text}\n\n"
-                "Эквивалентность результатов подтверждена через EXCEPT ALL.\n"
+                "Мультимножества строк совпали на текущем снимке БД (EXCEPT ALL); "
+                "это не доказательство для всех возможных данных или порядка строк.\n"
                 "Для установки этого текста в редактор используйте отдельную кнопку "
                 "«Применить проверенный SQL и измерить»."
                 f"{preserved_index_text}"
@@ -2120,19 +2500,22 @@ class MainWindow(QMainWindow):
             return
 
         if plan.terminal_reason == "no_candidates":
+            self.rewrite_editor.clear()
+            self.variant_status.setText("Автоматических вариантов нет. Можно ввести свой вариант справа и проверить его.")
             self.recommendation_text.setPlainText(
                 "АВТОМАТИЧЕСКАЯ ФАКТИЧЕСКАЯ ПРОВЕРКА НЕ ЗАПУСКАЛАСЬ.\n"
                 "Для этого SQL генератор не сформировал ни одного "
                 "семантически безопасного варианта. Поэтому PostgreSQL не "
                 "выполнялся, и результат появился сразу.\n\n"
                 "Это не означает, что запрос нельзя улучшить. Автоматический "
-                "режим проверяет только преобразования, которые обязаны "
-                "сохранить тот же набор строк и могут быть доказаны через "
-                "EXCEPT ALL.\n\n"
-                "Обнаруженная предварительная агрегация дочерних таблиц относится "
-                "к структурной переработке: она может исправить размножение строк "
-                "и изменить завышенные SUM/AVG. Такое изменение нельзя выдавать "
-                "за эквивалентное без подтверждения требуемой бизнес-семантики."
+                "режим применяет ограниченный набор правил и сравнивает "
+                "мультимножества строк через EXCEPT ALL на текущем снимке БД.\n\n"
+                "Проверены 7 правил: COUNT > 0 → EXISTS; COUNT = 0 → NOT EXISTS; "
+                "OR → IN; диапазон → BETWEEN; лишний ORDER BY; "
+                "NOT MATERIALIZED для повторного CTE; фильтр HAVING → WHERE.\n"
+                "Нейросетевой генератор SQL сейчас не используется. Произвольные "
+                "перестановки JOIN, окон и агрегаций эти правила не выполняют.\n\n"
+                "Свой вариант можно ввести справа и нажать «Проверить вариант и измерить оба SQL»."
                 f"{preserved_index_text}"
             )
             self.statusBar().showMessage(
@@ -2147,6 +2530,8 @@ class MainWindow(QMainWindow):
             "no_measured_improvement": (
                 "варианты эквивалентны, но не дали достаточного ускорения"
             ),
+            "result_mismatch": "результаты различаются; применять вариант нельзя",
+            "verification_failed": "эквивалентность не подтверждена из-за ошибки или тайм-аута",
         }
         lines = [
             "ПРОВЕРКА ПЕРЕПИСЫВАНИЯ: ускоряющий вариант не найден.",
@@ -2173,6 +2558,17 @@ class MainWindow(QMainWindow):
             )
         )
         self.recommendation_text.setPlainText("\n".join(lines))
+        if plan.evaluations:
+            preview = min(plan.evaluations, key=lambda item: item.rewritten_time_ms if item.rewritten_time_ms is not None else float("inf"))
+            self.rewrite_editor.setPlainText(preview.candidate.sql_text)
+            if preview.equivalent and preview.rewritten_time_ms is not None:
+                self.variant_status.setText(
+                    f"Результаты совпали на текущих данных. Медианы: "
+                    f"{preview.baseline_time_ms:.2f} → {preview.rewritten_time_ms:.2f} мс. "
+                    "Достаточное ускорение не подтверждено; исходный SQL не изменён."
+                )
+            else:
+                self.variant_status.setText(f"Вариант не прошёл проверку: {preview.rejection_reason}.")
         self.statusBar().showMessage("Безопасное ускоряющее переписывание не найдено")
 
     def _clear_verified_rewrite(self) -> None:
@@ -2206,6 +2602,11 @@ class MainWindow(QMainWindow):
         self.verified_rewrite_title = title
         self.verified_rewrite_baseline_ms = baseline_time_ms
         self.verified_rewrite_candidate_ms = candidate_time_ms
+        self.rewrite_editor.setPlainText(rewritten_sql.strip())
+        self.variant_status.setText(
+            status + (f" Медианы: {baseline_time_ms:.2f} → {candidate_time_ms:.2f} мс."
+                      if baseline_time_ms is not None and candidate_time_ms is not None else "")
+        )
         self._sync_rewrite_apply_button()
         self.rewrite_management_status.setText(
             status
@@ -2249,6 +2650,7 @@ class MainWindow(QMainWindow):
             and original_sql is not None
             and self.verified_rewrite_sql is not None
             and self.applied_rewrite_sql is None
+            and _sql_editor_identity(self.rewrite_editor.toPlainText()) == _sql_editor_identity(self.verified_rewrite_sql or "")
             and _sql_editor_identity(self.sql_editor.toPlainText())
             == _sql_editor_identity(original_sql)
         )
@@ -2305,14 +2707,21 @@ class MainWindow(QMainWindow):
             measured_time = "—"
             if record.measured_baseline_time_ms is not None:
                 measured_time = (
+                    f"{'более ' if record.baseline_timed_out else ''}"
                     f"{record.measured_baseline_time_ms:.2f} → "
                     f"{record.measured_final_time_ms:.2f} мс"
                 )
+                if record.baseline_timed_out and not record.sequential_steps:
+                    measured_time = f"более {record.measured_baseline_time_ms:.2f} мс; тайм-аут"
             measured_gain = (
                 "—"
                 if record.measured_improvement_ratio is None
                 else f"{record.measured_improvement_ratio:+.1%}"
             )
+            if record.baseline_timed_out:
+                measured_gain = (
+                    f"не менее {measured_gain}" if record.sequential_steps else "—"
+                )
             score = (
                 "—"
                 if record.predicted_reward is None
@@ -2701,6 +3110,12 @@ class MainWindow(QMainWindow):
 def main() -> int:
     smoke_test = "--smoke-test" in sys.argv
     deep_smoke_test = "--deep-smoke-test" in sys.argv
+    quick_smoke_test = "--quick-smoke-test" in sys.argv
+    rewrite_smoke_test = "--rewrite-smoke-test" in sys.argv
+    if rewrite_smoke_test:
+        sys.argv.remove("--rewrite-smoke-test")
+    if quick_smoke_test:
+        sys.argv.remove("--quick-smoke-test")
     if smoke_test:
         sys.argv.remove("--smoke-test")
     if deep_smoke_test:
@@ -2710,6 +3125,8 @@ def main() -> int:
         "a", encoding="utf-8"
     )
     faulthandler.enable(crash_stream, all_threads=True)
+    sys.excepthook = _gui_exception_handler
+    qInstallMessageHandler(_qt_message_handler)
     application = QApplication(sys.argv)
     application.setApplicationName("Predictive Query Optimization")
     application.setOrganizationName("PQO")
@@ -2722,6 +3139,7 @@ def main() -> int:
         required = (
             DEFAULT_XGB_MODEL,
             DEFAULT_DQN_MODEL,
+            DEFAULT_DQN_MODEL.with_suffix(".npz"),
             DEFAULT_SEQUENTIAL_DQN_MODEL,
             DEFAULT_SEQUENTIAL_DQN_MODEL.with_suffix(".npz"),
             DEFAULT_STRATEGY_MODEL,
@@ -2815,6 +3233,90 @@ def main() -> int:
         return 0
     window = MainWindow()
     window.show()
+    window._start_worker(Worker(
+        _warm_inference_models,
+        Path(window.xgb_model_edit.text()),
+        Path(window.dqn_model_edit.text()),
+        Path(window.strategy_model_edit.text()),
+    ))
+    if rewrite_smoke_test:
+        window._rewrite_journal_source = "smoke_test"
+        window.rewrite_journal_check.blockSignals(True)
+        window.rewrite_journal_check.setChecked(True)
+        window.rewrite_journal_check.blockSignals(False)
+        rewrite_log = ARTIFACT_ROOT / "rewrite-smoke-test.log"
+        original = "SELECT x FROM (VALUES (1),(1),(2)) v(x)"
+        variants = ["SELECT 1 AS x UNION ALL SELECT 1 UNION ALL SELECT 2",
+                    "SELECT DISTINCT x FROM (VALUES (1),(1),(2)) v(x)"]
+        rewrite_state = {"case": 0, "started": False}
+        QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+
+        def begin_rewrite_check():
+            window.sql_editor.setPlainText(original)
+            window.rewrite_editor.setPlainText(variants[rewrite_state["case"]])
+            rewrite_state["started"] = True
+            window._start_variant_comparison()
+
+        def check_rewrite_result():
+            if not rewrite_state["started"] or window._query_operation_active:
+                return
+            expected = "Результаты совпали" if rewrite_state["case"] == 0 else "не прошёл проверку"
+            status = window.variant_status.text()
+            if expected not in status or window.sql_editor.toPlainText() != original:
+                rewrite_log.write_text("FAILED: " + status, encoding="utf-8")
+                application.exit(3)
+                return
+            rewrite_state["case"] += 1
+            if rewrite_state["case"] < len(variants):
+                begin_rewrite_check()
+                return
+            rewrite_log.write_text("OK: side-by-side comparison; equivalence, duplicate mismatch, source unchanged", encoding="utf-8")
+            application.exit(0)
+
+        rewrite_timer = QTimer(window)
+        rewrite_timer.timeout.connect(check_rewrite_result)
+        rewrite_timer.start(200)
+        QTimer.singleShot(20, begin_rewrite_check)
+        QTimer.singleShot(60000, lambda: application.exit(4))
+    if quick_smoke_test:
+        # Exercise real queued GUI signals, not just imports/model loading.
+        quick_log = ARTIFACT_ROOT / "quick-smoke-test.log"
+        window.persist_check.setChecked(False)
+        sql_file = os.environ.get("PQO_SMOKE_SQL_FILE")
+        if sql_file:
+            window.sql_editor.setPlainText(Path(sql_file).read_text(encoding="utf-8"))
+        quick_log.write_text("Starting asynchronous quick analysis...", encoding="utf-8")
+        state = {"started": False, "runs": 0}
+
+        def begin_quick_check():
+            state["started"] = True
+            window._start_analysis()
+
+        def check_quick_result():
+            if not state["started"] or window._query_operation_active:
+                return
+            status = window.statusBar().currentMessage()
+            if not status.startswith("Быстрый ML-прогноз завершён"):
+                quick_log.write_text(status, encoding="utf-8")
+                application.exit(3)
+                return
+            state["runs"] += 1
+            if state["runs"] < int(os.environ.get("PQO_SMOKE_RUNS", "3")):
+                begin_quick_check()
+                return
+            quick_log.write_text(
+                f"OK: {state['runs']} asynchronous quick analyses; "
+                + f"torch_imported={'torch' in sys.modules}; "
+                + status + "\n" + window.recommendation_text.toPlainText(),
+                encoding="utf-8",
+            )
+            application.exit(3 if "torch" in sys.modules else 0)
+
+        quick_timer = QTimer(window)
+        quick_timer.timeout.connect(check_quick_result)
+        quick_timer.start(200)
+        QTimer.singleShot(20, begin_quick_check)
+        QTimer.singleShot(90000, lambda: application.exit(4))
     exit_code = application.exec()
     crash_stream.close()
     return exit_code

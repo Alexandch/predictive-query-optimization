@@ -7,12 +7,37 @@ import pandas as pd
 
 from pqo.training import (
     MODEL_FEATURES,
+    prepare_prediction_frame,
     predict_query_time,
     train_xgboost,
 )
 
 
 class TrainingTests(unittest.TestCase):
+    def test_extended_training_keeps_legacy_contract_separate(self):
+        from pqo.sql_features import EXTENDED_SQL_FEATURES, extract_sql_features
+        from pqo.model_cache import load_joblib_model
+
+        frame = self._synthetic_frame()
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "data.csv"
+            output = Path(directory) / "model"
+            frame.to_csv(dataset, index=False)
+            train_xgboost(dataset, output, tune=False, feature_version="sql-v2")
+            artifact = load_joblib_model(output / "xgboost_query_time.joblib")
+            self.assertTrue(set(EXTENDED_SQL_FEATURES) <= set(artifact["model_features"]))
+            self.assertFalse(set(EXTENDED_SQL_FEATURES) & set(MODEL_FEATURES))
+            row = frame.iloc[0].to_dict()
+            row.update(extract_sql_features(row["sql_text"]).as_dict())
+            self.assertTrue(math.isfinite(predict_query_time(output / "xgboost_query_time.joblib", row)))
+            prepared = prepare_prediction_frame(frame, artifact)
+            self.assertEqual(list(prepared.columns), artifact["model_features"])
+            for name in EXTENDED_SQL_FEATURES:
+                self.assertEqual(prepared.iloc[0][name], row[name])
+                self.assertNotIn(name, frame.columns)
+            with self.assertRaisesRegex(ValueError, "features are missing"):
+                prepare_prediction_frame(frame.drop(columns=["estimated_total_cost"]), artifact)
+
     def _synthetic_frame(self) -> pd.DataFrame:
         root_types = ("Seq Scan", "Index Scan", "Hash Join", "Aggregate")
         rows = []

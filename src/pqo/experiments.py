@@ -105,7 +105,9 @@ def build_experiment_report(
     unique = frame.groupby(
         [GROUP_COLUMN, "sql_text"], as_index=False, sort=False
     ).agg(aggregation)
-    features = unique[artifact["model_features"]]
+    from .training import prepare_prediction_frame
+
+    features = prepare_prediction_frame(unique, artifact)
     actual = unique[TARGET_COLUMN].astype(float).to_numpy()
     predicted = artifact["pipeline"].predict(features)
     if artifact.get("target_transform") == "log1p":
@@ -190,7 +192,7 @@ def promote_candidate_model(
     filenames = (
         ("xgboost_query_time.joblib", "metrics.json", "feature_importance.json")
         if model_kind == "xgboost"
-        else ("dqn_index_advisor.pt", "metrics.json")
+        else ("dqn_index_advisor.pt", "dqn_index_advisor.npz", "metrics.json")
     )
     missing = [name for name in filenames if not (candidate / name).is_file()]
     if missing:
@@ -292,6 +294,7 @@ def export_history_records(
         "sequential_terminal_reason",
         "sequential_steps",
         "structural_feedback",
+        "baseline_timed_out",
     ]
     with destination.open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)

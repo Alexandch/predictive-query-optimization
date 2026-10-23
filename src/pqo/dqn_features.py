@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from functools import lru_cache
 
 from .config import DatabaseSettings
 from .database_features import collect_database_features
@@ -202,19 +203,45 @@ def _action_query_context(
     if action.kind is not IndexActionKind.CREATE or not sql_text:
         return [0.0] * 8
 
-    from sqlglot import exp, parse_one
+    where_columns, join_columns, order_columns, select_columns, table_references = (
+        _table_query_context(sql_text, action.schema_name, action.table_name)
+    )
+    leading = action.key_columns[0]
+    return [
+        float(sum(column in where_columns for column in action.key_columns)),
+        float(sum(column in join_columns for column in action.key_columns)),
+        float(sum(column in order_columns for column in action.key_columns)),
+        float(sum(column in select_columns for column in action.include_columns)),
+        float(leading in where_columns),
+        float(leading in join_columns),
+        float(leading in order_columns),
+        float(table_references),
+    ]
 
-    tree = parse_one(sql_text, read="postgres")
+
+@lru_cache(maxsize=64)
+def _parsed_query(sql_text):
+    from sqlglot import parse_one
+
+    # Private tree is only traversed, never returned to a rewriting operation.
+    return parse_one(sql_text, read="postgres")
+
+
+@lru_cache(maxsize=128)
+def _table_query_context(sql_text, schema_name, table_name):
+    from sqlglot import exp
+
+    tree = _parsed_query(sql_text)
     aliases = {
         table.alias_or_name
         for table in tree.find_all(exp.Table)
-        if (table.db or "public") == action.schema_name
-        and table.name == action.table_name
+        if (table.db or "public") == schema_name
+        and table.name == table_name
     }
     physical_tables = [
         table
         for table in tree.find_all(exp.Table)
-        if (table.db or "public") == action.schema_name
+        if (table.db or "public") == schema_name
     ]
     allow_unqualified = len(physical_tables) == 1
 
@@ -238,23 +265,14 @@ def _action_query_context(
         for select in tree.find_all(exp.Select)
         for expression in select.expressions
     )
-    leading = action.key_columns[0]
     table_references = sum(
         1
         for table in tree.find_all(exp.Table)
-        if (table.db or "public") == action.schema_name
-        and table.name == action.table_name
+        if (table.db or "public") == schema_name
+        and table.name == table_name
     )
-    return [
-        float(sum(column in where_columns for column in action.key_columns)),
-        float(sum(column in join_columns for column in action.key_columns)),
-        float(sum(column in order_columns for column in action.key_columns)),
-        float(sum(column in select_columns for column in action.include_columns)),
-        float(leading in where_columns),
-        float(leading in join_columns),
-        float(leading in order_columns),
-        float(table_references),
-    ]
+    return (frozenset(where_columns), frozenset(join_columns),
+            frozenset(order_columns), frozenset(select_columns), table_references)
 
 
 def _hashed_columns(columns: tuple[str, ...]) -> list[float]:
@@ -376,9 +394,9 @@ def _non_sargable_action_columns(
 ) -> set[str]:
     if not sql_text:
         return set()
-    from sqlglot import exp, parse_one
+    from sqlglot import exp
 
-    tree = parse_one(sql_text, read="postgres")
+    tree = _parsed_query(sql_text)
     aliases = {
         table.alias_or_name
         for table in tree.find_all(exp.Table)

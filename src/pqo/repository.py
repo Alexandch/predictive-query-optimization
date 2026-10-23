@@ -252,6 +252,21 @@ def save_sequential_analysis(
     sql_hash = hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest()
     if connection is None:
         with psycopg.connect(**settings.connection_kwargs()) as owned_connection:
+            # Upgrade only our history schema; existing installations do not
+            # rerun Docker initialization scripts when the app is updated.
+            owned_connection.execute(
+                "SELECT set_config('lock_timeout', '5s', true)"
+            )
+            ready = owned_connection.execute(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = 'pqo' AND table_name = 'sequential_analysis' "
+                "AND column_name = 'baseline_timed_out')"
+            ).fetchone()[0]
+            if not ready:
+                owned_connection.execute(
+                    "ALTER TABLE pqo.sequential_analysis ADD COLUMN IF NOT EXISTS "
+                    "baseline_timed_out boolean NOT NULL DEFAULT false"
+                )
             return save_sequential_analysis(
                 normalized_sql,
                 plan,
@@ -272,7 +287,8 @@ def save_sequential_analysis(
                 ) VALUES (%s, %s, %s, 'completed', clock_timestamp(), %s)
                 RETURNING id
                 """,
-                (normalized_sql, sql_hash, source, plan.baseline_time_ms),
+                (normalized_sql, sql_hash, source,
+                 None if plan.baseline_timed_out else plan.baseline_time_ms),
             ).fetchone()[0]
         else:
             existing = connection.execute(
@@ -291,7 +307,7 @@ def save_sequential_analysis(
                     execution_time_ms = %s
                 WHERE id = %s
                 """,
-                (plan.baseline_time_ms, query_run_id),
+                (None if plan.baseline_timed_out else plan.baseline_time_ms, query_run_id),
             )
 
         sequential_analysis_id = connection.execute(
@@ -301,9 +317,9 @@ def save_sequential_analysis(
                 measured_improvement_ratio, storage_budget_bytes,
                 used_budget_bytes, candidate_count, decision_threshold,
                 minimum_baseline_time_ms, minimum_absolute_improvement_ms,
-                terminal_reason
+                terminal_reason, baseline_timed_out
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             ) RETURNING id
             """,
             (
@@ -319,6 +335,7 @@ def save_sequential_analysis(
                 plan.minimum_baseline_time_ms,
                 plan.minimum_absolute_improvement_ms,
                 plan.terminal_reason,
+                plan.baseline_timed_out,
             ),
         ).fetchone()[0]
 

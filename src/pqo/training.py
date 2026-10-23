@@ -108,6 +108,7 @@ def train_xgboost(
     tune: bool = True,
     target_transform: str = "log1p",
     template_balanced: bool = False,
+    feature_version: str = "legacy",
 ) -> TrainingMetrics:
     import joblib
     import numpy as np
@@ -127,6 +128,17 @@ def train_xgboost(
 
     frame = pd.read_csv(dataset_path)
     _validate_dataset(frame)
+    if feature_version not in {"legacy", "sql-v2"}:
+        raise ValueError("feature_version must be legacy or sql-v2")
+    numeric_features = list(NUMERIC_FEATURES)
+    if feature_version == "sql-v2":
+        from .sql_features import EXTENDED_SQL_FEATURES, extract_sql_features
+
+        derived = {text: extract_sql_features(text).as_dict() for text in frame.sql_text.unique()}
+        for name in EXTENDED_SQL_FEATURES:
+            frame[name] = frame.sql_text.map(lambda text: derived[text][name])
+        numeric_features += EXTENDED_SQL_FEATURES
+    model_features = numeric_features + CATEGORICAL_FEATURES
     if target_transform not in {"log1p", "identity"}:
         raise ValueError("target_transform must be 'log1p' or 'identity'")
 
@@ -134,15 +146,15 @@ def train_xgboost(
     inverse_target = np.expm1 if target_transform == "log1p" else lambda values: values
 
     raw_sample_count = len(frame)
-    aggregation = {feature: "first" for feature in MODEL_FEATURES}
+    aggregation = {feature: "first" for feature in model_features}
     aggregation[TARGET_COLUMN] = "median"
     frame = (
         frame.groupby([GROUP_COLUMN, "sql_text"], as_index=False, sort=False)
         .agg(aggregation)
     )
 
-    x = frame[MODEL_FEATURES].copy()
-    x[NUMERIC_FEATURES] = x[NUMERIC_FEATURES].apply(pd.to_numeric)
+    x = frame[model_features].copy()
+    x[numeric_features] = x[numeric_features].apply(pd.to_numeric)
     y = frame[TARGET_COLUMN].astype(float).to_numpy()
     template_groups = frame[GROUP_COLUMN].astype(str)
     query_groups = frame["sql_text"].astype(str)
@@ -164,7 +176,7 @@ def train_xgboost(
                 OneHotEncoder(handle_unknown="ignore", sparse_output=False),
                 CATEGORICAL_FEATURES,
             ),
-            ("numeric", "passthrough", NUMERIC_FEATURES),
+            ("numeric", "passthrough", numeric_features),
         ]
     )
     regressor = XGBRegressor(
@@ -302,7 +314,8 @@ def train_xgboost(
     destination.mkdir(parents=True, exist_ok=True)
     artifact: dict[str, Any] = {
         "pipeline": pipeline,
-        "model_features": MODEL_FEATURES,
+        "model_features": model_features,
+        "feature_version": feature_version,
         "target_column": TARGET_COLUMN,
         "target_transform": target_transform,
         "requires_query_execution": False,
@@ -332,12 +345,28 @@ def train_xgboost(
     return metrics
 
 
+def prepare_prediction_frame(frame, artifact):
+    """Reconstruct missing SQL-v2 columns in legacy CSVs without modifying them."""
+    from .sql_features import EXTENDED_SQL_FEATURES, extract_sql_features
+
+    names = artifact["model_features"]
+    missing = set(names).difference(frame.columns)
+    if missing:
+        if not missing <= set(EXTENDED_SQL_FEATURES) or "sql_text" not in frame:
+            raise ValueError(f"Prediction features are missing: {', '.join(sorted(missing))}")
+        frame = frame.copy()
+        derived = {text: extract_sql_features(text).as_dict() for text in frame.sql_text.unique()}
+        for name in missing:
+            frame[name] = frame.sql_text.map(lambda text: derived[text][name])
+    return frame[names]
+
+
 def predict_query_time(model_path: str | Path, features: dict[str, Any]) -> float:
-    import joblib
+    from .model_cache import load_joblib_model
     import numpy as np
     import pandas as pd
 
-    artifact = joblib.load(model_path)
+    artifact = load_joblib_model(model_path)
     missing = sorted(set(artifact["model_features"]).difference(features))
     if missing:
         raise ValueError(f"Prediction features are missing: {', '.join(missing)}")

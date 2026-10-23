@@ -49,6 +49,7 @@ class HistoryRecord:
     sequential_terminal_reason: str | None = None
     sequential_steps: tuple[HistorySequentialStep, ...] = ()
     structural_feedback: tuple[HistoryStructuralFeedback, ...] = ()
+    baseline_timed_out: bool = False
 
 
 def load_analysis_history(
@@ -108,6 +109,10 @@ def load_analysis_history(
         structural_feedback_column = (
             "structural_feedback.items" if structural_feedback_ready else "NULL"
         )
+        baseline_timeout_column = (
+            "COALESCE((to_jsonb(sequential)->>'baseline_timed_out')::boolean, false)"
+            if sequential_history_ready else "false"
+        )
         structural_feedback_join = (
             """
             LEFT JOIN LATERAL (
@@ -148,7 +153,8 @@ def load_analysis_history(
                 recommendation.index_columns,
                 recommendation.estimated_improvement,
                 {sequential_columns},
-                {structural_feedback_column}
+                {structural_feedback_column},
+                {baseline_timeout_column}
             FROM pqo.query_run AS qr
             LEFT JOIN pqo.execution_plan AS ep ON ep.query_run_id = qr.id
             LEFT JOIN LATERAL (
@@ -190,6 +196,7 @@ def load_analysis_history(
             measured_final_time_ms=row[11],
             measured_improvement_ratio=row[12],
             sequential_terminal_reason=row[13],
+            baseline_timed_out=bool(row[16]),
             sequential_steps=tuple(
                 HistorySequentialStep(
                     step_number=step["step_number"],

@@ -108,9 +108,9 @@ def _load_unique_predictions(dataset_path: str | Path, model_path: str | Path):
         [GROUP_COLUMN, "sql_text"], as_index=False, sort=False
     ).agg(aggregation)
     artifact = joblib.load(model_path)
-    predictions = artifact["pipeline"].predict(
-        unique[artifact["model_features"]]
-    )
+    from .training import prepare_prediction_frame
+
+    predictions = artifact["pipeline"].predict(prepare_prediction_frame(unique, artifact))
     if artifact.get("target_transform") == "log1p":
         predictions = np.expm1(predictions)
     unique["baseline_prediction_ms"] = np.maximum(

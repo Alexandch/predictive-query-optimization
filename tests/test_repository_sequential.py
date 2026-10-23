@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from contextlib import nullcontext
 
 from pqo.index_actions import IndexAction
@@ -65,6 +66,15 @@ def _plan():
 
 
 class SequentialRepositoryTests(unittest.TestCase):
+    def test_timeout_does_not_become_exact_execution_time(self):
+        connection = _Connection()
+        save_sequential_analysis(
+            "SELECT 1", replace(_plan(), baseline_timed_out=True),
+            connection=connection,
+        )
+        self.assertIsNone(connection.calls[0][1][-1])
+        self.assertTrue(connection.calls[1][1][-1])
+
     def test_saves_new_query_plan_and_step_atomically(self):
         connection = _Connection()
 

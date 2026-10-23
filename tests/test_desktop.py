@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import unittest
+import threading
+import time
 from unittest.mock import patch
 from datetime import datetime, timezone
 
@@ -15,6 +17,7 @@ from pqo.desktop import (
     DEFAULT_STRATEGY_MODEL,
     DEFAULT_XGB_MODEL,
     MainWindow,
+    Worker,
     _format_index_action,
     _format_index_impact,
     _format_prediction,
@@ -45,9 +48,60 @@ from pqo.sql_rewrite import (
 
 
 class DesktopTests(unittest.TestCase):
+    def test_no_candidates_are_submitted_to_the_journal_without_executing_sql(self):
+        window = MainWindow()
+        try:
+            window.rewrite_journal_check.blockSignals(True)
+            window.rewrite_journal_check.setChecked(True)
+            window.sql_editor.setPlainText("SELECT 1")
+            window._start_worker = lambda worker: None
+            with patch("pqo.desktop.Worker") as factory:
+                window._start_rewrite_analysis()
+            self.assertIn("journal_directory", factory.call_args.kwargs)
+            self.assertEqual(factory.call_args.kwargs["journal_source"], "desktop")
+            self.assertTrue(window._query_operation_active)
+        finally:
+            window._set_query_actions_enabled(True)
+            window.close()
+
+    def test_editing_right_sql_requires_reverification_and_keeps_left(self):
+        window = MainWindow()
+        try:
+            original = "SELECT * FROM (SELECT 1 AS x ORDER BY x) q"
+            rewritten = "SELECT * FROM (SELECT 1 AS x) q"
+            window.sql_editor.setPlainText(original)
+            window._set_verified_rewrite(original, rewritten, "Проверено")
+            self.assertTrue(window.apply_rewrite_button.isEnabled())
+            window.rewrite_editor.setPlainText("SELECT 2 AS x")
+            self.assertEqual(window.sql_editor.toPlainText(), original)
+            self.assertFalse(window.apply_rewrite_button.isEnabled())
+            self.assertTrue(window.compare_variant_button.isEnabled())
+            window._set_query_actions_enabled(False)
+            self.assertFalse(window.compare_variant_button.isEnabled())
+            self.assertTrue(window.rewrite_editor.isReadOnly())
+            self.assertTrue(window.sql_editor.isReadOnly())
+            window._set_query_actions_enabled(True)
+        finally:
+            window.close()
+
     @classmethod
     def setUpClass(cls):
         cls.application = QApplication.instance() or QApplication([])
+
+    def test_workers_use_python_threads_and_release_after_queued_completion(self):
+        window = MainWindow()
+        observed = []
+        worker = Worker(lambda: observed.append(threading.current_thread().name))
+        try:
+            window._start_worker(worker)
+            deadline = time.monotonic() + 5
+            while window._active_workers and time.monotonic() < deadline:
+                self.application.processEvents()
+                time.sleep(0.005)
+            self.assertEqual(observed, ["pqo-worker"])
+            self.assertFalse(window._active_workers)
+        finally:
+            window.close()
 
     def test_main_window_contains_complete_workflow(self):
         window = MainWindow()
@@ -72,6 +126,9 @@ class DesktopTests(unittest.TestCase):
                 "Проверить безопасное переписывание SQL",
             )
             self.assertTrue(window.analysis_scroll.widgetResizable())
+            self.assertEqual(window.sql_splitter.count(), 2)
+            self.assertEqual(window.rewrite_journal_table.columnCount(), 8)
+            self.assertFalse(window.compare_variant_button.isEnabled())
             self.assertFalse(window.apply_indexes_button.isEnabled())
             self.assertFalse(window.rollback_indexes_button.isEnabled())
             self.assertFalse(window.apply_rewrite_button.isEnabled())
@@ -100,6 +157,7 @@ class DesktopTests(unittest.TestCase):
             rewritten = "SELECT * FROM (SELECT id FROM aviation.flights) q"
             window.sql_editor.setPlainText(original)
             window._set_verified_rewrite(normalized_original, rewritten, "Проверено.")
+            self.assertEqual(window.rewrite_editor.toPlainText(), rewritten)
             window._start_rewrite_control_measurement = lambda: None
 
             self.assertTrue(window.apply_rewrite_button.isEnabled())
@@ -136,6 +194,24 @@ class DesktopTests(unittest.TestCase):
             window._set_query_actions_enabled(True)
             self.assertTrue(window.analyze_button.isEnabled())
             self.assertTrue(window.rollback_rewrite_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_cancel_deep_analysis_keeps_controls_locked_until_worker_finishes(self):
+        from pqo.analysis_control import AnalysisControl
+
+        window = MainWindow()
+        try:
+            window._deep_control = AnalysisControl()
+            control = window._deep_control
+            window._set_query_actions_enabled(False)
+            window._cancel_deep_analysis()
+            self.assertTrue(control.cancelled.is_set())
+            self.assertFalse(window.analyze_button.isEnabled())
+            window._deep_analysis_failed("AnalysisCancelled: cancelled")
+            self.assertTrue(window.analyze_button.isEnabled())
+            self.assertIsNone(window._deep_control)
+            self.assertIn("откачены", window.recommendation_text.toPlainText())
         finally:
             window.close()
 
@@ -221,7 +297,9 @@ class DesktopTests(unittest.TestCase):
             text = window.recommendation_text.toPlainText()
             self.assertIn("ФАКТИЧЕСКАЯ ПРОВЕРКА НЕ ЗАПУСКАЛАСЬ", text)
             self.assertIn("PostgreSQL не выполнялся", text)
-            self.assertIn("структурной переработке", text)
+            self.assertIn("Проверены 7 правил", text)
+            self.assertIn("ввести справа", text)
+            self.assertNotIn("Обнаруженная предварительная агрегация", text)
             self.assertNotIn("ускоряющий вариант не найден", text)
         finally:
             window.close()
@@ -275,11 +353,24 @@ class DesktopTests(unittest.TestCase):
             uncalibrated_time_ms=11.4,
             calibration_factor=4.1 / 11.4,
             calibration_sample_count=1,
+            estimate_source="database_profile",
         )
 
         text = _format_prediction(prediction)
 
         self.assertIn("прогноз: ML + профиль БД", text)
+
+    def test_previous_measurement_is_not_labelled_as_model_prediction(self):
+        prediction = QueryTimePrediction(
+            sql_text="SELECT 1", predicted_time_ms=777.77,
+            estimated_total_cost=1, estimated_plan_rows=1,
+            root_node_type="Result", plan_node_count=1,
+            uncalibrated_time_ms=1779.01, calibration_factor=0.437,
+            calibration_sample_count=1, estimate_source="exact_history",
+        )
+        text = _format_prediction(prediction)
+        self.assertIn("измерениям этого SQL", text)
+        self.assertNotIn("прогноз:", text)
         self.assertNotIn("до калибровки", text)
 
     def test_index_impact_discloses_write_and_storage_tradeoffs(self):
@@ -330,6 +421,33 @@ class DesktopTests(unittest.TestCase):
 
         self.assertEqual(plan.baseline_min_time_ms, 4.0)
         self.assertEqual(plan.baseline_max_time_ms, 8.0)
+
+    def test_deep_timeout_is_shown_as_lower_bound_without_error_dialog(self):
+        from pqo.sequential_recommendation import SequentialRecommendationPlan
+
+        window = MainWindow()
+        try:
+            plan = SequentialRecommendationPlan(
+                steps=(),
+                baseline_time_ms=30_000.0,
+                final_time_ms=30_000.0,
+                storage_budget_bytes=1024,
+                used_budget_bytes=0,
+                candidate_count=1,
+                decision_threshold=0.1,
+                minimum_baseline_time_ms=5.0,
+                minimum_absolute_improvement_ms=1.0,
+                terminal_reason="statement_timeout",
+                baseline_timed_out=True,
+            )
+
+            window._show_sequential_analysis(plan)
+
+            self.assertIn("более 30000 мс", window.predicted_value.text())
+            self.assertIn("Транзакция восстановлена", window.recommendation_text.toPlainText())
+            self.assertTrue(window.deep_analyze_button.isEnabled())
+        finally:
+            window.close()
 
     def test_structural_recommendation_is_readable(self):
         text = _format_structural_recommendations(

@@ -9,6 +9,7 @@ from statistics import median
 from time import perf_counter
 
 from .config import DatabaseSettings
+from .analysis_control import AnalysisControl
 from .explain import _assert_read_only_query
 from .index_actions import (
     IndexAction,
@@ -31,6 +32,7 @@ class SequentialIndexState:
     cumulative_improvement_ratio: float
     done: bool
     baseline_samples_ms: tuple[float, ...] = ()
+    baseline_timed_out: bool = False
 
     @property
     def remaining_budget_bytes(self) -> int:
@@ -68,6 +70,7 @@ class SequentialIndexEnvironment:
         creation_penalty_weight: float = 0.01,
         budget_violation_penalty: float = 0.10,
         warmup_runs: int = 1,
+        control: AnalysisControl | None = None,
     ) -> None:
         if repetitions < 1:
             raise ValueError("repetitions must be positive")
@@ -97,6 +100,7 @@ class SequentialIndexEnvironment:
         self.creation_penalty_weight = creation_penalty_weight
         self.budget_violation_penalty = budget_violation_penalty
         self.warmup_runs = warmup_runs
+        self.control = control or AnalysisControl()
 
     @contextmanager
     def episode(self, sql_text: str, connection=None):
@@ -121,22 +125,32 @@ class SequentialIndexEnvironment:
 
     def _start_episode(self, sql_text: str, connection):
         query = _assert_read_only_query(sql_text)
-        connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(%s))",
-            ("pqo-sequential-index-experiment",),
-        )
-        connection.execute(
-            "SELECT set_config('statement_timeout', %s, true)",
-            (f"{self.statement_timeout_ms}ms",),
-        )
-        for _ in range(self.warmup_runs):
-            self._measure(connection, query)
-        times, _ = self._measure(connection, query)
-        baseline = median(times)
         candidates = generate_sequential_index_actions(
             query,
             allowed_schemas=self.allowed_schemas,
         )
+        self._configure_experiment_transaction(connection)
+        baseline_timed_out = False
+        try:
+            for _ in range(self.warmup_runs):
+                self.control.report("Прогрев исходного запроса…")
+                self._measure(connection, query, repetitions=1)
+            self.control.report("Измерение исходного запроса…")
+            times, _ = self._measure(connection, query)
+            baseline = median(times)
+        except Exception as exc:
+            self.control.check()
+            if not _is_statement_timeout(exc):
+                raise
+            # PostgreSQL marks the transaction as failed after statement_timeout.
+            # Recover it before creating trial indexes.  The timeout itself is a
+            # useful censored baseline: the real runtime is at least this value.
+            connection.rollback()
+            self._configure_experiment_transaction(connection)
+            times = []
+            baseline = float(self.statement_timeout_ms)
+            baseline_timed_out = True
+
         return SequentialIndexEpisode(
             environment=self,
             connection=connection,
@@ -154,13 +168,35 @@ class SequentialIndexEnvironment:
                 cumulative_improvement_ratio=0.0,
                 done=False,
                 baseline_samples_ms=tuple(times),
+                baseline_timed_out=baseline_timed_out,
             ),
         )
 
-    def _measure(self, connection, query: str) -> tuple[list[float], object]:
+    def _configure_experiment_transaction(self, connection) -> None:
+        self.control.report("Ожидание доступа к эксперименту…")
+        connection.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (f"{self.statement_timeout_ms}ms",),
+        )
+        connection.execute(
+            "SELECT set_config('lock_timeout', %s, true)",
+            (f"{min(self.statement_timeout_ms, 5000)}ms",),
+        )
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            ("pqo-sequential-index-experiment",),
+        )
+        connection.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (f"{self.statement_timeout_ms}ms",),
+        )
+
+    def _measure(self, connection, query: str, *, repetitions=None) -> tuple[list[float], object]:
         times: list[float] = []
         last_plan = None
-        for _ in range(self.repetitions):
+        count = self.repetitions if repetitions is None else repetitions
+        for number in range(count):
+            self.control.report(f"Выполнение запроса: замер {number + 1}/{count}…")
             row = connection.execute(
                 f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {query}"
             ).fetchone()
@@ -236,6 +272,10 @@ class SequentialIndexEpisode:
                 sql.SQL(", ").join(map(sql.Identifier, action.include_columns))
             )
         started = perf_counter()
+        self.environment.control.report(
+            f"Создание пробного индекса {previous.step + 1}/{previous.max_steps}: "
+            f"{action.schema_name}.{action.table_name}…"
+        )
         self.connection.execute(statement)
         creation_time_ms = (perf_counter() - started) * 1000.0
         index_tree = self.connection.execute(
@@ -274,6 +314,7 @@ class SequentialIndexEpisode:
                 terminal_reason="budget_exceeded",
             )
 
+        self.environment.control.report("Измерение запроса с пробным индексом…")
         candidate_times, plan = self.environment._measure(self.connection, self.query)
         self.connection.execute(
             sql.SQL("RELEASE SAVEPOINT {}").format(sql.Identifier(savepoint))
@@ -320,6 +361,7 @@ class SequentialIndexEpisode:
             cumulative_improvement_ratio=cumulative,
             done=done,
             baseline_samples_ms=previous.baseline_samples_ms,
+            baseline_timed_out=previous.baseline_timed_out,
         )
         return SequentialIndexTransition(
             previous_state=previous,
@@ -351,6 +393,7 @@ class SequentialIndexEpisode:
             cumulative_improvement_ratio=state.cumulative_improvement_ratio,
             done=done,
             baseline_samples_ms=state.baseline_samples_ms,
+            baseline_timed_out=state.baseline_timed_out,
         )
 
     def _index_name(self, action: IndexAction, step: int) -> str:
@@ -370,3 +413,8 @@ def _plan_index_names(value) -> set[str]:
         for child in value:
             names.update(_plan_index_names(child))
     return names
+
+
+def _is_statement_timeout(exc: Exception) -> bool:
+    """Recognize a PostgreSQL statement timeout without masking other errors."""
+    return getattr(exc, "sqlstate", None) == "57014"

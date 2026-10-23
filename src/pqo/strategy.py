@@ -367,10 +367,10 @@ def train_strategy_classifier(
 
 def predict_strategy(model_path: str | Path, strategy_features: list[float]):
     """Return the selected strategy and probabilities for every strategy."""
-    import joblib
+    from .model_cache import load_joblib_model
     import numpy as np
 
-    artifact = joblib.load(model_path)
+    artifact = load_joblib_model(model_path)
     feature_names = artifact["feature_names"]
     if len(strategy_features) != len(feature_names):
         raise ValueError("Strategy feature count does not match the model artifact")

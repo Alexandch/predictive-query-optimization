@@ -26,6 +26,7 @@ class QueryTimePrediction:
     calibration_sample_count: int
     error_mae_ms: float | None = None
     error_source: str | None = None
+    estimate_source: str = "ml"
 
     @property
     def uncertainty_lower_ms(self) -> float | None:
@@ -77,6 +78,7 @@ def predict_sql_query(
     predicted_time_ms = uncalibrated_time_ms
     calibration_factor = 1.0
     calibration_sample_count = 0
+    estimate_source = "ml"
     error_mae_ms = model_error_mae_ms(model_path)
     error_source = "контрольная MAE модели" if error_mae_ms is not None else None
     if (
@@ -87,6 +89,7 @@ def predict_sql_query(
             apply_calibration,
             factor_for_query,
             load_profile,
+            query_specific_error_ms,
             validate_profile,
         )
 
@@ -99,7 +102,14 @@ def predict_sql_query(
             profile, sql_text, uncalibrated_time_ms
         )
         calibration_sample_count = profile.sample_count
-        if profile.improves_mae and profile.calibrated_mae_ms is not None:
+        local_error = query_specific_error_ms(profile, sql_text)
+        if local_error is not None:
+            estimate_source = "exact_history"
+            error_mae_ms = local_error
+            error_source = "предыдущие измерения этого SQL"
+        elif calibration_factor != 1.0:
+            estimate_source = "database_profile"
+        if local_error is None and profile.improves_mae and profile.calibrated_mae_ms is not None:
             error_mae_ms = profile.calibrated_mae_ms
             error_source = (
                 f"локальная калибровка, {profile.unique_query_count} разных SQL"
@@ -117,5 +127,6 @@ def predict_sql_query(
         calibration_sample_count=calibration_sample_count,
         error_mae_ms=error_mae_ms,
         error_source=error_source,
+        estimate_source=estimate_source,
     )
 

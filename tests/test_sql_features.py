@@ -4,6 +4,28 @@ from pqo.sql_features import extract_sql_features
 
 
 class SQLFeatureTests(unittest.TestCase):
+    def test_separates_ctes_windows_and_distinct_aggregates(self):
+        query = """
+            WITH summary AS MATERIALIZED (
+                SELECT product_id, COUNT(DISTINCT order_id) AS orders,
+                       SUM(quantity) FILTER (WHERE quantity > 1) AS units
+                FROM retail.order_items GROUP BY product_id
+            )
+            SELECT product_id, DENSE_RANK() OVER (ORDER BY orders DESC),
+                   AVG(orders) OVER (PARTITION BY units)
+            FROM summary
+        """
+        features = extract_sql_features(query)
+        self.assertEqual(features.cte_count, 1)
+        self.assertEqual(features.materialized_cte_count, 1)
+        self.assertEqual(features.cte_reference_count, 1)
+        self.assertEqual(features.window_function_count, 2)
+        self.assertEqual(features.window_aggregate_count, 1)
+        self.assertEqual(features.ranking_window_count, 1)
+        self.assertEqual(features.distinct_aggregate_count, 1)
+        self.assertEqual(features.aggregate_filter_count, 1)
+        self.assertEqual(features.group_key_count, 1)
+
     def test_extracts_complex_query_features(self):
         query = """
             SELECT DISTINCT b.book_ref, COUNT(*)

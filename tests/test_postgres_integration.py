@@ -2,9 +2,12 @@ import hashlib
 import os
 import tempfile
 import unittest
+from threading import Timer
+from time import monotonic
 from pathlib import Path
 
 from pqo.analysis_service import analyze_query
+from pqo.analysis_control import AnalysisCancelled, AnalysisControl
 from pqo.config import DatabaseSettings
 from pqo.dataset import collect_sample
 from pqo.explain import collect_explain
@@ -15,7 +18,8 @@ from pqo.managed_indexes import apply_verified_indexes, rollback_verified_indexe
 from pqo.query_generator import AviationQueryGenerator
 from pqo.sequential_recommendation import recommend_sequential_indexes
 from pqo.sequential_environment import SequentialIndexEnvironment
-from pqo.sql_rewrite import evaluate_sql_rewrites
+from pqo.sql_rewrite import evaluate_sql_rewrites, evaluate_sql_variant
+from pqo.rewrite_journal import iter_journal, journal_summary
 from pqo.structural_feedback import (
     RecommendationDecision,
     record_recommendation_decision,
@@ -38,6 +42,166 @@ from pqo.structural_validation import (
 )
 class PostgreSQLIntegrationTests(unittest.TestCase):
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+    def test_rewrite_journal_contains_plans_and_raw_paired_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = evaluate_sql_variant(
+                "SELECT x FROM (VALUES (1),(1),(2)) v(x)",
+                "SELECT 1 AS x UNION ALL SELECT 1 UNION ALL SELECT 2",
+                repetitions=2, minimum_baseline_time_ms=0,
+                minimum_absolute_improvement_ms=1000000,
+                journal_directory=directory,
+            )
+            self.assertIsNotNone(plan.journal_run_id)
+            self.assertIsNone(plan.journal_warning)
+            run = list(iter_journal(directory))[0]
+            self.assertEqual(run["status"], "completed")
+            self.assertIsNotNone(run["baseline_probe"])
+            self.assertGreaterEqual(run["environment"]["postgres_version"], 170000)
+            candidate = run["candidates"][0]
+            self.assertEqual(len(candidate["baseline_samples_ms"]), 2)
+            self.assertEqual(len(candidate["variant_samples_ms"]), 2)
+            self.assertEqual(len(candidate["measurements"]), 6)
+            self.assertEqual(set(candidate["estimated_plans"]), {"baseline", "variant"})
+            self.assertTrue(candidate["runtime_training_eligible"])
+            self.assertFalse(candidate["accepted"])
+
+    def test_rewrite_journal_preserves_baseline_timeout_without_zero_target(self):
+        import psycopg
+        settings = DatabaseSettings(statement_timeout_ms=30)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(psycopg.errors.QueryCanceled):
+                evaluate_sql_variant("SELECT 1 FROM pg_sleep(0.2)", "SELECT 1", settings,
+                                     minimum_baseline_time_ms=0, journal_directory=directory)
+            run = list(iter_journal(directory))[0]
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["error"]["stage"], "baseline_probe")
+            self.assertTrue(run["error"]["timed_out"])
+            self.assertIsNone(run["baseline_probe"])
+            self.assertFalse(journal_summary(directory)[0]["runtime_training_eligible"])
+
+    def test_rewrite_journal_distinguishes_candidate_verification_timeout(self):
+        settings = DatabaseSettings(statement_timeout_ms=30)
+        with tempfile.TemporaryDirectory() as directory:
+            plan = evaluate_sql_variant("SELECT 1", "SELECT 1 FROM pg_sleep(0.2)", settings,
+                                        minimum_baseline_time_ms=0, journal_directory=directory)
+            self.assertEqual(plan.terminal_reason, "verification_failed")
+            run = list(iter_journal(directory))[0]
+            candidate = run["candidates"][0]
+            self.assertEqual(candidate["error"]["stage"], "equivalence")
+            self.assertTrue(candidate["error"]["timed_out"])
+            self.assertIsNone(candidate["equivalence"])
+            self.assertIsNone(candidate["rewritten_time_ms"])
+            self.assertFalse(candidate["runtime_training_eligible"])
+
+    def test_below_threshold_candidate_is_not_labeled_as_a_failed_optimization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = evaluate_sql_variant("SELECT 1", "SELECT 2", minimum_baseline_time_ms=1000000,
+                                        journal_directory=directory)
+            self.assertEqual(plan.terminal_reason, "below_runtime_threshold")
+            candidate = list(iter_journal(directory))[0]["candidates"][0]
+            self.assertEqual(candidate["status"], "not_checked")
+            self.assertIsNone(candidate["equivalence"])
+            self.assertIsNone(candidate["rewritten_time_ms"])
+            self.assertFalse(candidate["runtime_training_eligible"])
+
+    def test_manual_rewrite_checks_duplicates_and_measures_both_queries(self):
+        plan = evaluate_sql_variant(
+            "SELECT x FROM (VALUES (1),(1),(2)) v(x)",
+            "SELECT 1 AS x UNION ALL SELECT 1 UNION ALL SELECT 2",
+            repetitions=1, minimum_baseline_time_ms=0,
+            minimum_absolute_improvement_ms=0, minimum_improvement_ratio=0,
+        )
+        self.assertEqual(len(plan.evaluations), 1)
+        result = plan.evaluations[0]
+        self.assertTrue(result.equivalent)
+        self.assertIsNotNone(result.baseline_time_ms)
+        self.assertIsNotNone(result.rewritten_time_ms)
+
+    def test_manual_rewrite_rejects_changed_multiplicity(self):
+        plan = evaluate_sql_variant(
+            "SELECT x FROM (VALUES (1),(1),(2)) v(x)",
+            "SELECT DISTINCT x FROM (VALUES (1),(1),(2)) v(x)",
+            minimum_baseline_time_ms=0,
+        )
+        self.assertEqual(plan.terminal_reason, "result_mismatch")
+        self.assertFalse(plan.evaluations[0].equivalent)
+        self.assertIsNone(plan.recommended)
+
+    def test_reused_cte_hint_is_measured_and_equivalence_checked(self):
+        plan = evaluate_sql_rewrites(
+            "WITH x AS (SELECT id FROM (VALUES (1),(2)) v(id)) "
+            "SELECT a.id FROM x a JOIN x b ON a.id=b.id",
+            repetitions=1, minimum_baseline_time_ms=0,
+        )
+        evaluation = next(item for item in plan.evaluations if item.candidate.rule_id == "inline-reused-cte")
+        self.assertTrue(evaluation.equivalent)
+        self.assertIsNotNone(evaluation.rewritten_time_ms)
+
+    def test_cancellation_interrupts_running_sql_and_rolls_back_index(self):
+        import psycopg
+
+        settings = DatabaseSettings()
+        control = AnalysisControl()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            connection.execute("CREATE TEMP TABLE pqo_cancel_test (id integer)")
+            connection.commit()
+            timer = Timer(0.3, control.cancel)
+            started = monotonic()
+            try:
+                timer.start()
+                with self.assertRaises(AnalysisCancelled):
+                    with control.monitor(connection):
+                        try:
+                            connection.execute("CREATE INDEX pqo_cancel_trial ON pqo_cancel_test (id)")
+                            connection.execute("SELECT pg_sleep(10)")
+                        finally:
+                            connection.rollback()
+            finally:
+                timer.cancel()
+                timer.join()
+            self.assertLess(monotonic() - started, 5)
+            self.assertIsNone(connection.execute("SELECT to_regclass('pg_temp.pqo_cancel_trial')").fetchone()[0])
+            self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+
+    def test_advisory_lock_wait_is_bounded(self):
+        import psycopg
+
+        settings = DatabaseSettings(statement_timeout_ms=300)
+        environment = SequentialIndexEnvironment(settings)
+        with psycopg.connect(**settings.connection_kwargs()) as blocker:
+            blocker.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                            ("pqo-sequential-index-experiment",))
+            with psycopg.connect(**settings.connection_kwargs()) as connection:
+                started = monotonic()
+                with self.assertRaises(psycopg.Error) as raised:
+                    with environment.episode("SELECT 1", connection=connection):
+                        self.fail("Lock should not have been acquired")
+                self.assertIn(raised.exception.sqlstate, ("57014", "55P03"))
+                self.assertLess(monotonic() - started, 3)
+                self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+
+    def test_timeout_history_preserves_lower_bound(self):
+        import psycopg
+        from pqo.history import load_analysis_history
+
+        plan = recommend_sequential_indexes(
+            "SELECT pg_sleep(0.05)",
+            self.PROJECT_ROOT / "models/sequential_dqn/sequential_dqn_index_advisor.pt",
+            DatabaseSettings(statement_timeout_ms=10),
+            repetitions=1, minimum_baseline_time_ms=0, persist=True,
+        )
+        try:
+            record = next(item for item in load_analysis_history(limit=10000)
+                          if item.sequential_analysis_id == plan.sequential_analysis_id)
+            self.assertTrue(record.baseline_timed_out)
+            with psycopg.connect(**DatabaseSettings().connection_kwargs()) as connection:
+                actual = connection.execute("SELECT execution_time_ms FROM pqo.query_run WHERE id = %s",
+                                            (plan.query_run_id,)).fetchone()[0]
+                self.assertIsNone(actual)
+        finally:
+            with psycopg.connect(**DatabaseSettings().connection_kwargs()) as connection:
+                connection.execute("DELETE FROM pqo.query_run WHERE id = %s", (plan.query_run_id,))
 
     def test_regular_then_deep_analysis_without_calibration(self):
         query = (
@@ -70,6 +234,90 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertGreater(analysis.prediction.predicted_time_ms, 0)
         self.assertEqual(analysis.prediction.calibration_factor, 1.0)
         self.assertGreater(plan.baseline_time_ms, 0)
+
+    def test_prediction_callback_arrives_before_recommendations(self):
+        from unittest.mock import patch
+
+        received = []
+
+        def delayed_recommendations(*args, **kwargs):
+            self.assertEqual(len(received), 1)
+            return ()
+
+        with patch("pqo.analysis_service.analyze_query_structure", side_effect=delayed_recommendations):
+            result = analyze_query(
+                "SELECT 1", self.PROJECT_ROOT / "models/xgboost/xgboost_query_time.joblib",
+                self.PROJECT_ROOT / "models/dqn/dqn_index_advisor.pt",
+                persist=False, recommendation_threshold_ms=1e9,
+                prediction_ready=lambda prediction, latency: received.append((prediction, latency)),
+            )
+        self.assertEqual(received[0][0], result.prediction)
+        self.assertGreaterEqual(result.analysis_latency_ms, received[0][1])
+
+    def test_deep_analysis_returns_plan_when_baseline_hits_statement_timeout(self):
+        settings = DatabaseSettings(statement_timeout_ms=10)
+
+        plan = recommend_sequential_indexes(
+            "SELECT pg_sleep(0.05)",
+            self.PROJECT_ROOT
+            / "models/sequential_dqn/sequential_dqn_index_advisor.pt",
+            settings,
+            max_steps=1,
+            repetitions=1,
+            minimum_baseline_time_ms=0,
+            persist=False,
+        )
+
+        self.assertTrue(plan.baseline_timed_out)
+        self.assertEqual(plan.baseline_time_ms, 10.0)
+        self.assertEqual(plan.baseline_samples_ms, ())
+        self.assertEqual(plan.terminal_reason, "no_candidates")
+
+    def test_logistics_lateral_query_timeout_does_not_abort_deep_analysis(self):
+        query = """
+            SELECT s.shipment_id, s.tracking_code, c.carrier_name,
+                   origin.facility_name AS origin_name,
+                   destination.facility_name AS destination_name,
+                   latest_event.event_type, latest_event.event_time,
+                   ROUND(EXTRACT(EPOCH FROM (
+                       COALESCE(s.delivered_at, latest_event.event_time, now())
+                       - s.shipped_at
+                   )) / 3600.0, 2) AS hours_in_transit
+            FROM logistics.shipments AS s
+            JOIN logistics.carriers AS c ON c.carrier_id = s.carrier_id
+            JOIN logistics.facilities AS origin
+              ON origin.facility_id = s.origin_facility_id
+            JOIN logistics.facilities AS destination
+              ON destination.facility_id = s.destination_facility_id
+            LEFT JOIN LATERAL (
+                SELECT te.event_type, te.event_time, te.facility_id
+                FROM logistics.tracking_events AS te
+                WHERE te.shipment_id = s.shipment_id
+                ORDER BY te.event_time DESC
+                LIMIT 1
+            ) AS latest_event ON true
+            WHERE s.shipped_at IS NOT NULL
+              AND s.shipment_status IN (
+                  'picked_up', 'in_transit', 'delivered', 'exception'
+              )
+            ORDER BY hours_in_transit DESC NULLS LAST, s.promised_at
+            LIMIT 1000
+        """
+        settings = DatabaseSettings(statement_timeout_ms=100)
+
+        plan = recommend_sequential_indexes(
+            query,
+            self.PROJECT_ROOT
+            / "models/sequential_dqn/sequential_dqn_index_advisor.pt",
+            settings,
+            max_steps=1,
+            repetitions=1,
+            minimum_baseline_time_ms=0,
+            persist=False,
+        )
+
+        self.assertTrue(plan.baseline_timed_out)
+        self.assertGreater(plan.candidate_count, 0)
 
     def test_applies_measures_and_rolls_back_user_approved_index(self):
         query = (
@@ -512,6 +760,29 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertTrue(validation.rolled_back)
         self.assertGreater(validation.artifact_creation_time_ms, 0)
         self.assertEqual(remaining, 0)
+
+
+    def test_read_only_rewrite_batch_metadata_and_control_split(self):
+        from dataclasses import replace
+        import json
+        from pqo.rewrite_batch import BatchCase, collect_batch
+        from pqo.rewrite_learning import prepare_dataset
+        sql = "SELECT x FROM (VALUES (1), (2), (3)) AS v(x) WHERE x=1 OR x=2 ORDER BY x"
+        case = BatchCase("integration-case", "integration-family", "control", "or-equalities", sql)
+        settings = replace(DatabaseSettings.from_env(), statement_timeout_ms=1500)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "batch"
+            state = collect_batch([case], settings, output)
+            self.assertEqual(state["cases"][0]["status"], "completed")
+            run = list(iter_journal(output / "journal"))[0]
+            self.assertEqual(run["dataset_role"], "control")
+            self.assertEqual(run["collection"]["family_id"], "integration-family")
+            self.assertTrue(run["candidates"][0]["equivalence"])
+            split = json.loads((output / "split.json").read_text(encoding="utf-8"))
+            rows, report = prepare_dataset([output / "journal"], split)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(report["families"]["control"], 1)
+            self.assertFalse(report["training_ready"])
 
 
 if __name__ == "__main__":

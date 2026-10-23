@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
+from typing import Callable
 
 from .calibration import CalibrationObservation, calibrate_query
 from .config import DatabaseSettings
@@ -36,6 +38,8 @@ class QueryAnalysis:
     strategy_prediction: dict | None = None
     structural_recommendations: tuple[StructuralRecommendation, ...] = ()
     calibration_observation: CalibrationObservation | None = None
+    prediction_latency_ms: float | None = None
+    analysis_latency_ms: float | None = None
 
 
 def analyze_query_adaptive(
@@ -83,7 +87,9 @@ def analyze_query(
     persist: bool = True,
     calibration_profile_path: str | Path | None = None,
     strategy_model_path: str | Path | None = None,
+    prediction_ready: Callable[[QueryTimePrediction, float], None] | None = None,
 ) -> QueryAnalysis:
+    started = perf_counter()
     if recommendation_threshold_ms < 0:
         raise ValueError("recommendation_threshold_ms must be non-negative")
     settings = settings or DatabaseSettings.from_env()
@@ -104,6 +110,7 @@ def analyze_query(
     uncalibrated_time = predicted_time
     calibration_factor = 1.0
     calibration_sample_count = 0
+    estimate_source = "ml"
     error_mae_ms = model_error_mae_ms(xgboost_model_path)
     error_source = "контрольная MAE модели" if error_mae_ms is not None else None
     if (
@@ -127,6 +134,7 @@ def analyze_query(
         calibration_sample_count = profile.sample_count
         local_error = query_specific_error_ms(profile, normalized_sql)
         if local_error is not None:
+            estimate_source = "exact_history"
             error_mae_ms = local_error
             error_source = "автокалибровка точного SQL"
         elif profile.improves_mae and profile.calibrated_mae_ms is not None:
@@ -134,6 +142,8 @@ def analyze_query(
             error_source = (
                 f"локальная калибровка, {profile.unique_query_count} разных SQL"
             )
+        if estimate_source == "ml" and calibration_factor != 1.0:
+            estimate_source = "database_profile"
     prediction = QueryTimePrediction(
         sql_text=normalized_sql,
         predicted_time_ms=predicted_time,
@@ -146,7 +156,11 @@ def analyze_query(
         calibration_sample_count=calibration_sample_count,
         error_mae_ms=error_mae_ms,
         error_source=error_source,
+        estimate_source=estimate_source,
     )
+    prediction_latency_ms = (perf_counter() - started) * 1000
+    if prediction_ready is not None:
+        prediction_ready(prediction, prediction_latency_ms)
     structural_recommendations = analyze_query_structure(
         normalized_sql,
         plan_json=estimated_plan.plan_json,
@@ -260,4 +274,6 @@ def analyze_query(
         query_run_id=query_run_id,
         strategy_prediction=strategy_prediction,
         structural_recommendations=structural_recommendations,
+        prediction_latency_ms=prediction_latency_ms,
+        analysis_latency_ms=(perf_counter() - started) * 1000,
     )

@@ -72,7 +72,9 @@ def evaluate_xgboost_control(
         aggregation
     )
     artifact = joblib.load(model_path)
-    predicted = artifact["pipeline"].predict(unique[artifact["model_features"]])
+    from .training import prepare_prediction_frame
+
+    predicted = artifact["pipeline"].predict(prepare_prediction_frame(unique, artifact))
     if artifact.get("target_transform") == "log1p":
         predicted = np.expm1(predicted)
     predicted = np.maximum(0.0, predicted.astype(float))

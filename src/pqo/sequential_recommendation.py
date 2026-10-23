@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .config import DatabaseSettings
+from .analysis_control import AnalysisControl
 from .dqn_features import (
     SEQUENTIAL_ACTION_ENCODING,
     build_query_state,
@@ -55,6 +56,7 @@ class SequentialRecommendationPlan:
     sequential_analysis_id: int | None = None
     minimum_improvement_ratio: float = 0.05
     baseline_samples_ms: tuple[float, ...] = ()
+    baseline_timed_out: bool = False
 
     @property
     def baseline_min_time_ms(self) -> float:
@@ -93,6 +95,7 @@ def recommend_sequential_indexes(
     minimum_improvement_ratio: float = 0.05,
     persist: bool = False,
     query_run_id: int | None = None,
+    control: AnalysisControl | None = None,
 ) -> SequentialRecommendationPlan:
     """Measure a model-selected plan and discard all trial indexes on exit."""
     import psycopg
@@ -104,6 +107,8 @@ def recommend_sequential_indexes(
     ) < 0:
         raise ValueError("Recommendation time thresholds must be non-negative")
     settings = settings or DatabaseSettings.from_env()
+    control = control or AnalysisControl()
+    control.report("Загрузка модели рекомендаций…")
     resolved_model = str(Path(model_path).resolve())
     artifact = sequential_inference_metadata(resolved_model)
     if artifact.get("action_encoding_version") != SEQUENTIAL_ACTION_ENCODING:
@@ -115,11 +120,17 @@ def recommend_sequential_indexes(
         repetitions=repetitions,
         max_steps=max_steps,
         storage_budget_bytes=storage_budget_bytes,
+        control=control,
     )
     accepted_steps = []
     candidate_count = 0
     terminal_reason = "model_stop"
-    with psycopg.connect(**settings.connection_kwargs()) as connection:
+    with psycopg.connect(**settings.connection_kwargs()) as connection, control.monitor(connection):
+        connection.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (f"{settings.statement_timeout_ms}ms",),
+        )
+        control.report("Получение плана и признаков SQL…")
         base_state = build_query_state(sql_text, connection=connection)
         with environment.episode(sql_text, connection=connection) as episode:
             baseline_time = episode.state.baseline_time_ms
@@ -131,6 +142,7 @@ def recommend_sequential_indexes(
                 if terminal_reason == "below_runtime_threshold":
                     break
                 generated_actions = list(episode.available_actions)
+                control.report("Оценка индексных кандидатов моделью…")
                 encoded_state = encode_sequential_state(base_state, episode.state)
                 generated_contexts = [
                     collect_action_database_context(action, connection=connection)
@@ -189,6 +201,7 @@ def recommend_sequential_indexes(
                 try:
                     transition = episode.step(actions[best_index])
                 except Exception as exc:
+                    control.check()
                     if not _is_statement_timeout(exc):
                         raise
                     terminal_reason = "statement_timeout"
@@ -262,7 +275,9 @@ def recommend_sequential_indexes(
         terminal_reason=terminal_reason,
         minimum_improvement_ratio=minimum_improvement_ratio,
         baseline_samples_ms=episode.state.baseline_samples_ms,
+        baseline_timed_out=episode.state.baseline_timed_out,
     )
+    control.report("Пробные изменения откачены. Подготовка результата…")
     if persist:
         from .repository import save_sequential_analysis
 

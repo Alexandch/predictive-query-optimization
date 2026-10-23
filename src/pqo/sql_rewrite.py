@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from statistics import median
 
 from .config import DatabaseSettings
@@ -43,6 +44,8 @@ class SQLRewritePlan:
     minimum_absolute_improvement_ms: float
     minimum_improvement_ratio: float
     terminal_reason: str
+    journal_run_id: str | None = None
+    journal_warning: str | None = None
 
 
 def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
@@ -58,6 +61,11 @@ def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
             _rewrite_positive_counts,
         ),
         (
+            "count-zero-to-not-exists",
+            "Заменить проверку COUNT(*) = 0 на NOT EXISTS",
+            _rewrite_zero_counts,
+        ),
+        (
             "or-equality-to-in",
             "Заменить цепочку OR по одному столбцу на IN",
             _rewrite_or_equalities,
@@ -71,6 +79,11 @@ def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
             "subquery-order-without-limit",
             "Удалить лишний ORDER BY из подзапроса без LIMIT",
             _rewrite_subquery_orders,
+        ),
+        (
+            "inline-reused-cte",
+            "Проверить NOT MATERIALIZED для повторно используемого CTE",
+            _rewrite_reused_ctes,
         ),
         (
             "non-aggregate-having-filter",
@@ -94,6 +107,50 @@ def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
 
 
 def evaluate_sql_rewrites(
+    sql_text: str, settings: DatabaseSettings | None = None, *,
+    repetitions: int = 3, minimum_baseline_time_ms: float = 50.0,
+    minimum_absolute_improvement_ms: float = 5.0, minimum_improvement_ratio: float = 0.05,
+    _candidates: tuple[SQLRewriteCandidate, ...] | None = None,
+    journal_directory: str | Path | None = None,
+    journal_source: str = "api",
+    journal_metadata: dict | None = None,
+) -> SQLRewritePlan:
+    """Optionally record the entire experiment, including failures and skipped checks."""
+    from .rewrite_journal import RewriteJournalRun, error_record
+    settings = settings or DatabaseSettings.from_env()
+    recorder = None
+    if journal_directory is not None:
+        recorder = RewriteJournalRun(
+            journal_directory, sql_text, settings,
+            mode="automatic" if _candidates is None else "manual",
+            source=journal_source,
+            metadata=journal_metadata,
+            repetitions=repetitions,
+            thresholds={"baseline_ms": minimum_baseline_time_ms,
+                        "absolute_ms": minimum_absolute_improvement_ms,
+                        "relative": minimum_improvement_ratio},
+        )
+    try:
+        result = _evaluate_sql_rewrites(
+            sql_text, settings, repetitions=repetitions,
+            minimum_baseline_time_ms=minimum_baseline_time_ms,
+            minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
+            minimum_improvement_ratio=minimum_improvement_ratio,
+            _candidates=_candidates, _recorder=recorder,
+        )
+    except Exception as exc:
+        if recorder:
+            recorder.finish(error=error_record(exc, recorder.data["stage"]))
+            if recorder.warning:
+                exc.add_note(recorder.warning)
+        raise
+    if recorder:
+        recorder.finish(result)
+        result = replace(result, journal_run_id=recorder.data["run_id"], journal_warning=recorder.warning)
+    return result
+
+
+def _evaluate_sql_rewrites(
     sql_text: str,
     settings: DatabaseSettings | None = None,
     *,
@@ -101,6 +158,8 @@ def evaluate_sql_rewrites(
     minimum_baseline_time_ms: float = 50.0,
     minimum_absolute_improvement_ms: float = 5.0,
     minimum_improvement_ratio: float = 0.05,
+    _candidates: tuple[SQLRewriteCandidate, ...] | None = None,
+    _recorder=None,
 ) -> SQLRewritePlan:
     """Prove result equivalence and measure rewrite candidates in PostgreSQL."""
     import psycopg
@@ -116,7 +175,15 @@ def evaluate_sql_rewrites(
 
     settings = settings or DatabaseSettings.from_env()
     original_sql = _assert_read_only_query(sql_text)
-    candidates = generate_sql_rewrites(original_sql)
+    candidates = generate_sql_rewrites(original_sql) if _candidates is None else _candidates
+    if _recorder:
+        _recorder.candidates(candidates)
+    for candidate in candidates:
+        _assert_read_only_query(candidate.sql_text)
+    if _candidates is not None:
+        from sqlglot import parse_one
+        if any(parse_one(original_sql, read="postgres") == parse_one(item.sql_text, read="postgres") for item in candidates):
+            raise ValueError("Вариант SQL совпадает с исходным: изменилось только оформление")
     if not candidates:
         return SQLRewritePlan(
             original_sql,
@@ -129,14 +196,33 @@ def evaluate_sql_rewrites(
         )
 
     evaluations = []
+    if _recorder:
+        _recorder.stage("connection")
     with psycopg.connect(**settings.connection_kwargs()) as connection:
         with connection.transaction():
-            connection.execute("SET TRANSACTION READ ONLY")
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             connection.execute(
                 "SELECT set_config('statement_timeout', %s, true)",
                 (f"{settings.statement_timeout_ms}ms",),
             )
-            baseline_probe = _measure_query(connection, original_sql)
+            if _recorder:
+                safe_settings = ["work_mem", "jit", "max_parallel_workers_per_gather",
+                                 "random_page_cost", "seq_page_cost", "effective_cache_size"]
+                _recorder.data["environment"] = {"postgres_version": connection.info.server_version}
+                if _recorder.enabled:
+                    try:
+                        with connection.transaction():
+                            _recorder.data["environment"]["settings"] = {
+                                name: {"value": value, "unit": unit} for name, value, unit in connection.execute(
+                                    "SELECT name, setting, unit FROM pg_settings WHERE name = ANY(%s)", (safe_settings,)
+                                ).fetchall()
+                            }
+                    except Exception as exc:
+                        from .rewrite_journal import error_record
+                        _recorder.data["environment"]["settings_error"] = error_record(exc, "settings_metadata")
+                _recorder.stage("baseline_probe")
+            baseline_probe = _measure_query(connection, original_sql,
+                observer=(lambda time, plan: _recorder.measurement(None, "baseline", "probe", time, plan)) if _recorder else None)
             if baseline_probe < minimum_baseline_time_ms:
                 return SQLRewritePlan(
                     original_sql,
@@ -148,12 +234,24 @@ def evaluate_sql_rewrites(
                     "below_runtime_threshold",
                 )
 
-            for candidate in candidates:
+            if _recorder:
+                _recorder.stage("candidates")
+            for index, candidate in enumerate(candidates):
                 try:
                     with connection.transaction():
+                        if _recorder:
+                            _recorder.candidate_stage(index, "estimated_plans")
+                            _recorder.data["candidates"][index]["estimated_plans"] = {
+                                "baseline": connection.execute(f"EXPLAIN (FORMAT JSON) {original_sql}").fetchone()[0],
+                                "variant": connection.execute(f"EXPLAIN (FORMAT JSON) {candidate.sql_text}").fetchone()[0],
+                            }
+                            _recorder.candidate_stage(index, "equivalence")
                         equivalent = _queries_are_equivalent(
                             connection, original_sql, candidate.sql_text
                         )
+                        if _recorder:
+                            _recorder.data["candidates"][index]["equivalence"] = equivalent
+                            _recorder.flush()
                         if not equivalent:
                             evaluations.append(
                                 SQLRewriteEvaluation(
@@ -166,12 +264,17 @@ def evaluate_sql_rewrites(
                                     "result_mismatch",
                                 )
                             )
+                            if _recorder:
+                                _recorder.evaluation(index, evaluations[-1])
                             continue
+                        if _recorder:
+                            _recorder.candidate_stage(index, "measurement")
                         baseline_time, rewritten_time = _measure_pair(
                             connection,
                             original_sql,
                             candidate.sql_text,
                             repetitions,
+                            observer=(lambda side, phase, time, plan: _recorder.measurement(index, side, phase, time, plan)) if _recorder else None,
                         )
                 except Exception as exc:
                     evaluations.append(
@@ -185,6 +288,9 @@ def evaluate_sql_rewrites(
                             f"verification_error: {type(exc).__name__}: {exc}",
                         )
                     )
+                    if _recorder:
+                        from .rewrite_journal import error_record
+                        _recorder.evaluation(index, evaluations[-1], error_record(exc, _recorder.data["candidates"][index]["stage"]))
                     continue
 
                 absolute_gain = baseline_time - rewritten_time
@@ -204,6 +310,8 @@ def evaluate_sql_rewrites(
                         None if accepted else "improvement_too_small",
                     )
                 )
+                if _recorder:
+                    _recorder.evaluation(index, evaluations[-1])
 
     accepted_evaluations = [item for item in evaluations if item.accepted]
     recommended = (
@@ -221,8 +329,39 @@ def evaluate_sql_rewrites(
         minimum_baseline_time_ms,
         minimum_absolute_improvement_ms,
         minimum_improvement_ratio,
-        "recommended" if recommended is not None else "no_measured_improvement",
+        ("recommended" if recommended is not None else
+         "no_measured_improvement" if any(item.equivalent for item in evaluations) else
+         "result_mismatch" if any(item.rejection_reason == "result_mismatch" for item in evaluations) else
+         "verification_failed"),
     )
+
+
+def evaluate_sql_variant(original_sql: str, variant_sql: str,
+                         settings: DatabaseSettings | None = None, **kwargs) -> SQLRewritePlan:
+    """Verify and measure an explicitly supplied SELECT without replacing the source."""
+    return evaluate_sql_rewrites(
+        original_sql, settings, _candidates=(SQLRewriteCandidate(
+            "editor-variant", "Вариант из правого редактора", variant_sql),), **kwargs,
+    )
+
+
+def _rewrite_zero_counts(expression):
+    from sqlglot import exp
+    changed = False
+    def transform(node):
+        nonlocal changed
+        if not isinstance(node, exp.EQ):
+            return node
+        subquery = (node.this if _is_number(node.expression, 0) else
+                    node.expression if _is_number(node.this, 0) else None)
+        if not isinstance(subquery, exp.Subquery) or not _is_simple_count_star(subquery.this):
+            return node
+        select = subquery.this.copy()
+        select.set("expressions", [exp.Literal.number(1)])
+        select.set("order", None)
+        changed = True
+        return exp.Not(this=exp.Exists(this=select))
+    return expression.transform(transform), changed
 
 
 def _rewrite_or_equalities(expression):
@@ -322,8 +461,27 @@ def _rewrite_subquery_orders(expression):
     for select in expression.find_all(exp.Select):
         if select is expression:
             continue
-        if select.args.get("order") is not None and select.args.get("limit") is None:
+        distinct = select.args.get("distinct")
+        if (select.args.get("order") is not None
+                and select.args.get("limit") is None
+                and select.args.get("offset") is None
+                and not (distinct is not None and distinct.args.get("on") is not None)):
             select.set("order", None)
+            changed = True
+    return expression, changed
+
+
+def _rewrite_reused_ctes(expression):
+    """Ask PostgreSQL to inline eligible SELECT CTEs; measure instead of assuming a win."""
+    from sqlglot import exp
+    if any(with_clause.args.get("recursive") for with_clause in expression.find_all(exp.With)):
+        return expression, False
+    changed = False
+    tables = list(expression.find_all(exp.Table))
+    for cte in expression.find_all(exp.CTE):
+        references = sum(not table.db and table.name == cte.alias_or_name for table in tables)
+        if references > 1 and isinstance(cte.this, exp.Select) and cte.args.get("materialized") is not False:
+            cte.set("materialized", False)
             changed = True
     return expression, changed
 
@@ -334,6 +492,8 @@ def _rewrite_non_aggregate_having(expression):
 
     changed = False
     for select in expression.find_all(exp.Select):
+        if select.args.get("group") is None:
+            continue
         having = select.args.get("having")
         if having is None:
             continue
@@ -454,23 +614,26 @@ def _queries_are_equivalent(connection, original_sql: str, rewritten_sql: str) -
     return bool(connection.execute(comparison).fetchone()[0])
 
 
-def _measure_pair(connection, original_sql: str, rewritten_sql: str, repetitions: int):
-    _measure_query(connection, original_sql)
-    _measure_query(connection, rewritten_sql)
+def _measure_pair(connection, original_sql: str, rewritten_sql: str, repetitions: int, observer=None):
+    def measure(sql, side, phase):
+        return _measure_query(connection, sql,
+            observer=(lambda time, plan: observer(side, phase, time, plan)) if observer else None)
+    measure(original_sql, "baseline", "warmup")
+    measure(rewritten_sql, "variant", "warmup")
     baseline_times = []
     rewritten_times = []
     for repetition in range(repetitions):
         ordered = (
-            ((original_sql, baseline_times), (rewritten_sql, rewritten_times))
+            ((original_sql, baseline_times, "baseline"), (rewritten_sql, rewritten_times, "variant"))
             if repetition % 2 == 0
-            else ((rewritten_sql, rewritten_times), (original_sql, baseline_times))
+            else ((rewritten_sql, rewritten_times, "variant"), (original_sql, baseline_times, "baseline"))
         )
-        for query, destination in ordered:
-            destination.append(_measure_query(connection, query))
+        for query, destination, side in ordered:
+            destination.append(measure(query, side, "measurement"))
     return float(median(baseline_times)), float(median(rewritten_times))
 
 
-def _measure_query(connection, sql_text: str) -> float:
+def _measure_query(connection, sql_text: str, observer=None) -> float:
     row = connection.execute(
         f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql_text}"
     ).fetchone()
@@ -479,4 +642,6 @@ def _measure_query(connection, sql_text: str) -> float:
     actual_time = extract_plan_features(row[0]).actual_total_time_ms
     if actual_time is None:
         raise RuntimeError("EXPLAIN ANALYZE returned no execution time")
+    if observer:
+        observer(float(actual_time), row[0])
     return float(actual_time)

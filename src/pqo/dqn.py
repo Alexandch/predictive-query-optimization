@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import copy
+import hashlib
 from functools import lru_cache
 import json
 from pathlib import Path
@@ -275,6 +276,7 @@ def train_dqn(
         },
         destination / "dqn_index_advisor.pt",
     )
+    export_dqn_numpy_artifact(destination / "dqn_index_advisor.pt")
     (destination / "metrics.json").write_text(
         json.dumps(asdict(metrics), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -288,49 +290,78 @@ def predict_action_values(
     action_features: list[list[float]],
 ) -> list[float]:
     import numpy as np
-    import torch
 
-    model, feature_mean, feature_std = _load_prediction_model(
-        str(Path(model_path).resolve())
-    )
+    artifact = _numpy_artifact(model_path)
+    layers = tuple((artifact[f"weight_{index}"], artifact[f"bias_{index}"]) for index in (0, 2, 4))
+    feature_mean, feature_std = artifact["feature_mean"], artifact["feature_std"]
     combined = np.asarray(
         [state + action for action in action_features], dtype=np.float32
     )
-    normalized = (combined - feature_mean) / feature_std
-    with torch.no_grad():
-        values = model(torch.tensor(normalized, dtype=torch.float32)).squeeze(1)
-    return [float(value) for value in values]
+    values = (combined - feature_mean) / feature_std
+    # Inference must not enter the PyTorch dispatcher from a Qt QRunnable:
+    # CPython 3.13/Windows can abort in _PyThreadState_Attach there.
+    # This is the same Linear/ReLU network, not a replacement heuristic.
+    for index, (weight, bias) in enumerate(layers):
+        values = values @ weight.T + bias
+        if index < len(layers) - 1:
+            values = np.maximum(values, 0)
+    return values[:, 0].astype(float).tolist()
 
 
-@lru_cache(maxsize=8)
 def dqn_action_encoding_version(model_path: str | Path) -> str:
     """Return artifact encoding, treating pre-versioned models as aviation-v1."""
-    import torch
+    return str(_numpy_artifact(model_path)["action_encoding_version"].item())
 
+
+def export_dqn_numpy_artifact(model_path: str | Path) -> Path:
+    """Explicit offline export: runtime inference never imports PyTorch."""
+    import numpy as np
+    import torch
     from .dqn_features import LEGACY_ACTION_ENCODING
 
-    artifact = torch.load(
-        str(Path(model_path).resolve()),
-        map_location="cpu",
-        weights_only=True,
+    source = Path(model_path)
+    artifact = torch.load(source, map_location="cpu", weights_only=True)
+    weights = artifact["model_state_dict"]
+    arrays = {
+        f"{kind}_{index}": weights[f"{index}.{kind}"].detach().cpu().numpy()
+        for index in (0, 2, 4) for kind in ("weight", "bias")
+    }
+    destination = source.with_suffix(".npz")
+    np.savez_compressed(
+        destination, **arrays,
+        feature_mean=artifact["feature_mean"].detach().cpu().numpy(),
+        feature_std=artifact["feature_std"].detach().cpu().numpy(),
+        action_encoding_version=np.asarray(artifact.get("action_encoding_version", LEGACY_ACTION_ENCODING)),
+        source_sha256=np.asarray(hashlib.sha256(source.read_bytes()).hexdigest()),
     )
-    return str(artifact.get("action_encoding_version", LEGACY_ACTION_ENCODING))
+    return destination
+
+
+def _numpy_artifact(model_path):
+    source = Path(model_path).resolve()
+    sidecar = source.with_suffix(".npz")
+    if not sidecar.is_file():
+        raise ValueError("DQN NumPy artifact is missing; export it with export_dqn_numpy_artifact before inference")
+    return _load_numpy_artifact(str(source), source.stat().st_mtime_ns, source.stat().st_ctime_ns,
+                                str(sidecar), sidecar.stat().st_mtime_ns, sidecar.stat().st_ctime_ns)
 
 
 @lru_cache(maxsize=4)
-def _load_prediction_model(model_path: str):
-    import torch
-    from torch import nn
-
-    artifact = torch.load(model_path, map_location="cpu", weights_only=True)
-    model = _build_network(nn, artifact["input_size"])
-    model.load_state_dict(artifact["model_state_dict"])
-    model.eval()
-    return (
-        model,
-        artifact["feature_mean"].numpy(),
-        artifact["feature_std"].numpy(),
-    )
+def _load_numpy_artifact(source, modified, changed, sidecar, sidecar_modified, sidecar_changed):
+    import numpy as np
+    with np.load(sidecar, allow_pickle=False) as data:
+        artifact = {name: data[name].copy() for name in data.files}
+    if artifact["source_sha256"].item() != hashlib.sha256(Path(source).read_bytes()).hexdigest():
+        raise ValueError("DQN NumPy artifact does not match the selected model; re-export it")
+    size = artifact["feature_mean"].size
+    previous = size
+    for index, width in ((0, 128), (2, 64), (4, 1)):
+        if artifact[f"weight_{index}"].shape != (width, previous) or artifact[f"bias_{index}"].shape != (width,):
+            raise ValueError("DQN NumPy artifact has invalid dimensions")
+        previous = width
+    if artifact["feature_std"].shape != (size,) or np.any(artifact["feature_std"] <= 0):
+        raise ValueError("DQN NumPy artifact has invalid normalization")
+    return artifact
 
 
 def _build_network(nn, input_size: int):
