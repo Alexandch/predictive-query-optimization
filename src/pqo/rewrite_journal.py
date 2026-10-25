@@ -13,7 +13,7 @@ import time
 from uuid import uuid4
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "rules-v1.7"
+GENERATOR_VERSION = "rules-v1.9"
 
 
 def _now():

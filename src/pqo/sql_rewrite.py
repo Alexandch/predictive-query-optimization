@@ -90,6 +90,16 @@ def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
             "Перенести неагрегатный фильтр из HAVING в WHERE",
             _rewrite_non_aggregate_having,
         ),
+        (
+            "scalar-aggregate-to-grouped-join",
+            "Заменить построчный агрегат предварительной группировкой и LEFT JOIN",
+            _rewrite_scalar_aggregates,
+        ),
+        (
+            "distinct-inner-join-to-exists",
+            "Заменить размножающий строки INNER JOIN проверкой EXISTS",
+            _rewrite_distinct_join,
+        ),
     )
     candidates = []
     seen_sql = {normalized}
@@ -492,7 +502,8 @@ def _rewrite_non_aggregate_having(expression):
 
     changed = False
     for select in expression.find_all(exp.Select):
-        if select.args.get("group") is None:
+        group = select.args.get("group")
+        if group is None or any(group.args.get(key) for key in ("rollup", "cube", "grouping_sets", "totals")):
             continue
         having = select.args.get("having")
         if having is None:
@@ -518,6 +529,152 @@ def _rewrite_non_aggregate_having(expression):
             "having",
             exp.Having(this=_combine_and(retained, exp)) if retained else None,
         )
+        changed = True
+    return expression, changed
+
+
+def _plain_predicate(expression, aliases):
+    """Deliberately exclude functions, subqueries, windows and unqualified columns."""
+    from sqlglot import exp
+    allowed = (exp.Column, exp.Identifier, exp.Literal, exp.Null, exp.Boolean,
+               exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.And,
+               exp.Or, exp.Not, exp.Paren, exp.Is, exp.In, exp.Between, exp.Neg)
+    return all(type(node) in allowed and
+               (not isinstance(node, exp.Column) or
+                (node.table in aliases and not node.db and not node.catalog and not node.is_star))
+               for node in expression.walk())
+
+
+def _simple_source(select):
+    from sqlglot import exp
+    source = select.args.get("from_")
+    table = source.this if source is not None else None
+    return table if isinstance(table, exp.Table) and table.alias else None
+
+
+def _rewrite_scalar_aggregates(expression):
+    """A single equality-correlated scalar aggregate, with explicit output alias.
+
+    LEFT JOIN preserves parents without children; only COUNT needs COALESCE(0).
+    Unknown functions, nested scopes, multiple correlation keys and star outputs
+    are outside this rule. This still requires snapshot equivalence and timing.
+    """
+    from sqlglot import exp
+    changed = False
+    occupied = {node.alias_or_name.casefold() for node in expression.find_all(exp.Table)}
+    occupied.update(node.alias_or_name.casefold() for node in expression.find_all(exp.CTE))
+    for outer in list(expression.find_all(exp.Select)):
+        parent = _simple_source(outer)
+        if parent is None or any(outer.args.get(key) for key in ("joins", "group", "having", "distinct", "qualify")):
+            continue
+        # Adding a derived relation must not change SELECT * or evaluation of
+        # volatile/window expressions. Keep other projections to named columns.
+        if any(not (isinstance(item, exp.Column) and item.table == parent.alias and not item.is_star)
+               and not (isinstance(item, exp.Alias) and isinstance(item.this, exp.Subquery))
+               for item in outer.expressions):
+            continue
+        where = outer.args.get("where")
+        if where is not None and not _plain_predicate(where.this, {parent.alias}):
+            continue
+        for projection in list(outer.expressions):
+            if not isinstance(projection, exp.Alias) or not isinstance(projection.this, exp.Subquery):
+                continue
+            inner = projection.this.this
+            if not isinstance(inner, exp.Select) or len(inner.expressions) != 1:
+                continue
+            child = _simple_source(inner)
+            if child is None or child.alias == parent.alias or any(inner.args.get(key) for key in (
+                "joins", "group", "having", "distinct", "limit", "offset", "qualify", "order", "with_")):
+                continue
+            aggregate = inner.expressions[0]
+            if type(aggregate) not in (exp.Count, exp.Sum, exp.Avg, exp.Min, exp.Max):
+                continue
+            argument = aggregate.this
+            if not (isinstance(argument, exp.Column) and argument.table == child.alias and not argument.is_star
+                    or isinstance(aggregate, exp.Count) and isinstance(argument, exp.Star)):
+                continue
+            if any(value for key, value in aggregate.args.items() if key not in {"this", "big_int"}):
+                continue
+            condition = inner.args.get("where")
+            if condition is None:
+                continue
+            terms = _flatten_boolean(condition.this, exp.And)
+            correlations, local = [], []
+            for term in terms:
+                if isinstance(term, exp.EQ) and isinstance(term.this, exp.Column) and isinstance(term.expression, exp.Column):
+                    left, right = term.this, term.expression
+                    if left.table == parent.alias and right.table == child.alias:
+                        left, right = right, left
+                    if left.table == child.alias and right.table == parent.alias and _plain_predicate(term, {parent.alias, child.alias}):
+                        correlations.append((left, right))
+                        continue
+                local.append(term)
+            if len(correlations) != 1 or any(not _plain_predicate(term, {child.alias}) for term in local):
+                continue
+            child_key, parent_key = correlations[0]
+            if any(column.table != child.alias or column.is_star for column in aggregate.find_all(exp.Column)):
+                continue
+            suffix = 1
+            while f"_pqo_agg_{suffix}".casefold() in occupied:
+                suffix += 1
+            alias = f"_pqo_agg_{suffix}"
+            occupied.add(alias.casefold())
+            grouped = exp.Select(expressions=[
+                exp.alias_(child_key.copy(), "_pqo_key"),
+                exp.alias_(aggregate.copy(), "_pqo_value"),
+            ])
+            grouped.set("from_", exp.From(this=child.copy()))
+            grouped.set("group", exp.Group(expressions=[child_key.copy()]))
+            if local:
+                grouped.set("where", exp.Where(this=_combine_and(local, exp)))
+            derived = exp.Subquery(this=grouped, alias=exp.TableAlias(this=exp.to_identifier(alias)))
+            join = exp.Join(this=derived, side="LEFT", on=exp.EQ(
+                this=exp.column("_pqo_key", table=alias), expression=parent_key.copy()))
+            outer.set("joins", [*(outer.args.get("joins") or []), join])
+            value = exp.column("_pqo_value", table=alias)
+            if isinstance(aggregate, exp.Count):
+                value = exp.Coalesce(this=value, expressions=[exp.Literal.number(0)])
+            projection.set("this", value)
+            changed = True
+    return expression, changed
+
+
+def _rewrite_distinct_join(expression):
+    """Keep DISTINCT; replace only a filtering inner join with an EXISTS query."""
+    from sqlglot import exp
+    changed = False
+    for select in list(expression.find_all(exp.Select)):
+        parent = _simple_source(select)
+        distinct = select.args.get("distinct")
+        joins = select.args.get("joins") or []
+        if (parent is None or distinct is None or distinct.args.get("on") is not None or len(joins) != 1
+                or any(select.args.get(key) for key in ("group", "having", "qualify", "limit", "offset"))):
+            continue
+        join = joins[0]
+        child = join.this
+        if (not isinstance(child, exp.Table) or not child.alias or child.alias == parent.alias
+                or join.args.get("side") or join.args.get("method") or join.args.get("using")
+                or join.args.get("kind") not in (None, "", "INNER") or join.args.get("on") is None):
+            continue
+        if not all(isinstance(item.this if isinstance(item, exp.Alias) else item, exp.Column)
+                   and (item.this if isinstance(item, exp.Alias) else item).table == parent.alias
+                   and not (item.this if isinstance(item, exp.Alias) else item).is_star
+                   for item in select.expressions):
+            continue
+        condition = join.args["on"]
+        where = select.args.get("where")
+        if where is not None:
+            condition = exp.and_(condition.copy(), where.this.copy())
+        if not _plain_predicate(condition, {parent.alias, child.alias}):
+            continue
+        order = select.args.get("order")
+        if order is not None and any(column.table not in ("", parent.alias) for column in order.find_all(exp.Column)):
+            continue
+        query = exp.Select(expressions=[exp.Literal.number(1)])
+        query.set("from_", exp.From(this=child.copy()))
+        query.set("where", exp.Where(this=condition.copy()))
+        select.set("joins", None)
+        select.set("where", exp.Where(this=exp.Exists(this=query)))
         changed = True
     return expression, changed
 

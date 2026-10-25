@@ -4,6 +4,83 @@ from pqo.sql_rewrite import generate_sql_rewrites, evaluate_sql_variant
 
 
 class SQLRewriteTests(unittest.TestCase):
+    def rule(self, sql, rule):
+        return next((item for item in generate_sql_rewrites(sql) if item.rule_id == rule), None)
+
+    def test_scalar_aggregate_becomes_grouped_left_join(self):
+        for aggregate in ("SUM(c.amount)", "AVG(c.amount)", "MIN(c.amount)", "MAX(c.amount)", "COUNT(*)", "COUNT(c.amount)"):
+            with self.subTest(aggregate=aggregate):
+                candidate = self.rule(f"SELECT p.id, (SELECT {aggregate} FROM retail.payments c "
+                                      "WHERE c.order_id=p.id AND c.status='paid') AS total "
+                                      "FROM retail.customer_orders p WHERE p.id > 10 ORDER BY p.id",
+                                      "scalar-aggregate-to-grouped-join")
+                self.assertIsNotNone(candidate)
+                self.assertIn("LEFT JOIN", candidate.sql_text)
+                self.assertIn("GROUP BY c.order_id", " ".join(candidate.sql_text.split()))
+                self.assertIn("c.status = 'paid'", candidate.sql_text)
+                self.assertEqual("COALESCE" in candidate.sql_text, aggregate.startswith("COUNT"))
+                self.assertIn("AS total", candidate.sql_text)
+
+    def test_scalar_multiple_aggregates_use_distinct_aliases(self):
+        sql = ("SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id) AS total, "
+               "(SELECT COUNT(*) FROM retail.payments c WHERE c.order_id=p.id) AS n FROM retail.customer_orders p")
+        candidate = self.rule(sql, "scalar-aggregate-to-grouped-join")
+        self.assertIn("_pqo_agg_1", candidate.sql_text)
+        self.assertIn("_pqo_agg_2", candidate.sql_text)
+        self.assertEqual(candidate.sql_text.count("LEFT JOIN"), 2)
+
+    def test_scalar_ambiguous_or_nonlocal_aggregates_are_not_rewritten(self):
+        for projection, suffix in (
+            ("SUM(c.amount)", "GROUP BY c.order_id"),
+            ("SUM(c.amount)", "LIMIT 1"),
+            ("COUNT(DISTINCT c.amount)", ""),
+            ("SUM(random())", ""),
+            ("SUM(c.amount) FILTER (WHERE c.amount>1)", ""),
+            ("SUM(c.amount) OVER ()", ""),
+        ):
+            sql = (f"SELECT p.id, (SELECT {projection} FROM retail.payments c WHERE c.order_id=p.id "
+                   f"{suffix}) AS n FROM retail.customer_orders p")
+            self.assertIsNone(self.rule(sql, "scalar-aggregate-to-grouped-join"), sql)
+        for sql in (
+            "SELECT p.*, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id) AS n FROM retail.customer_orders p",
+            "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id AND c.id=p.id) AS n FROM retail.customer_orders p",
+            "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id OR c.status='paid') AS n FROM retail.customer_orders p",
+            "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=id) AS n FROM retail.customer_orders p",
+            "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id AND random()>0.5) AS n FROM retail.customer_orders p",
+        ):
+            self.assertIsNone(self.rule(sql, "scalar-aggregate-to-grouped-join"), sql)
+
+    def test_distinct_filtering_join_becomes_exists_but_keeps_distinct(self):
+        candidate = self.rule("SELECT DISTINCT p.customer_id AS id FROM retail.customers p "
+                              "JOIN retail.customer_orders c ON c.customer_id=p.customer_id "
+                              "WHERE c.order_status='paid' AND p.customer_id>10 ORDER BY id",
+                              "distinct-inner-join-to-exists")
+        self.assertIsNotNone(candidate)
+        self.assertIn("EXISTS", candidate.sql_text)
+        self.assertIn("SELECT DISTINCT", candidate.sql_text)
+        self.assertNotIn("JOIN", candidate.sql_text)
+        self.assertIn("c.order_status = 'paid'", candidate.sql_text)
+        self.assertIn("ORDER BY id", " ".join(candidate.sql_text.split()))
+
+    def test_join_rewrite_excludes_outer_joins_child_outputs_and_unsafe_scopes(self):
+        for sql in (
+            "SELECT DISTINCT p.id FROM retail.customers p LEFT JOIN retail.payments c ON c.id=p.id",
+            "SELECT DISTINCT p.id, c.id FROM retail.customers p JOIN retail.payments c ON c.id=p.id",
+            "SELECT DISTINCT p.* FROM retail.customers p JOIN retail.payments c ON c.id=p.id",
+            "SELECT DISTINCT ON (p.id) p.id FROM retail.customers p JOIN retail.payments c ON c.id=p.id",
+            "SELECT DISTINCT p.id FROM retail.customers p JOIN retail.payments c USING(id)",
+            "SELECT DISTINCT p.id FROM retail.customers p JOIN retail.payments c ON c.id=p.id LIMIT 5",
+            "SELECT DISTINCT p.id FROM retail.customers p JOIN retail.payments c ON c.id=p.id WHERE random()>0.5",
+            "SELECT DISTINCT id FROM retail.customers p JOIN retail.payments c ON c.id=p.id",
+        ):
+            self.assertIsNone(self.rule(sql, "distinct-inner-join-to-exists"), sql)
+
+    def test_having_rollup_is_not_pushed_before_aggregation(self):
+        for grouping in ("ROLLUP(customer_id)", "CUBE(customer_id)", "GROUPING SETS ((customer_id), ())"):
+            self.assertIsNone(self.rule(f"SELECT customer_id, COUNT(*) FROM retail.customer_orders "
+                                        f"GROUP BY {grouping} HAVING customer_id IS NOT NULL",
+                                        "non-aggregate-having-filter"))
+
     def test_reused_cte_can_be_compared_with_inlining(self):
         candidates = generate_sql_rewrites(
             "WITH x AS (SELECT id FROM public.orders) SELECT a.id FROM x a JOIN x b ON a.id=b.id"

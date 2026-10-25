@@ -13,6 +13,8 @@ datas = [
     (str(ROOT / "examples" / "manual-check-queries.sql"), "examples"),
     (str(ROOT / "examples" / "logistics-index-check.sql"), "examples"),
     (str(ROOT / "examples" / "logistics-rewrite-check.sql"), "examples"),
+    (str(ROOT / "examples" / "retail-scalar-aggregate-rewrite.sql"), "examples"),
+    (str(ROOT / "examples" / "logistics-distinct-join-rewrite.sql"), "examples"),
     (str(ROOT / "models"), "models"),
     (str(ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"), "dataset/postgresql"),
     (

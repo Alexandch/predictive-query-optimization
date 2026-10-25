@@ -7,12 +7,36 @@ from unittest.mock import patch
 
 from pqo.config import DatabaseSettings
 from pqo.explain import _assert_read_only_query
-from pqo.rewrite_batch import Relationship, build_cases, collect_batch, _batch_lock
+from pqo.rewrite_batch import Relationship, build_cases, collect_batch, _batch_lock, select_relationships, _save
 from pqo.rewrite_learning import prepare_dataset
 from pqo.sql_rewrite import SQLRewritePlan, generate_sql_rewrites
 
 
 class RewriteBatchTests(unittest.TestCase):
+    def test_atomic_save_retries_transient_windows_reader_lock(self):
+        import os
+        original = os.replace
+        attempts = []
+        def replace_once_unlocked(source, target):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise PermissionError("Windows reader lock")
+            original(source, target)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "batch.json"
+            with patch("pqo.rewrite_batch.os.replace", side_effect=replace_once_unlocked), patch("pqo.rewrite_batch.time.sleep"):
+                _save(path, {"status": "completed"})
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(json.loads(path.read_text())["status"], "completed")
+            self.assertFalse(list(Path(directory).glob("*.tmp")))
+
+    def test_expanded_selection_is_explicit_and_keeps_other_foreign_keys(self):
+        relations = [Relationship("retail", "items", f"key_{index}", "retail", "parents", "id") for index in range(6)]
+        self.assertEqual(len(select_relationships(relations, {"retail"})), 1)
+        expanded = select_relationships(relations, {"retail"}, all_relationships=True)
+        self.assertEqual(len(expanded), 6)
+        self.assertEqual(select_relationships(relations, {"logistics"}, all_relationships=True), [])
+
     def setUp(self):
         self.relations = [Relationship("retail", "order_items", "order_id", "retail", "customer_orders", "order_id"),
                           Relationship("logistics", "tracking_events", "shipment_id", "logistics", "shipments", "shipment_id")]
@@ -21,16 +45,16 @@ class RewriteBatchTests(unittest.TestCase):
     def result(self, *args, **kwargs):
         return SQLRewritePlan(args[0], (), None, 0, 2, .05, "no_candidates", journal_run_id="run-123")
 
-    def test_seven_rules_are_generated_and_read_only(self):
+    def test_nine_rules_are_generated_and_read_only(self):
         cases = build_cases(self.relations)
-        self.assertEqual(len(cases), 14)
+        self.assertEqual(len(cases), 18)
         rules = set()
         for case in cases:
             _assert_read_only_query(case.sql)
             candidates = generate_sql_rewrites(case.sql)
             self.assertEqual(len(candidates), 1, case.template)
             rules.add(candidates[0].rule_id)
-        self.assertEqual(len(rules), 7)
+        self.assertEqual(len(rules), 9)
 
     def test_order_and_splits_do_not_depend_on_catalog_order(self):
         self.assertEqual(build_cases(self.relations), build_cases(list(reversed(self.relations))))

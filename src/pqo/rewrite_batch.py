@@ -92,6 +92,8 @@ def build_cases(relationships, *, parent_limit=8, key_upper=256):
             "inner-sort": f"SELECT q.{ck}, COUNT(*) AS n FROM (SELECT c.{ck} FROM {child} AS c WHERE c.{ck} BETWEEN 1 AND {key_upper} ORDER BY c.{ck} DESC) AS q GROUP BY q.{ck} ORDER BY q.{ck}",
             "having": f"SELECT c.{ck}, COUNT(*) AS n FROM {child} AS c WHERE c.{ck} BETWEEN 1 AND {key_upper} GROUP BY c.{ck} HAVING c.{ck} > 16 ORDER BY c.{ck}",
             "reused-cte": f"WITH subset AS (SELECT c.{ck} FROM {child} AS c WHERE c.{ck} BETWEEN 1 AND {key_upper}) SELECT {ck}, COUNT(*) AS n FROM subset GROUP BY {ck} UNION ALL SELECT {ck}, -COUNT(*) AS n FROM subset GROUP BY {ck} ORDER BY 1, 2",
+            "scalar-aggregate": f"SELECT p.{pk}, (SELECT COUNT(*) FROM {child} AS c WHERE c.{ck}=p.{pk}) AS child_count FROM {parent} AS p WHERE p.{pk} BETWEEN 1 AND {parent_limit} ORDER BY p.{pk}",
+            "distinct-join": f"SELECT DISTINCT p.{pk} FROM {parent} AS p JOIN {child} AS c ON c.{ck}=p.{pk} WHERE p.{pk} BETWEEN 1 AND {key_upper} ORDER BY p.{pk}",
         }
         role = "control" if int(relation.family_id[:8], 16) % 4 == 0 else "development"
         for template, sql in templates.items():
@@ -110,6 +112,25 @@ def build_cases(relationships, *, parent_limit=8, key_upper=256):
     return result
 
 
+def select_relationships(relationships, schemas, *, all_relationships=False):
+    """Expand catalog coverage explicitly; default remains the small smoke suite."""
+    selected = []
+    for schema in sorted(schemas):
+        available = list(dict.fromkeys(item for item in relationships if item.child_schema == schema))
+        if all_relationships:
+            selected.extend(available)
+            continue
+        chosen, tables = [], set()
+        for item in available:
+            if item.child_table not in tables:
+                chosen.append(item)
+                tables.add(item.child_table)
+            if len(chosen) == 4:
+                break
+        selected.extend(chosen)
+    return selected
+
+
 def _save(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,10 +142,20 @@ def _save(path, data):
             json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(4):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(.05 * (attempt + 1))
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _validate_limits(settings, max_cases, budget_seconds, repetitions):
@@ -263,6 +294,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New batch directory, or existing with --resume")
     parser.add_argument("--schema", action="append", choices=["aviation", "retail", "logistics", "pagila", "chbenchmark"])
+    parser.add_argument("--template", action="append", choices=["count-positive", "count-zero", "or-equalities",
+                        "range", "inner-sort", "having", "reused-cte", "scalar-aggregate", "distinct-join"])
+    parser.add_argument("--all-relationships", action="store_true", help="Use every discovered numeric FK, not four child tables per schema")
     parser.add_argument("--execute", action="store_true", help="Without this flag only catalog discovery and preview run")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--max-cases", type=int, default=28)
@@ -280,19 +314,10 @@ def main():
         cases = [BatchCase(**item) for item in saved["suite"]]
     else:
         relations = discover_relationships(settings)
-        # Bound the suite while retaining representatives from every schema.
-        selected = []
-        for schema in sorted(schemas):
-            chosen, tables = [], set()
-            available = [item for item in relations if item.child_schema == schema]
-            for item in available:
-                if item.child_table not in tables:
-                    chosen.append(item)
-                    tables.add(item.child_table)
-                if len(chosen) == 4:
-                    break
-            selected.extend(chosen)
+        selected = select_relationships(relations, schemas, all_relationships=args.all_relationships)
         cases = build_cases(selected)
+    if args.template:
+        cases = [case for case in cases if case.template in args.template]
     if not args.execute:
         if args.output.exists():
             parser.error("Preview output already exists")

@@ -164,6 +164,10 @@ class RewriteLearningTests(unittest.TestCase):
                          "label": (index % 10) / 10, "run_ids": [str(index)]})
         artifact, metrics = train_experiment(rows, {"training_ready": True})
         self.assertFalse(metrics["automatic_activation"])
+        self.assertFalse(metrics["validated_ranker"])
+        self.assertEqual(set(metrics["family_bootstrap_ci95"]), {"model_minus_rule_mae", "model_minus_constant_mae"})
+        self.assertIn("manual", metrics["per_rule"])
+        self.assertIsInstance(metrics["passes_quality_gate"], bool)
         self.assertEqual(len(artifact["provenance"]), 40)
 
     def test_cli_refusal_writes_report_not_model(self):

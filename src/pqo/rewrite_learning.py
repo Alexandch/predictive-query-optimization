@@ -166,6 +166,8 @@ def prepare_dataset(directories, manifest=None):
                     report["excluded"]["unassigned_candidate"] += 1
                 rows.append({"run_id": run_id, "role": selected.get(run_id), "features": features,
                              "label": label, "database_fingerprint": fingerprint,
+                             "baseline_time_ms": candidate["baseline_time_ms"],
+                             "variant_time_ms": candidate["rewritten_time_ms"],
                              "original_hash": original["sql_hash"], "variant_hash": variant["sql_hash"],
                              "shapes": (original["shape_hash"], variant["shape_hash"]),
                              "collection_family": collection.get("family_id")})
@@ -211,6 +213,8 @@ def prepare_dataset(directories, manifest=None):
     result = []
     for group in grouped.values():
         row = dict(group[0], label=median(item["label"] for item in group),
+                   baseline_time_ms=median(item["baseline_time_ms"] for item in group),
+                   variant_time_ms=median(item["variant_time_ms"] for item in group),
                    run_ids=sorted(item["run_id"] for item in group))
         result.append(row)
     for role in report["rows"]:
@@ -261,9 +265,38 @@ def train_experiment(rows, report):
         rules[rule] = median(row["label"] for row in train if row["features"]["rule_id"] == rule)
     rule_prediction = np.array([rules.get(row["features"]["rule_id"], fixed) for row in control])
     constant_mae, rule_mae, model_mae = mae(fixed), mae(rule_prediction), mae(predictions)
+    # Bootstrap whole families, not individual repeated rows. This is one
+    # fixed comparison, not a license to tune repeatedly on the holdout.
+    family_deltas = []
+    for family in sorted(control_sizes):
+        mask = np.array([row["family"] == family for row in control])
+        model_errors = np.abs(predictions[mask] - y_control[mask])
+        family_deltas.append([float(np.mean(model_errors - np.abs(rule_prediction[mask] - y_control[mask]))),
+                              float(np.mean(model_errors - np.abs(fixed - y_control[mask])))])
+    deltas = np.array(family_deltas)
+    indices = np.random.default_rng(42).integers(0, len(deltas), size=(1000, len(deltas)))
+    intervals = np.quantile(deltas[indices].mean(axis=1), [.025, .975], axis=0)
+    ci = {name: [float(intervals[0, index]), float(intervals[1, index])]
+          for index, name in enumerate(("model_minus_rule_mae", "model_minus_constant_mae"))}
+    per_rule = {}
+    for rule in sorted({row["features"]["rule_id"] for row in control}):
+        mask = np.array([row["features"]["rule_id"] == rule for row in control])
+        per_rule[rule] = {"rows": int(mask.sum()),
+                          "model_mae": float(np.average(np.abs(predictions[mask] - y_control[mask]), weights=weights[mask])),
+                          "rule_mae": float(np.average(np.abs(rule_prediction[mask] - y_control[mask]), weights=weights[mask]))}
+    chosen = predictions >= math.log(1.05)
+    metrics_quality = bool(model_mae < 0.95 * min(constant_mae, rule_mae))
     metrics = {"target": "log_baseline_over_variant", "constant_mae": constant_mae,
                "rule_mae": rule_mae, "model_mae": model_mae,
-               "beats_baselines": bool(model_mae < 0.95 * min(constant_mae, rule_mae)),
+               "beats_baselines": metrics_quality,
+               "family_bootstrap_ci95": ci,
+               "passes_quality_gate": bool(metrics_quality and np.all(intervals[1] < 0)),
+               "per_rule": per_rule,
+               "selected_control_rows": int(chosen.sum()),
+               "selected_speedup_precision": (float(np.average(y_control[chosen] >= math.log(1.05),
+                                                               weights=weights[chosen])) if chosen.any() else None),
+               "submillisecond_control_rows": sum(row.get("baseline_time_ms", 1) < 1 for row in control),
+               "validated_ranker": False,
                "automatic_activation": False,
                "note": "Offline pointwise efficiency estimate; not proof of query equivalence or a ranking evaluation"}
     return {"feature_version": FEATURE_VERSION, "vectorizer": vectorizer, "model": model,

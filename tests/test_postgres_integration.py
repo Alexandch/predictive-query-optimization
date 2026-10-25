@@ -762,6 +762,35 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertEqual(remaining, 0)
 
 
+    def test_grouped_scalar_rewrite_preserves_nulls_counts_and_duplicate_parents(self):
+        fixture = ("WITH parents(id) AS (VALUES (1), (1), (2), (3), (NULL::integer)), "
+                   "children(owner, amount) AS (VALUES (1,10::numeric), (1,NULL::numeric), "
+                   "(2,NULL::numeric), (NULL::integer,99::numeric)) ")
+        from pqo.sql_rewrite import generate_sql_rewrites
+        for aggregate in ("COUNT(*)", "COUNT(c.amount)", "SUM(c.amount)", "AVG(c.amount)", "MIN(c.amount)", "MAX(c.amount)"):
+            sql = (fixture + f"SELECT p.id, (SELECT {aggregate} FROM children c WHERE c.owner=p.id) AS value "
+                   "FROM parents p ORDER BY p.id")
+            candidates = tuple(item for item in generate_sql_rewrites(sql)
+                               if item.rule_id == "scalar-aggregate-to-grouped-join")
+            self.assertEqual(len(candidates), 1)
+            result = evaluate_sql_rewrites(sql, repetitions=1, minimum_baseline_time_ms=0, _candidates=candidates)
+            self.assertEqual(len(result.evaluations), 1)
+            self.assertTrue(result.evaluations[0].equivalent, (aggregate, result))
+            self.assertIsNotNone(result.evaluations[0].rewritten_time_ms)
+
+    def test_distinct_exists_rewrite_preserves_duplicate_and_null_semantics(self):
+        from pqo.sql_rewrite import generate_sql_rewrites
+        sql = ("WITH parents(id) AS (VALUES (1), (1), (2), (3), (NULL::integer)), "
+               "children(owner, amount) AS (VALUES (1,10), (1,20), (2,NULL::integer), (NULL::integer,99)) "
+               "SELECT DISTINCT p.id FROM parents p JOIN children c ON c.owner=p.id "
+               "WHERE c.amount>5 OR c.amount IS NULL ORDER BY p.id")
+        candidates = tuple(item for item in generate_sql_rewrites(sql)
+                           if item.rule_id == "distinct-inner-join-to-exists")
+        self.assertEqual(len(candidates), 1)
+        result = evaluate_sql_rewrites(sql, repetitions=1, minimum_baseline_time_ms=0, _candidates=candidates)
+        self.assertTrue(result.evaluations[0].equivalent)
+        self.assertIsNotNone(result.evaluations[0].rewritten_time_ms)
+
     def test_read_only_rewrite_batch_metadata_and_control_split(self):
         from dataclasses import replace
         import json
