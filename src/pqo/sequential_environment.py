@@ -52,6 +52,7 @@ class SequentialIndexTransition:
     candidate_uses_selected_index: bool
     accepted: bool
     terminal_reason: str | None
+    measured_candidate_time_ms: float | None = None
 
 
 class SequentialIndexEnvironment:
@@ -210,6 +211,15 @@ class SequentialIndexEnvironment:
         return times, last_plan
 
 
+@dataclass
+class IndexCandidateTrial:
+    """Keep an accepted trial inside the episode, never commit the database."""
+    accepted: bool = False
+
+    def accept(self):
+        self.accepted = True
+
+
 class SequentialIndexEpisode:
     """Mutable transaction-scoped episode owned by the environment context."""
 
@@ -218,8 +228,35 @@ class SequentialIndexEpisode:
         self.connection = connection
         self.query = query
         self._candidates = candidates
+        self._candidate_trial_active = False
         self.state = state
         self._created_index_names: list[str] = []
+
+    @contextmanager
+    def candidate_trial(self):
+        """Restore DDL, selected actions and budget unless explicitly accepted."""
+        if self._candidate_trial_active:
+            raise RuntimeError("Nested candidate trials are not supported")
+        previous = self.state
+        name_count = len(self._created_index_names)
+        trial = IndexCandidateTrial()
+        self.connection.execute("SAVEPOINT pqo_candidate_trial")
+        self._candidate_trial_active = True
+        completed = False
+        try:
+            yield trial
+            completed = True
+        finally:
+            try:
+                if not completed or not trial.accepted:
+                    try:
+                        self.connection.execute("ROLLBACK TO SAVEPOINT pqo_candidate_trial")
+                    finally:
+                        self.state = previous
+                        del self._created_index_names[name_count:]
+                self.connection.execute("RELEASE SAVEPOINT pqo_candidate_trial")
+            finally:
+                self._candidate_trial_active = False
 
     @property
     def available_actions(self) -> tuple[IndexAction, ...]:
@@ -377,6 +414,7 @@ class SequentialIndexEpisode:
             ),
             accepted=True,
             terminal_reason=reason,
+            measured_candidate_time_ms=measured_time,
         )
 
     def _next_state(self, *, done: bool) -> SequentialIndexState:

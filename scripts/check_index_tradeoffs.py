@@ -7,7 +7,7 @@ from pathlib import Path
 
 import psycopg
 from pqo.config import DatabaseSettings
-from pqo.desktop import _format_index_impact
+from pqo.desktop import _format_index_impact, _format_index_candidate_checks
 from pqo.sequential_recommendation import recommend_sequential_indexes
 
 
@@ -38,6 +38,7 @@ def main():
     for step in plan.steps:
         print(step.action, flush=True)
         print(_format_index_impact(step), flush=True)
+    print(_format_index_candidate_checks(plan), flush=True)
 
 
 if __name__ == "__main__":

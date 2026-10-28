@@ -20,6 +20,7 @@ from pqo.desktop import (
     Worker,
     _format_index_action,
     _format_index_impact,
+    _format_index_candidate_checks,
     _format_prediction,
     _format_sql_rewrite_diff,
     _format_structural_recommendations,
@@ -30,6 +31,7 @@ from pqo.index_actions import IndexAction
 from pqo.prediction import QueryTimePrediction
 from pqo.recommendation import IndexRecommendation
 from pqo.sequential_recommendation import SequentialRecommendationStep
+from pqo.sequential_recommendation import SequentialRecommendationPlan, SequentialCandidateCheck
 from pqo.history import (
     HistoryRecord,
     HistorySequentialStep,
@@ -48,6 +50,38 @@ from pqo.sql_rewrite import (
 
 
 class DesktopTests(unittest.TestCase):
+    def test_deep_result_shows_retries_without_enabling_rejected_plan(self):
+        action = IndexAction.create("aviation", "flights", ("status",))
+        checks = (SequentialCandidateCheck(action, 1, .8, False, "index_not_used", 100., 110.),)
+        plan = SequentialRecommendationPlan((), 100., 100., 10000, 0, 2, .1, 0., 5., "index_not_used",
+                                             candidate_checks=checks)
+        window = MainWindow()
+        try:
+            window._show_sequential_analysis(plan)
+            text = window.recommendation_text.toPlainText()
+            self.assertIn("Фактически проверено кандидатов: 1", text)
+            self.assertIn("100.00 → 110.00", text)
+            self.assertFalse(window.apply_indexes_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_candidate_trial_summary_distinguishes_rejected_accepted_and_missing_times(self):
+        actions = [IndexAction.create("aviation", "flights", (key,)) for key in ("status", "flight_id")]
+        checks = (
+            SequentialCandidateCheck(actions[0], 1, .8, False, "non_positive_reward", 100., 120.),
+            SequentialCandidateCheck(actions[1], 1, .7, True, None, 100., 20.),
+            SequentialCandidateCheck(actions[0], 2, .6, False, "statement_timeout", 20.),
+        )
+        plan = SequentialRecommendationPlan((), 100., 20., 10000, 100, 2, .1, 0., 5., "max_steps",
+                                             candidate_checks=checks)
+        text = _format_index_candidate_checks(plan)
+        self.assertIn("Фактически проверено кандидатов: 3", text)
+        self.assertIn("100.00 → 120.00", text)
+        self.assertIn("принят в проверенный план", text)
+        self.assertIn("по тайм-ауту", text)
+        self.assertIn("не полный перебор", text)
+        self.assertIn("замер с индексом не завершён", text)
+
     def test_no_candidates_are_submitted_to_the_journal_without_executing_sql(self):
         window = MainWindow()
         try:

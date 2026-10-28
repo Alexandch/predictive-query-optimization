@@ -42,6 +42,19 @@ class SequentialRecommendationStep:
 
 
 @dataclass(frozen=True, slots=True)
+class SequentialCandidateCheck:
+    action: IndexAction
+    plan_step: int
+    predicted_q: float
+    accepted: bool
+    rejection_reason: str | None
+    before_time_ms: float
+    after_time_ms: float | None = None
+    index_size_bytes: int | None = None
+    creation_time_ms: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SequentialRecommendationPlan:
     steps: tuple[SequentialRecommendationStep, ...]
     baseline_time_ms: float
@@ -58,6 +71,8 @@ class SequentialRecommendationPlan:
     minimum_improvement_ratio: float = 0.05
     baseline_samples_ms: tuple[float, ...] = ()
     baseline_timed_out: bool = False
+    candidate_checks: tuple[SequentialCandidateCheck, ...] = ()
+    max_candidates_per_step: int = 3
 
     @property
     def baseline_min_time_ms(self) -> float:
@@ -79,8 +94,60 @@ def _should_measure_candidate(
     decision_threshold: float,
     accepted_step_count: int,
 ) -> bool:
-    """Always verify one best candidate during an explicit deep analysis."""
+    """Allow empirical first-step checks even below the learned threshold."""
     return predicted_q > decision_threshold or accepted_step_count == 0
+
+
+def _candidate_rejection_reason(transition, previous_time, minimum_absolute_ms, minimum_ratio):
+    if not transition.accepted:
+        return transition.terminal_reason or "rejected"
+    if not transition.candidate_uses_created_index:
+        return "index_not_used"
+    if transition.reward <= 0:
+        return "non_positive_reward"
+    gain = previous_time - transition.next_state.current_time_ms
+    if gain < minimum_absolute_ms:
+        return "absolute_gain_too_small"
+    if gain / max(previous_time, .001) < minimum_ratio:
+        return "relative_gain_too_small"
+    return None
+
+
+def _try_ranked_candidates(episode, actions, values, *, threshold, accepted_count,
+                           max_candidates, minimum_absolute_ms, minimum_ratio, control, checks):
+    ranked = sorted((i for i, action in enumerate(actions) if action.kind is IndexActionKind.CREATE),
+                    key=lambda i: values[i], reverse=True)
+    last_reason = "model_stop"
+    for number, index in enumerate(ranked[:max_candidates], 1):
+        if not _should_measure_candidate(values[index], threshold, accepted_count):
+            break
+        previous_time = episode.state.current_time_ms
+        control.report(f"Проверка кандидата {number}/{min(len(ranked), max_candidates)} на шаге {accepted_count+1}…")
+        try:
+            with episode.candidate_trial() as trial:
+                transition = episode.step(actions[index])
+                reason = _candidate_rejection_reason(transition, previous_time, minimum_absolute_ms, minimum_ratio)
+                measured_time = getattr(transition, "measured_candidate_time_ms", None)
+                if measured_time is None and transition.accepted and transition.candidate_uses_created_index:
+                    measured_time = transition.next_state.current_time_ms
+                checks.append(SequentialCandidateCheck(actions[index], accepted_count+1, float(values[index]),
+                    reason is None, reason, previous_time,
+                    measured_time,
+                    transition.index_size_bytes, transition.creation_time_ms))
+                if reason is None:
+                    trial.accept()
+            if reason is None:
+                return index, transition, None
+            last_reason = reason
+            control.report("Кандидат отклонён; пробные изменения откачены.")
+        except Exception as exc:
+            control.check()
+            if not _is_statement_timeout(exc):
+                raise
+            last_reason = "statement_timeout"
+            checks.append(SequentialCandidateCheck(actions[index], accepted_count+1, float(values[index]),
+                                                   False, last_reason, previous_time))
+    return None, None, last_reason
 
 
 def recommend_sequential_indexes(
@@ -97,10 +164,13 @@ def recommend_sequential_indexes(
     persist: bool = False,
     query_run_id: int | None = None,
     control: AnalysisControl | None = None,
+    max_candidates_per_step: int = 3,
 ) -> SequentialRecommendationPlan:
     """Measure a model-selected plan and discard all trial indexes on exit."""
     import psycopg
 
+    if type(max_candidates_per_step) is not int or not 1 <= max_candidates_per_step <= 8:
+        raise ValueError("max_candidates_per_step must be between 1 and 8")
     if min(
         minimum_baseline_time_ms,
         minimum_absolute_improvement_ms,
@@ -124,6 +194,7 @@ def recommend_sequential_indexes(
         control=control,
     )
     accepted_steps = []
+    candidate_checks = []
     candidate_count = 0
     terminal_reason = "model_stop"
     with psycopg.connect(**settings.connection_kwargs()) as connection, control.monitor(connection):
@@ -188,45 +259,13 @@ def recommend_sequential_indexes(
                 if not create_indices:
                     terminal_reason = "no_candidates"
                     break
-                best_index = max(create_indices, key=values.__getitem__)
-                if not _should_measure_candidate(
-                    values[best_index], threshold, len(accepted_steps)
-                ):
-                    terminal_reason = "model_stop"
-                    break
-                # A deep analysis is an explicit empirical verification. For a
-                # slow query, verify the model's strongest eligible candidate
-                # once even when its Q value is below the learned threshold.
-                # The measured gain criteria below remain authoritative.
                 previous_time = episode.state.current_time_ms
-                try:
-                    transition = episode.step(actions[best_index])
-                except Exception as exc:
-                    control.check()
-                    if not _is_statement_timeout(exc):
-                        raise
-                    terminal_reason = "statement_timeout"
-                    break
-                if not transition.accepted:
-                    terminal_reason = transition.terminal_reason or "rejected"
-                    break
-                if not transition.candidate_uses_created_index:
-                    terminal_reason = "index_not_used"
-                    break
-                if transition.reward <= 0:
-                    terminal_reason = "non_positive_reward"
-                    break
-                if (
-                    previous_time - transition.next_state.current_time_ms
-                    < minimum_absolute_improvement_ms
-                ):
-                    terminal_reason = "absolute_gain_too_small"
-                    break
-                improvement_ratio = (
-                    previous_time - transition.next_state.current_time_ms
-                ) / max(previous_time, 0.001)
-                if improvement_ratio < minimum_improvement_ratio:
-                    terminal_reason = "relative_gain_too_small"
+                best_index, transition, rejection = _try_ranked_candidates(
+                    episode, actions, values, threshold=threshold, accepted_count=len(accepted_steps),
+                    max_candidates=max_candidates_per_step, minimum_absolute_ms=minimum_absolute_improvement_ms,
+                    minimum_ratio=minimum_improvement_ratio, control=control, checks=candidate_checks)
+                if best_index is None:
+                    terminal_reason = rejection
                     break
                 accepted_steps.append(
                     SequentialRecommendationStep(
@@ -280,6 +319,8 @@ def recommend_sequential_indexes(
         minimum_improvement_ratio=minimum_improvement_ratio,
         baseline_samples_ms=episode.state.baseline_samples_ms,
         baseline_timed_out=episode.state.baseline_timed_out,
+        candidate_checks=tuple(candidate_checks),
+        max_candidates_per_step=max_candidates_per_step,
     )
     control.report("Пробные изменения откачены. Подготовка результата…")
     if persist:

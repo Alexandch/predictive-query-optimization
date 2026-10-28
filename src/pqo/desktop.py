@@ -392,6 +392,30 @@ def _format_index_impact(step: SequentialRecommendationStep) -> str:
     )
 
 
+def _format_index_candidate_checks(plan: SequentialRecommendationPlan) -> str:
+    if not plan.candidate_checks:
+        return ""
+    reasons = {
+        "index_not_used": "PostgreSQL не использовал индекс",
+        "non_positive_reward": "наградой не компенсированы издержки",
+        "absolute_gain_too_small": "недостаточная абсолютная экономия",
+        "relative_gain_too_small": "недостаточный относительный выигрыш",
+        "budget_exceeded": "превышен бюджет размера",
+        "statement_timeout": "проверка остановлена по тайм-ауту",
+    }
+    lines = [f"Фактически проверено кандидатов: {len(plan.candidate_checks)} "
+             f"(лимит {plan.max_candidates_per_step} на шаг).",
+             "Это ограниченная проверка по рейтингу модели, не полный перебор всех индексов."]
+    for number, check in enumerate(plan.candidate_checks, 1):
+        status = "принят в проверенный план" if check.accepted else reasons.get(check.rejection_reason, check.rejection_reason or "отклонён")
+        time = (f"{check.before_time_ms:.2f} → {check.after_time_ms:.2f} мс"
+                if check.after_time_ms is not None else "замер с индексом не завершён")
+        lines.append(f"{number}. Шаг {check.plan_step}: {_format_index_action(check.action)}\n"
+                     f"   {status}; {time}.")
+    lines.append("Отклонённые индексы удалялись перед следующей пробой; по завершении теста откатан и принятый план.")
+    return "\n".join(lines)
+
+
 def _format_verified_index_summary(
     plan: SequentialRecommendationPlan | None,
 ) -> str:
@@ -2290,6 +2314,9 @@ class MainWindow(QMainWindow):
                 self.index_management_status.setText(
                     "План проверен во временной транзакции. Его можно применить вручную."
                 )
+        checks_text = _format_index_candidate_checks(plan)
+        if checks_text:
+            self.recommendation_text.setPlainText(self.recommendation_text.toPlainText() + "\n\n" + checks_text)
         saved = (
             f"; запись #{plan.query_run_id}, глубокий результат "
             f"#{plan.sequential_analysis_id} сохранён"

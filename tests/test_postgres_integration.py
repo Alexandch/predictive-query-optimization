@@ -43,6 +43,42 @@ from pqo.structural_validation import (
 class PostgreSQLIntegrationTests(unittest.TestCase):
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+    def test_candidate_savepoint_restores_real_ddl_budget_and_recovers_timeout(self):
+        import psycopg
+        from unittest.mock import patch
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            connection.execute("CREATE TEMP TABLE pqo_retry_case(a int,b int) ON COMMIT DROP")
+            schema = connection.execute("SELECT nspname FROM pg_namespace WHERE oid=pg_my_temp_schema()").fetchone()[0]
+            environment = SequentialIndexEnvironment(settings, allowed_schemas=frozenset({schema}),
+                max_steps=2, repetitions=1, warmup_runs=0)
+            query = f'SELECT a,b FROM "{schema}".pqo_retry_case WHERE a=1'
+            with environment.episode(query, connection=connection) as episode:
+                plain = IndexAction.create(schema, "pqo_retry_case", ("a",))
+                cover = IndexAction.create(schema, "pqo_retry_case", ("a",), ("b",))
+                with episode.candidate_trial() as trial:
+                    episode.step(plain)
+                    trial.accept()
+                accepted = episode.state
+                accepted_names = list(episode._created_index_names)
+                with episode.candidate_trial():
+                    episode.step(cover)
+                    self.assertEqual(connection.execute("SELECT count(*) FROM pg_index WHERE indrelid='pqo_retry_case'::regclass").fetchone()[0], 2)
+                self.assertEqual(episode.state, accepted)
+                self.assertEqual(episode._created_index_names, accepted_names)
+                self.assertEqual(connection.execute("SELECT count(*) FROM pg_index WHERE indrelid='pqo_retry_case'::regclass").fetchone()[0], 1)
+                def timed_out_measure(*args, **kwargs):
+                    connection.execute("SET LOCAL statement_timeout='5ms'")
+                    connection.execute("SELECT pg_sleep(0.05)")
+                with patch.object(environment, "_measure", side_effect=timed_out_measure):
+                    with self.assertRaises(psycopg.errors.QueryCanceled):
+                        with episode.candidate_trial():
+                            episode.step(cover)
+                self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+                self.assertEqual(episode.state, accepted)
+                self.assertEqual(connection.execute("SELECT count(*) FROM pg_index WHERE indrelid='pqo_retry_case'::regclass").fetchone()[0], 1)
+            self.assertIsNone(connection.execute("SELECT to_regclass('pqo_retry_case')").fetchone()[0])
+
     def test_index_overlap_uses_full_payload_and_usable_index_metadata(self):
         import psycopg
         settings = DatabaseSettings.from_env()

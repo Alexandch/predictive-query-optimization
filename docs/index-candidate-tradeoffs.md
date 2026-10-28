@@ -77,8 +77,10 @@ WHERE, покрытие INCLUDE и честное объяснение изде�
 диапазоном даты не сформировал принятого шага (`non_positive_reward`).
 Этот отрицательный результат сохранён в `artifacts/index-tradeoffs-check`,
 положительный – в `artifacts/index-tradeoffs-order-check`. Нельзя заключать,
-что для первого запроса вообще не существует полезного индекса: текущая
-глубокая политика выбирает кандидата моделью, это не полный перебор.
+что для первого запроса вообще не существует полезного индекса: на том
+этапе проверялся первый выбранный моделью кандидат. В следующем этапе
+добавлены [ограниченные повторные пробы](index-candidate-retry.md), которые
+нашли полезный второй вариант для этого SQL. Полного перебора всё равно нет.
 
 ```powershell
 .venv\Scripts\python.exe scripts/check_index_tradeoffs.py --example examples/logistics-index-order-check.sql --output artifacts/index-tradeoffs-order-check
