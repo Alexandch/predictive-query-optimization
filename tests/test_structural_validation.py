@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock, patch
 
 from pqo.structural_advisor import (
     RecommendationCategory,
@@ -48,6 +49,21 @@ def _recommendation(rule_id, *, recommendation_id=7, suggested_sql=None):
 
 
 class StructuralValidationTests(unittest.TestCase):
+    def test_shared_equivalence_helper_runs_inside_repeatable_snapshot_and_rolls_back(self):
+        connection = Mock()
+        result = StructuralValidationResult(None, "subquery-order-without-limit", True,
+            "subquery-order-rewrite", True, None, None, None, False, True, {})
+        with patch("psycopg.connect", return_value=connection), \
+             patch("pqo.structural_validation._validate_rewrite", return_value=result):
+            actual = validate_structural_recommendation(
+                "SELECT * FROM (SELECT 1 AS x ORDER BY x) q",
+                _recommendation("subquery-order-without-limit"))
+        self.assertIs(actual, result)
+        self.assertEqual(connection.execute.call_args_list[0].args[0],
+                         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        connection.rollback.assert_called_once()
+        connection.close.assert_called_once()
+
     def test_moves_only_nonaggregate_having_terms(self):
         rewritten = _structural_rewrite(
             "SELECT status, count(*) FROM orders GROUP BY status "

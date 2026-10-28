@@ -33,7 +33,7 @@ class SQLRewriteTests(unittest.TestCase):
         for projection, suffix in (
             ("SUM(c.amount)", "GROUP BY c.order_id"),
             ("SUM(c.amount)", "LIMIT 1"),
-            ("COUNT(DISTINCT c.amount)", ""),
+            ("COUNT(DISTINCT (c.amount,c.order_id))", ""),
             ("SUM(random())", ""),
             ("SUM(c.amount) FILTER (WHERE c.amount>1)", ""),
             ("SUM(c.amount) OVER ()", ""),
@@ -43,7 +43,7 @@ class SQLRewriteTests(unittest.TestCase):
             self.assertIsNone(self.rule(sql, "scalar-aggregate-to-grouped-join"), sql)
         for sql in (
             "SELECT p.*, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id) AS n FROM retail.customer_orders p",
-            "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id AND c.id=p.id) AS n FROM retail.customer_orders p",
+            "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id AND c.id>p.id) AS n FROM retail.customer_orders p",
             "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id OR c.status='paid') AS n FROM retail.customer_orders p",
             "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=id) AS n FROM retail.customer_orders p",
             "SELECT p.id, (SELECT SUM(c.amount) FROM retail.payments c WHERE c.order_id=p.id AND random()>0.5) AS n FROM retail.customer_orders p",

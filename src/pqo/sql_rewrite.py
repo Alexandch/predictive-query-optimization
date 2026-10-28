@@ -48,13 +48,9 @@ class SQLRewritePlan:
     journal_warning: str | None = None
 
 
-def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
-    """Generate conservative PostgreSQL rewrites without executing SQL."""
-    from sqlglot import parse_one
-
-    normalized = _assert_read_only_query(sql_text)
-    parsed = parse_one(normalized, read="postgres")
-    rules = (
+def sql_rewrite_rules():
+    """One rule registry for candidate generation and interface coverage labels."""
+    return (
         (
             "count-positive-to-exists",
             "Заменить проверку COUNT(*) > 0 на EXISTS",
@@ -97,13 +93,26 @@ def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
         ),
         (
             "distinct-inner-join-to-exists",
-            "Заменить размножающий строки INNER JOIN проверкой EXISTS",
+            "Заменить фильтрующие INNER JOIN проверкой EXISTS",
             _rewrite_distinct_join,
         ),
+        (
+            "shared-scalar-aggregates-to-grouped-join",
+            "Объединить коррелированные агрегаты в одну группировку и LEFT JOIN",
+            _rewrite_shared_scalar_aggregates,
+        ),
     )
+
+
+def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
+    """Generate conservative PostgreSQL rewrites without executing SQL."""
+    from sqlglot import parse_one
+
+    normalized = _assert_read_only_query(sql_text)
+    parsed = parse_one(normalized, read="postgres")
     candidates = []
     seen_sql = {normalized}
-    for rule_id, title, rewrite in rules:
+    for rule_id, title, rewrite in sql_rewrite_rules():
         rewritten, changed = rewrite(parsed.copy())
         if not changed:
             continue
@@ -549,14 +558,14 @@ def _simple_source(select):
     from sqlglot import exp
     source = select.args.get("from_")
     table = source.this if source is not None else None
-    return table if isinstance(table, exp.Table) and table.alias else None
+    return table if isinstance(table, exp.Table) and isinstance(table.this, exp.Identifier) and table.alias else None
 
 
 def _rewrite_scalar_aggregates(expression):
-    """A single equality-correlated scalar aggregate, with explicit output alias.
+    """Equality-correlated scalar aggregate, with explicit output alias.
 
     LEFT JOIN preserves parents without children; only COUNT needs COALESCE(0).
-    Unknown functions, nested scopes, multiple correlation keys and star outputs
+    Unknown functions, nested scopes, tuple DISTINCT and star outputs
     are outside this rule. This still requires snapshot equivalence and timing.
     """
     from sqlglot import exp
@@ -590,6 +599,12 @@ def _rewrite_scalar_aggregates(expression):
             if type(aggregate) not in (exp.Count, exp.Sum, exp.Avg, exp.Min, exp.Max):
                 continue
             argument = aggregate.this
+            if isinstance(aggregate, exp.Count) and isinstance(argument, exp.Distinct):
+                # Single-column DISTINCT ignores NULL just like scalar COUNT.
+                # Tuple/multi-column DISTINCT has different NULL semantics.
+                if len(argument.expressions) != 1:
+                    continue
+                argument = argument.expressions[0]
             if not (isinstance(argument, exp.Column) and argument.table == child.alias and not argument.is_star
                     or isinstance(aggregate, exp.Count) and isinstance(argument, exp.Star)):
                 continue
@@ -609,9 +624,12 @@ def _rewrite_scalar_aggregates(expression):
                         correlations.append((left, right))
                         continue
                 local.append(term)
-            if len(correlations) != 1 or any(not _plain_predicate(term, {child.alias}) for term in local):
+            if not correlations or any(not _plain_predicate(term, {child.alias}) for term in local):
                 continue
-            child_key, parent_key = correlations[0]
+            # Stable alignment of projected child keys and parent join keys,
+            # regardless of conjunction order in the original scalar subquery.
+            correlations.sort(key=lambda pair: (pair[0].this.sql(dialect="postgres"),
+                                                 pair[1].sql(dialect="postgres")))
             if any(column.table != child.alias or column.is_star for column in aggregate.find_all(exp.Column)):
                 continue
             suffix = 1
@@ -619,17 +637,21 @@ def _rewrite_scalar_aggregates(expression):
                 suffix += 1
             alias = f"_pqo_agg_{suffix}"
             occupied.add(alias.casefold())
+            key_names = ["_pqo_key" if i == 0 else f"_pqo_key_{i+1}" for i in range(len(correlations))]
             grouped = exp.Select(expressions=[
-                exp.alias_(child_key.copy(), "_pqo_key"),
+                *[exp.alias_(child_key.copy(), name)
+                  for name, (child_key, _) in zip(key_names, correlations)],
                 exp.alias_(aggregate.copy(), "_pqo_value"),
             ])
             grouped.set("from_", exp.From(this=child.copy()))
-            grouped.set("group", exp.Group(expressions=[child_key.copy()]))
+            grouped.set("group", exp.Group(expressions=[key.copy() for key, _ in correlations]))
             if local:
                 grouped.set("where", exp.Where(this=_combine_and(local, exp)))
             derived = exp.Subquery(this=grouped, alias=exp.TableAlias(this=exp.to_identifier(alias)))
-            join = exp.Join(this=derived, side="LEFT", on=exp.EQ(
-                this=exp.column("_pqo_key", table=alias), expression=parent_key.copy()))
+            join = exp.Join(this=derived, side="LEFT", on=_combine_and([
+                exp.EQ(this=exp.column(name, table=alias), expression=parent_key.copy())
+                for name, (_, parent_key) in zip(key_names, correlations)
+            ], exp))
             outer.set("joins", [*(outer.args.get("joins") or []), join])
             value = exp.column("_pqo_value", table=alias)
             if isinstance(aggregate, exp.Count):
@@ -639,39 +661,145 @@ def _rewrite_scalar_aggregates(expression):
     return expression, changed
 
 
+def _rewrite_shared_scalar_aggregates(expression):
+    """Share identical scalar-aggregate inputs without merging different filters.
+
+    Reuse the conservative scalar rule's admissibility checks and COUNT handling.
+    Child aliases may differ, but relation, correlation key and local predicates
+    must be structurally equal after alias normalization. No metadata assumptions
+    about uniqueness or child multiplicity are needed.
+    """
+    from sqlglot import exp
+
+    existing = {table.alias_or_name.casefold() for table in expression.find_all(exp.Table)}
+    existing.update(cte.alias_or_name.casefold() for cte in expression.find_all(exp.CTE))
+    expression, generated = _rewrite_scalar_aggregates(expression)
+    if not generated:
+        return expression, False
+    changed = False
+    for select in list(expression.find_all(exp.Select)):
+        groups = {}
+        retained = []
+        for join in select.args.get("joins") or []:
+            derived = join.this
+            alias = derived.alias_or_name
+            if (not isinstance(derived, exp.Subquery) or alias.casefold() in existing
+                    or not alias.startswith("_pqo_agg_")):
+                retained.append(join)
+                continue
+            grouped = derived.this
+            child = _simple_source(grouped)
+            if child is None or len(grouped.expressions) != len(grouped.args["group"].expressions) + 1:
+                retained.append(join)
+                continue
+            # Only compare copies; the first grouped source keeps its own alias.
+            normalized = grouped.copy()
+            source = _simple_source(normalized)
+            normalized_alias = source.args["alias"].copy()
+            normalized_alias.set("this", exp.to_identifier("_pqo_source"))
+            source.set("alias", normalized_alias)
+            for column in normalized.find_all(exp.Column):
+                if column.table == child.alias:
+                    column.set("table", exp.to_identifier("_pqo_source"))
+            normalized_on = join.args["on"].copy()
+            for column in normalized_on.find_all(exp.Column):
+                if column.table == alias:
+                    column.set("table", exp.to_identifier("_pqo_join"))
+            signature = (
+                normalized.args["from_"].sql(dialect="postgres"),
+                normalized.args["group"].sql(dialect="postgres"),
+                normalized.args["where"].sql(dialect="postgres") if normalized.args.get("where") else "",
+                normalized_on.sql(dialect="postgres"),
+            )
+            if signature not in groups:
+                groups[signature] = (join, child.args["alias"].this.copy())
+                retained.append(join)
+                continue
+            first, first_child_alias = groups[signature]
+            first_grouped = first.this.this
+            aggregate_count = len(first_grouped.expressions) - len(first_grouped.args["group"].expressions)
+            value_name = f"_pqo_value_{aggregate_count + 1}"
+            aggregate = grouped.expressions[-1].this.copy()
+            for column in aggregate.find_all(exp.Column):
+                if column.table == child.alias:
+                    column.set("table", first_child_alias.copy())
+            first_grouped.append("expressions", exp.alias_(aggregate, value_name))
+            for column in list(select.find_all(exp.Column)):
+                if column.table == alias and column.name == "_pqo_value":
+                    column.replace(exp.column(value_name, table=first.this.alias))
+            changed = True
+        select.set("joins", retained or None)
+    return expression, changed
+
+
 def _rewrite_distinct_join(expression):
-    """Keep DISTINCT; replace only a filtering inner join with an EXISTS query."""
+    """Keep DISTINCT; move an entire filtering inner-join chain into one EXISTS.
+
+    A single shared EXISTS preserves cross-child dependencies. Independent EXISTS
+    predicates would be incorrect when children must match each other.
+    """
     from sqlglot import exp
     changed = False
     for select in list(expression.find_all(exp.Select)):
         parent = _simple_source(select)
         distinct = select.args.get("distinct")
         joins = select.args.get("joins") or []
-        if (parent is None or distinct is None or distinct.args.get("on") is not None or len(joins) != 1
+        if (parent is None or distinct is None or distinct.args.get("on") is not None or not joins
                 or any(select.args.get(key) for key in ("group", "having", "qualify", "limit", "offset"))):
             continue
-        join = joins[0]
-        child = join.this
-        if (not isinstance(child, exp.Table) or not child.alias or child.alias == parent.alias
-                or join.args.get("side") or join.args.get("method") or join.args.get("using")
-                or join.args.get("kind") not in (None, "", "INNER") or join.args.get("on") is None):
+        aliases = {parent.alias}
+        valid = True
+        for join in joins:
+            child = join.this
+            if (not isinstance(child, exp.Table) or not isinstance(child.this, exp.Identifier)
+                    or not child.alias or child.alias in aliases
+                    or join.args.get("side") or join.args.get("method") or join.args.get("using")
+                    or join.args.get("kind") not in (None, "", "INNER") or join.args.get("on") is None
+                    or not _plain_predicate(join.args["on"], aliases | {child.alias})):
+                valid = False
+                break
+            aliases.add(child.alias)
+        if not valid:
             continue
         if not all(isinstance(item.this if isinstance(item, exp.Alias) else item, exp.Column)
                    and (item.this if isinstance(item, exp.Alias) else item).table == parent.alias
                    and not (item.this if isinstance(item, exp.Alias) else item).is_star
                    for item in select.expressions):
             continue
-        condition = join.args["on"]
+        condition = joins[0].args["on"].copy()
         where = select.args.get("where")
         if where is not None:
             condition = exp.and_(condition.copy(), where.this.copy())
-        if not _plain_predicate(condition, {parent.alias, child.alias}):
+        if not _plain_predicate(condition, aliases):
             continue
         order = select.args.get("order")
         if order is not None and any(column.table not in ("", parent.alias) for column in order.find_all(exp.Column)):
             continue
         query = exp.Select(expressions=[exp.Literal.number(1)])
-        query.set("from_", exp.From(this=child.copy()))
+        query.set("from_", exp.From(this=joins[0].this.copy()))
+        inner_joins = []
+        # Outer references in an inner JOIN's ON can prevent PostgreSQL from
+        # pulling EXISTS up into a semi-join. For an all-INNER chain, lift those
+        # conjuncts to the shared WHERE, retaining child-only join conditions.
+        lifted = []
+        for original_join in joins[1:]:
+            inner_join = original_join.copy()
+            local = []
+            for term in _flatten_boolean(original_join.args["on"], exp.And):
+                if any(column.table == parent.alias for column in term.find_all(exp.Column)):
+                    lifted.append(term)
+                else:
+                    local.append(term)
+            if local:
+                inner_join.set("on", _combine_and(local, exp))
+            else:
+                inner_join.set("on", None)
+                inner_join.set("kind", "CROSS")
+            inner_joins.append(inner_join)
+        if lifted:
+            condition = _combine_and([condition, *lifted], exp)
+        if len(joins) > 1:
+            query.set("joins", inner_joins)
         query.set("where", exp.Where(this=condition.copy()))
         select.set("joins", None)
         select.set("where", exp.Where(this=exp.Exists(this=query)))
@@ -758,17 +886,18 @@ def _is_simple_count_star(select) -> bool:
 
 
 def _queries_are_equivalent(connection, original_sql: str, rewritten_sql: str) -> bool:
-    comparison = f"""
-        SELECT NOT EXISTS (
-            SELECT 1
-            FROM (
-                (({original_sql}) EXCEPT ALL ({rewritten_sql}))
-                UNION ALL
-                (({rewritten_sql}) EXCEPT ALL ({original_sql}))
-            ) AS difference
-        )
-    """
-    return bool(connection.execute(comparison).fetchone()[0])
+    # Both checks use the caller's single REPEATABLE READ snapshot. Evaluate
+    # directions sequentially rather than holding four query plans (including
+    # parallel hash tables) in one UNION ALL statement at once.
+    for left, right in ((original_sql, rewritten_sql), (rewritten_sql, original_sql)):
+        comparison = f"""
+            SELECT NOT EXISTS (
+                SELECT 1 FROM (({left}) EXCEPT ALL ({right})) AS difference
+            )
+        """
+        if not connection.execute(comparison).fetchone()[0]:
+            return False
+    return True
 
 
 def _measure_pair(connection, original_sql: str, rewritten_sql: str, repetitions: int, observer=None):

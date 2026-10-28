@@ -15,6 +15,16 @@ EXTENDED_SQL_FEATURES = [
     "distinct_aggregate_count", "aggregate_filter_count", "group_key_count",
 ]
 
+# Keep SQL-v2 frozen: old artifacts must retain exactly their original inputs.
+STRUCTURAL_SQL_FEATURES = [
+    "grouping_sets_clause_count", "rollup_count", "cube_count",
+    "grouping_set_expansion_count", "advanced_group_key_count",
+    "ordered_set_aggregate_count", "ordered_set_order_key_count",
+    "window_rows_frame_count", "window_range_frame_count", "window_groups_frame_count",
+    "window_bounded_frame_count", "window_unbounded_frame_count", "window_exclusion_count",
+]
+GROUPING_EXPANSION_LIMIT = 1_000_000
+
 
 @dataclass(frozen=True, slots=True)
 class SQLFeatures:
@@ -45,6 +55,19 @@ class SQLFeatures:
     distinct_aggregate_count: int = 0
     aggregate_filter_count: int = 0
     group_key_count: int = 0
+    grouping_sets_clause_count: int = 0
+    rollup_count: int = 0
+    cube_count: int = 0
+    grouping_set_expansion_count: int = 0
+    advanced_group_key_count: int = 0
+    ordered_set_aggregate_count: int = 0
+    ordered_set_order_key_count: int = 0
+    window_rows_frame_count: int = 0
+    window_range_frame_count: int = 0
+    window_groups_frame_count: int = 0
+    window_bounded_frame_count: int = 0
+    window_unbounded_frame_count: int = 0
+    window_exclusion_count: int = 0
 
     def as_dict(self) -> dict[str, int | bool]:
         return asdict(self)
@@ -65,6 +88,32 @@ def _join_category(join: exp.Join) -> str:
     if kind == "CROSS":
         return "cross"
     return "inner"
+
+
+def _grouping_expansion(node: exp.Expression) -> int:
+    """Count syntactic grouping sets without constructing their power set.
+
+    Duplicate sets are counted (GROUP BY ALL semantics); this is a structural
+    upper bound for GROUP BY DISTINCT, not an estimated result cardinality.
+    """
+    if isinstance(node, exp.Cube):
+        return min(2 ** min(len(node.expressions), 20), GROUPING_EXPANSION_LIMIT)
+    if isinstance(node, exp.Rollup):
+        return min(len(node.expressions) + 1, GROUPING_EXPANSION_LIMIT)
+    if isinstance(node, exp.GroupingSets):
+        return min(sum(_grouping_expansion(item) for item in node.expressions), GROUPING_EXPANSION_LIMIT)
+    if isinstance(node, exp.Paren):
+        return _grouping_expansion(node.this)
+    if isinstance(node, (exp.Group, exp.Tuple)):
+        items = list(node.expressions)
+        if isinstance(node, exp.Group):
+            for name in ("grouping_sets", "rollup", "cube"):
+                items.extend(node.args.get(name) or [])
+        total = 1
+        for item in items:
+            total = min(total * _grouping_expansion(item), GROUPING_EXPANSION_LIMIT)
+        return total
+    return 1
 
 
 def extract_sql_features(sql_text: str) -> SQLFeatures:
@@ -97,6 +146,9 @@ def extract_sql_features(sql_text: str) -> SQLFeatures:
     ]
     windows = list(tree.find_all(exp.Window))
     aggregates = list(tree.find_all(exp.AggFunc))
+    groups = list(tree.find_all(exp.Group))
+    ordered_sets = list(tree.find_all(exp.WithinGroup))
+    frames = list(tree.find_all(exp.WindowSpec))
 
     return SQLFeatures(
         query_length=len(normalized),
@@ -136,4 +188,21 @@ def extract_sql_features(sql_text: str) -> SQLFeatures:
         distinct_aggregate_count=sum(any(isinstance(arg, exp.Distinct) for arg in aggregate.iter_expressions()) for aggregate in aggregates),
         aggregate_filter_count=sum(isinstance(item.this, exp.AggFunc) for item in tree.find_all(exp.Filter)),
         group_key_count=sum(len(group.expressions) for group in tree.find_all(exp.Group)),
+        grouping_sets_clause_count=sum(1 for _ in tree.find_all(exp.GroupingSets)),
+        rollup_count=sum(1 for _ in tree.find_all(exp.Rollup)),
+        cube_count=sum(1 for _ in tree.find_all(exp.Cube)),
+        grouping_set_expansion_count=min(sum(_grouping_expansion(group) for group in groups), GROUPING_EXPANSION_LIMIT),
+        advanced_group_key_count=sum(
+            sum(1 for _ in item.find_all(exp.Column))
+            for group in groups for name in ("grouping_sets", "rollup", "cube")
+            for item in group.args.get(name) or []
+        ),
+        ordered_set_aggregate_count=len(ordered_sets),
+        ordered_set_order_key_count=sum(len(item.expression.expressions) for item in ordered_sets),
+        window_rows_frame_count=sum(str(frame.args.get("kind")).upper() == "ROWS" for frame in frames),
+        window_range_frame_count=sum(str(frame.args.get("kind")).upper() == "RANGE" for frame in frames),
+        window_groups_frame_count=sum(str(frame.args.get("kind")).upper() == "GROUPS" for frame in frames),
+        window_bounded_frame_count=sum(any(isinstance(frame.args.get(name), exp.Expression) for name in ("start", "end")) for frame in frames),
+        window_unbounded_frame_count=sum(any(str(frame.args.get(name)).upper() == "UNBOUNDED" for name in ("start", "end")) for frame in frames),
+        window_exclusion_count=sum(frame.args.get("exclude") is not None for frame in frames),
     )

@@ -6,6 +6,16 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 
+# Estimated data only: none of these columns needs EXPLAIN ANALYZE.
+PLAN_FLOW_FEATURES = [
+    "sort_input_rows_sum", "sort_input_rows_max", "sort_input_bytes_sum", "sort_input_bytes_max",
+    "aggregate_input_rows_sum", "aggregate_input_rows_max", "aggregate_input_bytes_sum",
+    "window_input_rows_sum", "window_input_rows_max", "window_input_bytes_sum",
+    "window_agg_node_count", "incremental_sort_node_count", "distinct_sort_signature_count",
+    "hashed_aggregate_node_count", "sorted_aggregate_node_count",
+]
+
+
 @dataclass(frozen=True, slots=True)
 class PlanFeatures:
     estimated_startup_cost: float
@@ -31,6 +41,21 @@ class PlanFeatures:
     shared_read_blocks: int
     temp_read_blocks: int
     temp_written_blocks: int
+    sort_input_rows_sum: float = 0
+    sort_input_rows_max: float = 0
+    sort_input_bytes_sum: float = 0
+    sort_input_bytes_max: float = 0
+    aggregate_input_rows_sum: float = 0
+    aggregate_input_rows_max: float = 0
+    aggregate_input_bytes_sum: float = 0
+    window_input_rows_sum: float = 0
+    window_input_rows_max: float = 0
+    window_input_bytes_sum: float = 0
+    window_agg_node_count: int = 0
+    incremental_sort_node_count: int = 0
+    distinct_sort_signature_count: int = 0
+    hashed_aggregate_node_count: int = 0
+    sorted_aggregate_node_count: int = 0
 
     def as_dict(self) -> dict[str, float | int | str | None]:
         return asdict(self)
@@ -83,6 +108,34 @@ def extract_plan_features(document: Any) -> PlanFeatures:
         return sum(int(node.get(field, 0) or 0) for node in nodes)
 
     actual_time = root.get("Actual Total Time")
+    flows = {name: [] for name in ("sort", "aggregate", "window")}
+    sort_signatures = set()
+    for node in nodes:
+        kind = str(node.get("Node Type", ""))
+        category = (
+            "sort" if kind in {"Sort", "Incremental Sort"} else
+            "aggregate" if kind in {"Aggregate", "GroupAggregate", "HashAggregate"} else
+            "window" if kind == "WindowAgg" else None
+        )
+        if category is None:
+            continue
+        # InitPlans/SubPlans are separately executed expressions, not the input
+        # stream consumed by this operator. Do not add them to its row count.
+        children = [child for child in node.get("Plans", [])
+                    if child.get("Parent Relationship") not in {"InitPlan", "SubPlan"}]
+        rows = sum(max(0.0, float(child.get("Plan Rows", 0) or 0)) for child in children)
+        size = sum(max(0.0, float(child.get("Plan Rows", 0) or 0)) *
+                   max(0.0, float(child.get("Plan Width", 0) or 0)) for child in children)
+        flows[category].append((rows, size))
+        if category == "sort" and node.get("Sort Key"):
+            sort_signatures.add(tuple(map(str, node["Sort Key"])))
+
+    def total(category, column):
+        return sum(item[column] for item in flows[category])
+
+    def maximum(category, column):
+        return max((item[column] for item in flows[category]), default=0.0)
+
     return PlanFeatures(
         estimated_startup_cost=float(root.get("Startup Cost", 0.0)),
         estimated_total_cost=float(root.get("Total Cost", 0.0)),
@@ -112,4 +165,23 @@ def extract_plan_features(document: Any) -> PlanFeatures:
         shared_read_blocks=sum_int("Shared Read Blocks"),
         temp_read_blocks=sum_int("Temp Read Blocks"),
         temp_written_blocks=sum_int("Temp Written Blocks"),
+        sort_input_rows_sum=total("sort", 0),
+        sort_input_rows_max=maximum("sort", 0),
+        sort_input_bytes_sum=total("sort", 1),
+        sort_input_bytes_max=maximum("sort", 1),
+        aggregate_input_rows_sum=total("aggregate", 0),
+        aggregate_input_rows_max=maximum("aggregate", 0),
+        aggregate_input_bytes_sum=total("aggregate", 1),
+        window_input_rows_sum=total("window", 0),
+        window_input_rows_max=maximum("window", 0),
+        window_input_bytes_sum=total("window", 1),
+        window_agg_node_count=node_types.count("WindowAgg"),
+        incremental_sort_node_count=node_types.count("Incremental Sort"),
+        distinct_sort_signature_count=len(sort_signatures),
+        hashed_aggregate_node_count=sum(
+            node.get("Node Type") == "HashAggregate" or
+            (node.get("Node Type") == "Aggregate" and node.get("Strategy") in {"Hashed", "Mixed"}) for node in nodes),
+        sorted_aggregate_node_count=sum(
+            node.get("Node Type") == "GroupAggregate" or
+            (node.get("Node Type") == "Aggregate" and node.get("Strategy") == "Sorted") for node in nodes),
     )

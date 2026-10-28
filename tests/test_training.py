@@ -14,6 +14,74 @@ from pqo.training import (
 
 
 class TrainingTests(unittest.TestCase):
+    def test_plan_v2_combines_structural_sql_and_estimated_flows(self):
+        from pqo.plan_features import PLAN_FLOW_FEATURES
+        from pqo.sql_features import STRUCTURAL_SQL_FEATURES, extract_sql_features
+        from pqo.model_cache import load_joblib_model
+        frame = self._synthetic_frame()
+        for name in PLAN_FLOW_FEATURES:
+            frame[name] = 0.0
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "data.csv"
+            frame.to_csv(dataset, index=False)
+            original = dataset.read_bytes()
+            output = Path(directory) / "model"
+            train_xgboost(dataset, output, tune=False, feature_version="plan-v2")
+            artifact = load_joblib_model(output / "xgboost_query_time.joblib")
+            self.assertEqual(artifact["feature_version"], "plan-v2")
+            self.assertTrue(set(PLAN_FLOW_FEATURES + STRUCTURAL_SQL_FEATURES) <= set(artifact["model_features"]))
+            self.assertFalse(artifact["requires_query_execution"])
+            self.assertEqual(dataset.read_bytes(), original)
+            values = frame.iloc[0].to_dict()
+            values.update(extract_sql_features(values["sql_text"]).as_dict())
+            self.assertTrue(math.isfinite(predict_query_time(output / "xgboost_query_time.joblib", values)))
+            self.assertNotIn("actual_total_time_ms", artifact["model_features"])
+
+    def test_plan_contract_requires_real_backfilled_columns(self):
+        from pqo.plan_features import PLAN_FLOW_FEATURES
+        from pqo.model_cache import load_joblib_model
+        frame = self._synthetic_frame()
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "data.csv"
+            output = Path(directory) / "model"
+            frame.to_csv(dataset, index=False)
+            with self.assertRaisesRegex(ValueError, "backfill EXPLAIN"):
+                train_xgboost(dataset, output, tune=False, feature_version="plan-v1")
+            for name in PLAN_FLOW_FEATURES:
+                frame[name] = 0.0  # synthetic plan with no expensive operators
+            frame.to_csv(dataset, index=False)
+            train_xgboost(dataset, output, tune=False, feature_version="plan-v1")
+            artifact = load_joblib_model(output / "xgboost_query_time.joblib")
+            self.assertTrue(set(PLAN_FLOW_FEATURES) <= set(artifact["model_features"]))
+            from pqo.sql_features import STRUCTURAL_SQL_FEATURES
+            self.assertFalse(set(STRUCTURAL_SQL_FEATURES) & set(artifact["model_features"]))
+            with self.assertRaisesRegex(ValueError, "Prediction features are missing"):
+                prepare_prediction_frame(frame.drop(columns=PLAN_FLOW_FEATURES), artifact)
+            frame[PLAN_FLOW_FEATURES[0]] = float("inf")
+            frame.to_csv(dataset, index=False)
+            with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                train_xgboost(dataset, output, tune=False, feature_version="plan-v1")
+
+    def test_v3_adds_features_without_changing_v2_or_source_csv(self):
+        from pqo.sql_features import STRUCTURAL_SQL_FEATURES, extract_sql_features
+        from pqo.model_cache import load_joblib_model
+        frame = self._synthetic_frame()
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "data.csv"
+            frame.to_csv(dataset, index=False)
+            before = dataset.read_bytes()
+            output = Path(directory) / "model"
+            train_xgboost(dataset, output, tune=False, feature_version="sql-v3")
+            artifact = load_joblib_model(output / "xgboost_query_time.joblib")
+            self.assertEqual(artifact["feature_version"], "sql-v3")
+            self.assertTrue(set(STRUCTURAL_SQL_FEATURES) <= set(artifact["model_features"]))
+            reconstructed = prepare_prediction_frame(frame, artifact)
+            self.assertEqual(list(reconstructed.columns), artifact["model_features"])
+            self.assertEqual(dataset.read_bytes(), before)
+            values = frame.iloc[0].to_dict()
+            values.update(extract_sql_features(values["sql_text"]).as_dict())
+            self.assertTrue(math.isfinite(predict_query_time(output / "xgboost_query_time.joblib", values)))
+
     def test_extended_training_keeps_legacy_contract_separate(self):
         from pqo.sql_features import EXTENDED_SQL_FEATURES, extract_sql_features
         from pqo.model_cache import load_joblib_model
@@ -27,6 +95,8 @@ class TrainingTests(unittest.TestCase):
             artifact = load_joblib_model(output / "xgboost_query_time.joblib")
             self.assertTrue(set(EXTENDED_SQL_FEATURES) <= set(artifact["model_features"]))
             self.assertFalse(set(EXTENDED_SQL_FEATURES) & set(MODEL_FEATURES))
+            from pqo.sql_features import STRUCTURAL_SQL_FEATURES
+            self.assertFalse(set(STRUCTURAL_SQL_FEATURES) & set(artifact["model_features"]))
             row = frame.iloc[0].to_dict()
             row.update(extract_sql_features(row["sql_text"]).as_dict())
             self.assertTrue(math.isfinite(predict_query_time(output / "xgboost_query_time.joblib", row)))

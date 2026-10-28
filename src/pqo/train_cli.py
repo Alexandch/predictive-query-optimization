@@ -31,7 +31,7 @@ def main() -> int:
         action="store_true",
         help="Give every query template equal total weight during fitting",
     )
-    parser.add_argument("--feature-version", choices=("legacy", "sql-v2"), default="legacy")
+    parser.add_argument("--feature-version", choices=("legacy", "sql-v2", "sql-v3", "plan-v1", "plan-v2"), default="legacy")
     args = parser.parse_args()
 
     metrics = train_xgboost(

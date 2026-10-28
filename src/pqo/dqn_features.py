@@ -308,6 +308,7 @@ def collect_action_database_context(
         "target_delete_count": 0,
         "exact_index_exists": False,
         "prefix_index_exists": False,
+        "key_overlap_index_count": 0,
     }
     if action.kind is not IndexActionKind.CREATE:
         return empty
@@ -338,16 +339,24 @@ def collect_action_database_context(
         index_rows = connection.execute(
             """
             SELECT i.indnkeyatts,
-                   array_agg(a.attname ORDER BY key.ordinality)
-                       FILTER (WHERE key.ordinality <= i.indnkeyatts
-                               AND a.attname IS NOT NULL)
+                   ARRAY(SELECT a.attname::text
+                         FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+                         LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=key.attnum
+                         ORDER BY key.ordinality),
+                   (i.indisvalid AND i.indisready AND am.amname='btree'
+                    AND i.indpred IS NULL AND i.indexprs IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM unnest(i.indoption) option WHERE option <> 0)
+                    AND NOT EXISTS (SELECT 1 FROM unnest(i.indclass) cls(opcoid)
+                                    JOIN pg_opclass opc ON opc.oid=cls.opcoid WHERE NOT opc.opcdefault)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM unnest(i.indkey) WITH ORDINALITY key(attnum, ordinality)
+                        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=key.attnum
+                        WHERE key.ordinality <= i.indnkeyatts
+                          AND i.indcollation[(key.ordinality-1)::int] <> a.attcollation))
             FROM pg_index AS i
-            CROSS JOIN LATERAL unnest(i.indkey)
-                WITH ORDINALITY AS key(attnum, ordinality)
-            LEFT JOIN pg_attribute AS a
-              ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+            JOIN pg_class ic ON ic.oid=i.indexrelid
+            JOIN pg_am am ON am.oid=ic.relam
             WHERE i.indrelid = %s
-            GROUP BY i.indexrelid, i.indnkeyatts
             """,
             (relation[0],),
         ).fetchall()
@@ -356,16 +365,23 @@ def collect_action_database_context(
             connection.close()
 
     wanted = tuple(action.key_columns)
-    indexes = [tuple(row[1] or ()) for row in index_rows]
+    # Do not treat a partial/expression/invalid/non-B-tree index as an
+    # unconditional substitute. Preserve attribute positions and INCLUDE data.
+    matching = [row for row in index_rows if row[2]
+                and tuple((row[1] or ())[:int(row[0])])[:len(wanted)] == wanted]
+    needed = set(action.include_columns)
+    indexes = [tuple((row[1] or ())[:int(row[0])]) for row in matching
+               if needed <= set(row[1] or ())]
     return {
         "target_relation_rows": float(relation[1]),
         "target_relation_size_bytes": int(relation[2]),
-        "target_index_count": len(indexes),
+        "target_index_count": len(index_rows),
         "target_insert_count": int(relation[3]),
         "target_update_count": int(relation[4]),
         "target_delete_count": int(relation[5]),
         "exact_index_exists": any(keys == wanted for keys in indexes),
         "prefix_index_exists": any(keys[: len(wanted)] == wanted for keys in indexes),
+        "key_overlap_index_count": len(matching),
     }
 
 

@@ -1,0 +1,306 @@
+[
+  {
+    "feature": "numeric__sort_input_rows_max",
+    "importance": 0.23586466908454895
+  },
+  {
+    "feature": "numeric__estimated_total_cost",
+    "importance": 0.16152924299240112
+  },
+  {
+    "feature": "numeric__estimated_startup_cost",
+    "importance": 0.1292230486869812
+  },
+  {
+    "feature": "numeric__aggregate_input_bytes_sum",
+    "importance": 0.07774542272090912
+  },
+  {
+    "feature": "numeric__table_reference_count",
+    "importance": 0.06128465756773949
+  },
+  {
+    "feature": "numeric__aggregate_input_rows_max",
+    "importance": 0.059672120958566666
+  },
+  {
+    "feature": "numeric__estimated_rows_all_nodes",
+    "importance": 0.05931944400072098
+  },
+  {
+    "feature": "numeric__distinct_sort_signature_count",
+    "importance": 0.01959744468331337
+  },
+  {
+    "feature": "numeric__window_function_count",
+    "importance": 0.01881452463567257
+  },
+  {
+    "feature": "numeric__ranking_window_count",
+    "importance": 0.0176465455442667
+  },
+  {
+    "feature": "numeric__subquery_count",
+    "importance": 0.01699001155793667
+  },
+  {
+    "feature": "numeric__select_expression_count",
+    "importance": 0.016753723844885826
+  },
+  {
+    "feature": "numeric__window_partition_key_count",
+    "importance": 0.015275849960744381
+  },
+  {
+    "feature": "numeric__group_key_count",
+    "importance": 0.012675647623836994
+  },
+  {
+    "feature": "numeric__sort_input_bytes_sum",
+    "importance": 0.01156565360724926
+  },
+  {
+    "feature": "numeric__max_plan_depth",
+    "importance": 0.008063158951699734
+  },
+  {
+    "feature": "numeric__sort_node_count",
+    "importance": 0.007804413791745901
+  },
+  {
+    "feature": "numeric__node_count",
+    "importance": 0.006451390217989683
+  },
+  {
+    "feature": "numeric__hash_join_count",
+    "importance": 0.0059182350523769855
+  },
+  {
+    "feature": "numeric__estimated_plan_rows",
+    "importance": 0.005425501614809036
+  },
+  {
+    "feature": "numeric__window_order_key_count",
+    "importance": 0.005293066613376141
+  },
+  {
+    "feature": "numeric__aggregate_input_rows_sum",
+    "importance": 0.004881337285041809
+  },
+  {
+    "feature": "numeric__query_length",
+    "importance": 0.004581186920404434
+  },
+  {
+    "feature": "numeric__window_input_rows_max",
+    "importance": 0.004306101705878973
+  },
+  {
+    "feature": "numeric__aggregate_function_count",
+    "importance": 0.004190235398709774
+  },
+  {
+    "feature": "root_node__root_node_type_Limit",
+    "importance": 0.0029938367661088705
+  },
+  {
+    "feature": "root_node__root_node_type_Gather",
+    "importance": 0.0026451493613421917
+  },
+  {
+    "feature": "numeric__sort_input_bytes_max",
+    "importance": 0.00222908821888268
+  },
+  {
+    "feature": "numeric__aggregate_node_count",
+    "importance": 0.002123309299349785
+  },
+  {
+    "feature": "numeric__estimated_selectivity",
+    "importance": 0.002065085107460618
+  },
+  {
+    "feature": "numeric__cte_count",
+    "importance": 0.0018979809246957302
+  },
+  {
+    "feature": "numeric__window_input_rows_sum",
+    "importance": 0.0017637814162299037
+  },
+  {
+    "feature": "numeric__where_condition_count",
+    "importance": 0.0017511860933154821
+  },
+  {
+    "feature": "numeric__window_aggregate_count",
+    "importance": 0.0015699053183197975
+  },
+  {
+    "feature": "numeric__merge_join_count",
+    "importance": 0.001403685542754829
+  },
+  {
+    "feature": "numeric__seq_scan_count",
+    "importance": 0.0013688746839761734
+  },
+  {
+    "feature": "numeric__estimated_plan_width",
+    "importance": 0.0013248601462692022
+  },
+  {
+    "feature": "numeric__sort_input_rows_sum",
+    "importance": 0.001136433333158493
+  },
+  {
+    "feature": "numeric__has_group_by",
+    "importance": 0.0009505226626060903
+  },
+  {
+    "feature": "numeric__distinct_aggregate_count",
+    "importance": 0.000624991487711668
+  },
+  {
+    "feature": "numeric__sorted_aggregate_node_count",
+    "importance": 0.0005981996655464172
+  },
+  {
+    "feature": "numeric__join_count",
+    "importance": 0.0005750588607043028
+  },
+  {
+    "feature": "numeric__incremental_sort_node_count",
+    "importance": 0.0005059979157522321
+  },
+  {
+    "feature": "numeric__window_agg_node_count",
+    "importance": 0.0004265170427970588
+  },
+  {
+    "feature": "numeric__window_input_bytes_sum",
+    "importance": 0.0003136371960863471
+  },
+  {
+    "feature": "numeric__index_scan_count",
+    "importance": 0.00017940685211215168
+  },
+  {
+    "feature": "numeric__relation_row_estimate_sum",
+    "importance": 0.00014563380682375282
+  },
+  {
+    "feature": "root_node__root_node_type_Aggregate",
+    "importance": 0.000117103336378932
+  },
+  {
+    "feature": "numeric__nested_loop_count",
+    "importance": 9.048570791492239e-05
+  },
+  {
+    "feature": "numeric__inner_join_count",
+    "importance": 6.125647632870823e-05
+  },
+  {
+    "feature": "numeric__largest_relation_rows",
+    "importance": 5.742802022723481e-05
+  },
+  {
+    "feature": "root_node__root_node_type_Sort",
+    "importance": 3.531809852574952e-05
+  },
+  {
+    "feature": "numeric__left_join_count",
+    "importance": 2.851372664736118e-05
+  },
+  {
+    "feature": "root_node__root_node_type_Hash Join",
+    "importance": 2.7136484277434647e-05
+  },
+  {
+    "feature": "numeric__unique_table_count",
+    "importance": 2.37187141465256e-05
+  },
+  {
+    "feature": "numeric__aggregate_filter_count",
+    "importance": 1.5482100934605114e-05
+  },
+  {
+    "feature": "numeric__existing_index_count",
+    "importance": 1.5058229109854437e-05
+  },
+  {
+    "feature": "numeric__materialized_cte_count",
+    "importance": 1.4903196642990224e-05
+  },
+  {
+    "feature": "numeric__hashed_aggregate_node_count",
+    "importance": 1.4663769434264395e-05
+  },
+  {
+    "feature": "numeric__has_order_by",
+    "importance": 1.4437282516155392e-05
+  },
+  {
+    "feature": "numeric__cte_reference_count",
+    "importance": 7.064953479130054e-06
+  },
+  {
+    "feature": "root_node__root_node_type_Unique",
+    "importance": 6.599526386708021e-06
+  },
+  {
+    "feature": "numeric__relation_size_bytes",
+    "importance": 4.997163159714546e-06
+  },
+  {
+    "feature": "root_node__root_node_type_Incremental Sort",
+    "importance": 0.0
+  },
+  {
+    "feature": "root_node__root_node_type_Index Scan",
+    "importance": 0.0
+  },
+  {
+    "feature": "root_node__root_node_type_Nested Loop",
+    "importance": 0.0
+  },
+  {
+    "feature": "root_node__root_node_type_Seq Scan",
+    "importance": 0.0
+  },
+  {
+    "feature": "root_node__root_node_type_WindowAgg",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__has_distinct",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__right_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__full_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__cross_join_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__relation_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__index_only_scan_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__bitmap_heap_scan_count",
+    "importance": 0.0
+  },
+  {
+    "feature": "numeric__index_size_bytes",
+    "importance": 0.0
+  }
+]

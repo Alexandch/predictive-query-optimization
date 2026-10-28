@@ -6,6 +6,7 @@ from dataclasses import asdict
 from difflib import unified_diff
 import faulthandler
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -45,6 +46,7 @@ from PyQt6.QtWidgets import (
 
 from .analysis_service import QueryAnalysis, analyze_query, analyze_query_adaptive
 from .app_paths import resource_root, writable_root
+from .model_trial import activate_trial, rollback_trial, materialize_trial, trial_state
 from .calibration import (
     MINIMUM_ACTIVE_SAMPLES,
     calibrate_query,
@@ -83,6 +85,7 @@ from .sql_rewrite import (
     evaluate_sql_rewrites,
     evaluate_sql_variant,
     generate_sql_rewrites,
+    sql_rewrite_rules,
 )
 from .rewrite_journal import journal_summary, export_rewrite_journal
 from .structural_feedback import (
@@ -327,9 +330,35 @@ def _format_index_impact(step: SequentialRecommendationStep) -> str:
             "PostgreSQL не зарегистрировал операции записи после последнего "
             "сброса статистики"
         )
+    overlap = (
+        f"   • Пересечение: {step.target_key_overlap_count} существующих индексов "
+        "с такими ведущими ключами, но без полного покрытия кандидата. Новый "
+        "индекс будет дополнительным; старые индексы автоматически не удаляются."
+        if step.target_key_overlap_count else
+        "   • Пересечение: подходящий обычный B-tree с такими ведущими ключами не найден."
+    )
+    if step.target_key_overlap_count is None:
+        overlap = "   • Пересечение: сведения о существующих ведущих ключах не сохранены."
+    payload = (
+        "   • INCLUDE: " + ", ".join(step.action.include_columns) +
+        ". Это хранимые данные, не ключи поиска или сортировки; index-only scan "
+        "зависит также от видимости строк. Обновление этих столбцов может препятствовать HOT."
+        if step.action.include_columns else "   • INCLUDE: дополнительных столбцов нет."
+    )
+    gain = step.before_time_ms - step.after_time_ms
+    payback = (
+        f"   • Только стоимость построения: около {max(1, math.ceil(step.creation_time_ms / gain))} "
+        "повторений этого SELECT при сохранении измеренной экономии. Это грубый "
+        "ориентир без стоимости записи, хранения и изменения нагрузки."
+        if gain > 0 and step.creation_time_ms > 0 else
+        "   • Окупаемость построения не оценена: недостаточно измерений."
+    )
     return "\n".join(
         (
             "   Оценка влияния на другие операции:",
+            "   • Ключи B-tree: " + ", ".join(step.action.key_columns) + ".",
+            payload,
+            overlap,
             f"   • Диск: {storage_text}.",
             (
                 f"   • Индексов на таблице: сейчас "
@@ -337,16 +366,18 @@ def _format_index_impact(step: SequentialRecommendationStep) -> str:
                 f"{step.target_existing_index_count + 1}."
             ),
             (
-                "   • Запись: каждый INSERT/DELETE и UPDATE индексируемых "
-                "столбцов потребует обслуживания ещё одного B-tree; фактическая "
+                "   • Запись: INSERT обслуживает ещё один B-tree; UPDATE индексируемых "
+                "ключей и INCLUDE-столбцов может препятствовать HOT. DELETE и последующая "
+                "очистка также добавляют работу; фактическая "
                 "задержка записи этим тестом не измерялась."
             ),
-            f"   • Наблюдаемая активность таблицы: {activity}.",
+            f"   • Наблюдаемая активность таблицы: {activity}. Это счётчики, не частота и не прогноз нагрузки.",
             (
                 f"   • Построение в тесте: {step.creation_time_ms:.2f} мс; обычный "
                 "CREATE INDEX может блокировать запись, поэтому в production "
                 "нужно окно обслуживания или CREATE INDEX CONCURRENTLY."
             ),
+            payback,
             (
                 "   • Другие SELECT: PostgreSQL может не использовать индекс, "
                 "но дополнительный индекс занимает диск и кэш. Ускорение доказано "
@@ -433,6 +464,7 @@ class MainWindow(QMainWindow):
     def _start_worker(self, worker: Worker) -> None:
         """Use Python-owned thread states; deliver results to Qt only via signals."""
         self._active_workers.add(worker)
+        self._refresh_trial_controls()
         worker.signals.completed.connect(
             self._worker_completed, Qt.ConnectionType.QueuedConnection
         )
@@ -441,6 +473,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object)
     def _worker_completed(self, worker):
         self._active_workers.discard(worker)
+        self._refresh_trial_controls()
 
     def closeEvent(self, event):
         if self._active_workers:
@@ -451,6 +484,7 @@ class MainWindow(QMainWindow):
 
     def _set_query_actions_enabled(self, enabled: bool) -> None:
         self._query_operation_active = not enabled
+        self._refresh_trial_controls()
         self.sql_editor.setReadOnly(not enabled)
         self.analyze_button.setEnabled(enabled)
         self.deep_analyze_button.setEnabled(enabled)
@@ -1009,6 +1043,19 @@ class MainWindow(QMainWindow):
         form.addRow("Разрешённые схемы", self.allowed_schemas_edit)
         form.addRow("Пароль", self.password_edit)
         form.addRow("Модель XGBoost", self._path_row(self.xgb_model_edit, False))
+        trial_actions = QHBoxLayout()
+        self.activate_trial_button = QPushButton("Тестировать новую XGBoost")
+        self.restore_model_button = QPushButton("Вернуть прежнюю модель")
+        self.activate_trial_button.clicked.connect(self._activate_model_trial)
+        self.restore_model_button.clicked.connect(self._rollback_model_trial)
+        trial_actions.addWidget(self.activate_trial_button)
+        trial_actions.addWidget(self.restore_model_button)
+        form.addRow("Тестовая модель", trial_actions)
+        self.trial_model_status = QLabel()
+        self.trial_model_status.setWordWrap(True)
+        form.addRow("", self.trial_model_status)
+        self.xgb_model_edit.textChanged.connect(self._refresh_trial_controls)
+        self._refresh_trial_controls()
         form.addRow("Модель DQN", self._path_row(self.dqn_model_edit, False))
         form.addRow(
             "Последовательная DQN",
@@ -1036,7 +1083,58 @@ class MainWindow(QMainWindow):
         actions.addStretch()
         layout.addLayout(actions)
         layout.addStretch()
-        self.tabs.addTab(page, "Настройки")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, "Настройки")
+
+    def _refresh_trial_controls(self):
+        if not hasattr(self, "activate_trial_button"):
+            return
+        busy = bool(self._active_workers) or getattr(self, "_query_operation_active", False)
+        current = Path(self.xgb_model_edit.text()).resolve()
+        state = trial_state(self.preferences)
+        selected = bool(state and current == Path(state["trial_path"]).resolve())
+        available = (PROJECT_ROOT / "models/xgboost/trial/xgboost_query_time.joblib").is_file()
+        self.activate_trial_button.setEnabled(not busy and available and not selected)
+        self.restore_model_button.setEnabled(not busy and selected)
+        self.trial_model_status.setText(
+            "Выбрана тестовая plan-v1. Прежняя модель сохранена для отката. "
+            "Контроль: aviation/retail; точность на других БД не гарантирована."
+            if selected else "Тестовая plan-v1 подключается отдельно, без замены основных весов."
+        )
+
+    def _switch_model_trial(self, restore=False):
+        if self._active_workers or getattr(self, "_query_operation_active", False):
+            self.statusBar().showMessage("Дождитесь завершения текущей операции.")
+            return
+        try:
+            current = Path(self.xgb_model_edit.text())
+            if restore:
+                target = rollback_trial(self.preferences, current)
+            else:
+                trial = materialize_trial(
+                    PROJECT_ROOT / "models/xgboost/trial/xgboost_query_time.joblib",
+                    WRITABLE_ROOT / "models/xgboost/trial",
+                )
+                target = activate_trial(self.preferences, trial, current,
+                                        ARTIFACT_ROOT / "model-trial-backups")
+            self.xgb_model_edit.setText(str(target))
+            self.last_prediction_ms = None
+            self.last_uncalibrated_prediction_ms = None
+            self.last_prediction_source = "ml"
+            self.predicted_value.setText("—")
+            self._refresh_calibration_status()
+            self._refresh_trial_controls()
+            self.statusBar().showMessage("Модель изменена. Запустите новый быстрый прогноз.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Переключение модели", str(exc))
+
+    def _activate_model_trial(self):
+        self._switch_model_trial()
+
+    def _rollback_model_trial(self):
+        self._switch_model_trial(restore=True)
 
     def _build_experiments_tab(self) -> None:
         page = QWidget()
@@ -2500,6 +2598,8 @@ class MainWindow(QMainWindow):
             return
 
         if plan.terminal_reason == "no_candidates":
+            coverage = "\n".join(f"{number}. {title}" for number, (_, title, _) in
+                                  enumerate(sql_rewrite_rules(), 1))
             self.rewrite_editor.clear()
             self.variant_status.setText("Автоматических вариантов нет. Можно ввести свой вариант справа и проверить его.")
             self.recommendation_text.setPlainText(
@@ -2510,9 +2610,7 @@ class MainWindow(QMainWindow):
                 "Это не означает, что запрос нельзя улучшить. Автоматический "
                 "режим применяет ограниченный набор правил и сравнивает "
                 "мультимножества строк через EXCEPT ALL на текущем снимке БД.\n\n"
-                "Проверены 7 правил: COUNT > 0 → EXISTS; COUNT = 0 → NOT EXISTS; "
-                "OR → IN; диапазон → BETWEEN; лишний ORDER BY; "
-                "NOT MATERIALIZED для повторного CTE; фильтр HAVING → WHERE.\n"
+                f"Проверены {len(sql_rewrite_rules())} правил:\n{coverage}\n"
                 "Нейросетевой генератор SQL сейчас не используется. Произвольные "
                 "перестановки JOIN, окон и агрегаций эти правила не выполняют.\n\n"
                 "Свой вариант можно ввести справа и нажать «Проверить вариант и измерить оба SQL»."

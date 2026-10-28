@@ -1,0 +1,15 @@
+{
+  "status": "opt-in external-control trial, not production promotion",
+  "model_sha256": "0958ca642d1e7e782bdb72ec401fae83db27096498d8bb1cbb67ebdec8297b7f",
+  "source": "D:\\\u041a\u0443\u0440\u0441\u0430\u0447 \u041c\u0414\u0438\u0421\u0423\u0411\u0414\\predictive-query-optimization\\artifacts\\heavy-fresh-training-20261027-v3\\identity",
+  "acceptance_queries": 24,
+  "acceptance_mae_ms": 332.4447430801392,
+  "scope": "aviation/retail in the measured local environment",
+  "checks": {
+    "validation": true,
+    "acceptance": true,
+    "regression": true,
+    "paired_interval": true
+  },
+  "production_overwritten": false
+}

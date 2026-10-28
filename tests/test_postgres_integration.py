@@ -43,6 +43,131 @@ from pqo.structural_validation import (
 class PostgreSQLIntegrationTests(unittest.TestCase):
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+    def test_index_overlap_uses_full_payload_and_usable_index_metadata(self):
+        import psycopg
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            try:
+                connection.execute("CREATE TEMP TABLE pqo_overlap_case(a int,b text,c int) ON COMMIT DROP")
+                schema = connection.execute("SELECT nspname FROM pg_namespace WHERE oid=pg_my_temp_schema()").fetchone()[0]
+                connection.execute("CREATE INDEX pqo_overlap_plain ON pqo_overlap_case(a)")
+                plain = IndexAction.create(schema, "pqo_overlap_case", ("a",))
+                covering = IndexAction.create(schema, "pqo_overlap_case", ("a",), ("b",))
+                self.assertTrue(collect_action_database_context(plain, connection=connection)["exact_index_exists"])
+                first = collect_action_database_context(covering, connection=connection)
+                self.assertFalse(first["prefix_index_exists"])
+                self.assertEqual(first["key_overlap_index_count"], 1)
+                connection.execute("CREATE INDEX pqo_overlap_partial ON pqo_overlap_case(a) INCLUDE(b) WHERE c>0")
+                connection.execute("CREATE INDEX pqo_overlap_expr ON pqo_overlap_case(lower(b),a)")
+                connection.execute("CREATE INDEX pqo_overlap_hash ON pqo_overlap_case USING hash(a)")
+                connection.execute("CREATE INDEX pqo_overlap_pattern ON pqo_overlap_case(b text_pattern_ops)")
+                connection.execute('CREATE INDEX pqo_overlap_collate ON pqo_overlap_case(b COLLATE "C")')
+                context = collect_action_database_context(covering, connection=connection)
+                self.assertEqual(context["target_index_count"], 6)
+                self.assertFalse(context["prefix_index_exists"])
+                self.assertEqual(context["key_overlap_index_count"], 1)
+                self.assertFalse(collect_action_database_context(
+                    IndexAction.create(schema, "pqo_overlap_case", ("b",)), connection=connection)["prefix_index_exists"])
+                connection.execute("CREATE INDEX pqo_overlap_cover ON pqo_overlap_case(a) INCLUDE(b)")
+                context = collect_action_database_context(covering, connection=connection)
+                self.assertTrue(context["exact_index_exists"])
+                self.assertTrue(context["prefix_index_exists"])
+                self.assertEqual(context["key_overlap_index_count"], 2)
+            finally:
+                connection.rollback()
+
+    def test_distinct_join_chain_preserves_cross_child_dependencies(self):
+        import psycopg
+        from pqo.sql_rewrite import generate_sql_rewrites, _queries_are_equivalent
+
+        prefix = """WITH parents(id,label) AS (VALUES
+            (1,'same'),(1,'same'),(2,'same'),(3,'other'),(4,'same'),(NULL,'null')),
+            first_child(owner_id,group_id) AS (VALUES
+            (1,10),(1,10),(1,11),(2,20),(3,NULL),(4,40),(NULL,10)),
+            second_child(group_id,flag) AS (VALUES
+            (10,'yes'),(10,'yes'),(11,'no'),(20,'no'),(NULL,'yes'),(40,'yes'))
+            """
+        with psycopg.connect(**DatabaseSettings.from_env().connection_kwargs()) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                for projection, predicate, expected in (
+                    ("p.id", "b.flag='yes'", [(1,), (4,)]),
+                    ("p.label", "b.flag='yes'", [('same',)]),
+                    ("p.id", "p.id=2 OR b.flag='yes'", [(1,), (2,), (4,)]),
+                    ("p.id", "b.flag IS NULL", []),
+                ):
+                    for extra_join in ("", "JOIN parents cp ON cp.id=p.id",
+                                       "JOIN first_child a2 ON a2.group_id=b.group_id AND a2.owner_id=p.id"):
+                        sql = f"""{prefix} SELECT DISTINCT {projection} FROM parents p
+                            JOIN first_child a ON a.owner_id=p.id
+                            JOIN second_child b ON b.group_id=a.group_id
+                            {extra_join} WHERE {predicate} ORDER BY {projection}"""
+                        candidate = next(item for item in generate_sql_rewrites(sql)
+                                         if item.rule_id == "distinct-inner-join-to-exists")
+                        self.assertTrue(_queries_are_equivalent(connection, sql, candidate.sql_text))
+                        self.assertEqual(connection.execute(candidate.sql_text).fetchall(), expected)
+
+    def test_composite_scalar_distinct_preserves_null_keys_and_duplicate_parents(self):
+        import psycopg
+        from pqo.sql_rewrite import generate_sql_rewrites, _queries_are_equivalent
+
+        sql = """WITH parents(id,kind) AS (VALUES
+            (1,'a'),(1,'a'),(1,'b'),(2,'a'),(3,'a'),(NULL,'a'),(1,NULL)),
+            children(id,kind,amount) AS (VALUES
+            (1,'a',10),(1,'a',10),(1,'a',NULL),(1,'b',4),(2,'a',NULL),(NULL,'a',99),(1,NULL,88))
+            SELECT p.id,p.kind,
+            (SELECT COUNT(DISTINCT "C".amount) FROM children "C" WHERE "C".id=p.id AND "C".kind=p.kind) AS unique_values,
+            (SELECT SUM(s.amount) FROM children s WHERE s.kind=p.kind AND s.id=p.id) AS total,
+            (SELECT COUNT(*) FROM children n WHERE p.id=n.id AND p.kind=n.kind) AS n,
+            (SELECT AVG(a.amount) FROM children a WHERE a.id=p.id AND a.kind=p.kind) AS average
+            FROM parents p"""
+        with psycopg.connect(**DatabaseSettings.from_env().connection_kwargs()) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                candidates = [item for item in generate_sql_rewrites(sql) if item.rule_id in {
+                    "scalar-aggregate-to-grouped-join", "shared-scalar-aggregates-to-grouped-join"}]
+                self.assertEqual(len(candidates), 2)
+                for candidate in candidates:
+                    self.assertTrue(_queries_are_equivalent(connection, sql, candidate.sql_text))
+                    rows = connection.execute(candidate.sql_text).fetchall()
+                    self.assertEqual(len(rows), 7)
+                    self.assertEqual(sum(row[:2] == (1, 'a') for row in rows), 2)
+                    for row in rows:
+                        if row[0] is None or row[1] is None or row[0] == 3:
+                            self.assertEqual(row[2:], (0, None, 0, None))
+                        elif row[:2] == (2, 'a'):
+                            self.assertEqual(row[2:], (0, None, 1, None))
+                        elif row[:2] == (1, 'a'):
+                            self.assertEqual(row[2:], (1, 20, 3, 10))
+
+    def test_shared_scalar_aggregates_preserve_nulls_duplicates_and_empty_inputs(self):
+        import psycopg
+        from pqo.sql_rewrite import generate_sql_rewrites, _queries_are_equivalent
+
+        with psycopg.connect(**DatabaseSettings.from_env().connection_kwargs()) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                for parents, children in (
+                    ("(1),(1),(2),(3),(NULL)", "(1,10),(1,10),(1,NULL),(2,NULL),(NULL,99)"),
+                    ("(1),(2),(NULL)", "(NULL::int,NULL::int)"),
+                ):
+                    sql = f'''WITH parents(id) AS (VALUES {parents}),
+                        children(order_id,amount) AS (VALUES {children})
+                        SELECT p.id,
+                        (SELECT SUM("Child".amount) FROM children "Child" WHERE "Child".order_id=p.id) AS total,
+                        (SELECT COUNT(*) FROM children x WHERE x.order_id=p.id) AS n,
+                        (SELECT COUNT(y.amount) FROM children y WHERE y.order_id=p.id) AS valued,
+                        (SELECT AVG(z.amount) FROM children z WHERE z.order_id=p.id) AS average
+                        FROM parents p'''
+                    candidate = next(item for item in generate_sql_rewrites(sql)
+                                     if item.rule_id == "shared-scalar-aggregates-to-grouped-join")
+                    self.assertTrue(_queries_are_equivalent(connection, sql, candidate.sql_text))
+                    rows = connection.execute(candidate.sql_text).fetchall()
+                    empty = next(row for row in rows if row[0] is None)
+                    self.assertEqual(empty, (None, None, 0, 0, None))
+                    self.assertEqual(len(rows), len(connection.execute(sql).fetchall()))
+
+
     def test_rewrite_journal_contains_plans_and_raw_paired_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             plan = evaluate_sql_variant(

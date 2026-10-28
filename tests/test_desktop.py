@@ -297,10 +297,30 @@ class DesktopTests(unittest.TestCase):
             text = window.recommendation_text.toPlainText()
             self.assertIn("ФАКТИЧЕСКАЯ ПРОВЕРКА НЕ ЗАПУСКАЛАСЬ", text)
             self.assertIn("PostgreSQL не выполнялся", text)
-            self.assertIn("Проверены 7 правил", text)
+            self.assertIn("Проверены 10 правил", text)
+            self.assertIn("Объединить коррелированные агрегаты", text)
             self.assertIn("ввести справа", text)
             self.assertNotIn("Обнаруженная предварительная агрегация", text)
             self.assertNotIn("ускоряющий вариант не найден", text)
+        finally:
+            window.close()
+
+    def test_shared_aggregate_rewrite_populates_right_editor_without_changing_left(self):
+        from pqo.sql_rewrite import generate_sql_rewrites
+        original = (Path(__file__).resolve().parents[1] /
+                    "examples/aviation-shared-aggregates-rewrite.sql").read_text(encoding="utf-8")
+        candidate = next(item for item in generate_sql_rewrites(original)
+                         if item.rule_id == "shared-scalar-aggregates-to-grouped-join")
+        evaluation = SQLRewriteEvaluation(candidate, True, 1690.348, 222.292, .868, True, None)
+        plan = SQLRewritePlan(original, (evaluation,), evaluation, 50, 5, .05, "recommended")
+        window = MainWindow()
+        try:
+            window.sql_editor.setPlainText(original)
+            window._show_rewrite_analysis(plan)
+            self.assertEqual(window.sql_editor.toPlainText(), original)
+            self.assertEqual(window.rewrite_editor.toPlainText(), candidate.sql_text)
+            self.assertTrue(window.apply_rewrite_button.isEnabled())
+            self.assertNotIn("СТРУКТУРНЫЕ РЕКОМЕНДАЦИИ", window.recommendation_text.toPlainText())
         finally:
             window.close()
 
@@ -401,6 +421,15 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("CREATE INDEX CONCURRENTLY", text)
         self.assertIn("только для текущего SQL", text)
         self.assertIn("влияние на задержку записи — не определено", text)
+        self.assertIn("не ключи поиска или сортировки", text)
+        self.assertIn("HOT", text)
+        self.assertIn("без стоимости записи", text)
+        self.assertIn("сведения о существующих ведущих ключах не сохранены", text)
+        from dataclasses import replace
+        overlap = _format_index_impact(replace(step, target_key_overlap_count=1, creation_time_ms=1200.0))
+        self.assertIn("1 существующих индексов", overlap)
+        self.assertIn("старые индексы автоматически не удаляются", overlap)
+        self.assertIn("около 12 повторений", overlap)
 
     def test_deep_measurement_plan_reports_median_range(self):
         from pqo.sequential_recommendation import SequentialRecommendationPlan

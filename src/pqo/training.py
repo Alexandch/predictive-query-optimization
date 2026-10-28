@@ -128,16 +128,26 @@ def train_xgboost(
 
     frame = pd.read_csv(dataset_path)
     _validate_dataset(frame)
-    if feature_version not in {"legacy", "sql-v2"}:
-        raise ValueError("feature_version must be legacy or sql-v2")
+    if feature_version not in {"legacy", "sql-v2", "sql-v3", "plan-v1", "plan-v2"}:
+        raise ValueError("feature_version must be legacy, sql-v2, sql-v3, plan-v1 or plan-v2")
     numeric_features = list(NUMERIC_FEATURES)
-    if feature_version == "sql-v2":
-        from .sql_features import EXTENDED_SQL_FEATURES, extract_sql_features
+    if feature_version in {"sql-v2", "sql-v3", "plan-v1", "plan-v2"}:
+        from .sql_features import EXTENDED_SQL_FEATURES, STRUCTURAL_SQL_FEATURES, extract_sql_features
 
         derived = {text: extract_sql_features(text).as_dict() for text in frame.sql_text.unique()}
-        for name in EXTENDED_SQL_FEATURES:
+        sql_features = EXTENDED_SQL_FEATURES + (STRUCTURAL_SQL_FEATURES if feature_version in {"sql-v3", "plan-v2"} else [])
+        for name in sql_features:
             frame[name] = frame.sql_text.map(lambda text: derived[text][name])
-        numeric_features += EXTENDED_SQL_FEATURES
+        numeric_features += sql_features
+    if feature_version in {"plan-v1", "plan-v2"}:
+        from .plan_features import PLAN_FLOW_FEATURES
+        missing = set(PLAN_FLOW_FEATURES).difference(frame.columns)
+        if missing or frame[PLAN_FLOW_FEATURES].isna().any().any():
+            raise ValueError(f"{feature_version} requires complete estimated plan-flow columns; backfill EXPLAIN first")
+        flow_values = frame[PLAN_FLOW_FEATURES].astype(float).to_numpy()
+        if not np.isfinite(flow_values).all() or (flow_values < 0).any():
+            raise ValueError("Estimated plan-flow values must be finite and non-negative")
+        numeric_features += PLAN_FLOW_FEATURES
     model_features = numeric_features + CATEGORICAL_FEATURES
     if target_transform not in {"log1p", "identity"}:
         raise ValueError("target_transform must be 'log1p' or 'identity'")
@@ -346,13 +356,13 @@ def train_xgboost(
 
 
 def prepare_prediction_frame(frame, artifact):
-    """Reconstruct missing SQL-v2 columns in legacy CSVs without modifying them."""
-    from .sql_features import EXTENDED_SQL_FEATURES, extract_sql_features
+    """Reconstruct missing structural SQL columns without modifying source CSVs."""
+    from .sql_features import EXTENDED_SQL_FEATURES, STRUCTURAL_SQL_FEATURES, extract_sql_features
 
     names = artifact["model_features"]
     missing = set(names).difference(frame.columns)
     if missing:
-        if not missing <= set(EXTENDED_SQL_FEATURES) or "sql_text" not in frame:
+        if not missing <= set(EXTENDED_SQL_FEATURES + STRUCTURAL_SQL_FEATURES) or "sql_text" not in frame:
             raise ValueError(f"Prediction features are missing: {', '.join(sorted(missing))}")
         frame = frame.copy()
         derived = {text: extract_sql_features(text).as_dict() for text in frame.sql_text.unique()}

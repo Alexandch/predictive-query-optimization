@@ -141,6 +141,9 @@ def validate_structural_recommendation(
     settings = settings or DatabaseSettings.from_env()
     connection = psycopg.connect(**settings.connection_kwargs())
     try:
+        # The two directions of EXCEPT ALL and all trial measurements must see
+        # one snapshot, including when shared rewrite helpers are used here.
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         connection.execute(
             "SELECT set_config('statement_timeout', %s, true)",
             (f"{settings.statement_timeout_ms}ms",),

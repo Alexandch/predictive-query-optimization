@@ -38,6 +38,7 @@ class SequentialRecommendationStep:
     target_insert_count: int = 0
     target_update_count: int = 0
     target_delete_count: int = 0
+    target_key_overlap_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +255,9 @@ def recommend_sequential_indexes(
                         ),
                         target_delete_count=int(
                             action_contexts[best_index]["target_delete_count"]
+                        ),
+                        target_key_overlap_count=int(
+                            action_contexts[best_index].get("key_overlap_index_count", 0)
                         ),
                     )
                 )

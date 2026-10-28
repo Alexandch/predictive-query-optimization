@@ -10,6 +10,24 @@ from pqo.index_environment import IndexExperimentEnvironment
 
 
 class IndexActionTests(unittest.TestCase):
+    def test_equality_prefix_precedes_range_regardless_of_sql_term_order(self):
+        for predicate in (
+            "scheduled_departure > TIMESTAMP '2025-01-01' AND departure_airport='MSQ'",
+            "departure_airport='MSQ' AND scheduled_departure > TIMESTAMP '2025-01-01'",
+            "scheduled_departure > TIMESTAMP '2025-01-01' AND 'MSQ'=departure_airport",
+        ):
+            actions = generate_index_actions(f"SELECT flight_id FROM aviation.flights WHERE {predicate} ORDER BY scheduled_departure")
+            self.assertIn(IndexAction.create("aviation", "flights", ("departure_airport", "scheduled_departure")), actions)
+
+    def test_sort_only_query_gets_candidate(self):
+        actions = generate_index_actions("SELECT flight_id,scheduled_departure FROM aviation.flights ORDER BY scheduled_departure LIMIT 100")
+        self.assertIn(IndexAction.create("aviation", "flights", ("scheduled_departure",)), actions)
+
+    def test_filter_and_sort_alternatives_are_both_retained(self):
+        actions = generate_index_actions("SELECT flight_id FROM aviation.flights WHERE departure_airport='MSQ' AND flight_id>100 ORDER BY scheduled_departure")
+        self.assertIn(IndexAction.create("aviation", "flights", ("departure_airport", "flight_id", "scheduled_departure")), actions)
+        self.assertIn(IndexAction.create("aviation", "flights", ("departure_airport", "scheduled_departure", "flight_id")), actions)
+
     def test_generates_single_composite_and_covering_candidates(self):
         actions = generate_index_actions(
             """

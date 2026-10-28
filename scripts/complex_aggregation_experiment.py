@@ -9,6 +9,9 @@ import pandas as pd
 from sqlglot import parse_one
 
 from pqo.complex_workload import complex_workload
+from pqo.broad_workload import broad_workload
+from pqo.structural_workload import structural_workload
+from pqo.flow_workload import flow_workload
 from pqo.dataset import collect_sample
 from pqo.experiments import assess_candidate
 from pqo.explain import collect_explain
@@ -48,12 +51,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("artifacts/complex-aggregation-development"))
     parser.add_argument("--reuse-measurements", action="store_true")
+    parser.add_argument("--workload", choices=("complex", "broad", "structural", "flow"), default="complex")
     parser.add_argument("--base", type=Path, default=Path("artifacts/window-cte-development/training.csv"))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     baseline = Path("models/xgboost/xgboost_query_time.joblib")
     baseline_hash = hashlib.sha256(baseline.read_bytes()).hexdigest()
-    cases = list(complex_workload())
+    generators = {"complex": complex_workload, "broad": broad_workload,
+                  "structural": structural_workload, "flow": flow_workload}
+    cases = list(generators[args.workload]())
     manifest = [{"split": split, "family": case.template_id, "sql": case.sql_text}
                 for split, case in cases]
     manifest_path = args.output / "manifest.json"
@@ -66,6 +72,23 @@ def main():
         "promotion_requires": "validation and acceptance MAE/Q-error improve; old-data MAE <=110%; existing internal gate",
         "cases": manifest,
     }
+    if args.workload == "broad":
+        protocol["workload"] = "broad-v1"
+    if args.workload == "structural":
+        protocol.update({
+            "workload": "structural-v1", "feature_version": "sql-v3",
+            "candidates": ["sql-v2", "sql-v3"],
+            "target_transform": "identity",
+            "selection": "fixed sql-v3 hypothesis; sql-v2 is a same-data ablation, not tuned",
+            "promotion_requires": protocol["promotion_requires"] + "; sql-v3 must also improve same-data sql-v2 MAE/Q-error on validation and acceptance",
+        })
+    if args.workload == "flow":
+        protocol.update({
+            "workload": "flow-v1", "feature_version": "plan-v1",
+            "candidates": ["sql-v2", "plan-v1"], "target_transform": "identity",
+            "selection": "fixed plan-v1 hypothesis; sql-v2 is a same-data ablation, not tuned",
+            "promotion_requires": protocol["promotion_requires"] + "; plan-v1 must also improve same-data sql-v2 MAE/Q-error on validation and acceptance",
+        })
     if not args.reuse_measurements:
         if manifest_path.exists():
             raise FileExistsError("Use a new output directory or --reuse-measurements")
@@ -84,13 +107,25 @@ def main():
     old_manifest = json.loads(Path("artifacts/window-cte-development/split-manifest.json").read_text(encoding="utf-8"))
     prior_holdout = {identity(item["sql"]) for item in old_manifest if item["split"] != "train"}
     assert not prior_holdout.intersection(existing | sets["train"])
+    if args.workload in {"broad", "structural", "flow"}:
+        previous = json.loads(Path("artifacts/complex-aggregation-development-v2/manifest.json").read_text(encoding="utf-8"))
+        protected = {identity(item["sql"]) for item in previous["cases"] if item["split"] != "train"}
+        assert not protected.intersection(existing | sets["train"]), "Previous holdouts must remain excluded"
+    if args.workload in {"structural", "flow"}:
+        previous = json.loads(Path("artifacts/broad-first-prediction-20261027-v2/manifest.json").read_text(encoding="utf-8"))
+        protected = {identity(item["sql"]) for item in previous["cases"] if item["split"] != "train"}
+        assert not protected.intersection(existing | sets["train"]), "Broad experiment holdouts must remain excluded"
+    if args.workload == "flow":
+        previous = json.loads(Path("artifacts/structural-sql-v3-20261027/manifest.json").read_text(encoding="utf-8"))
+        protected = {identity(item["sql"]) for item in previous["cases"] if item["split"] != "train"}
+        assert not protected.intersection(existing | sets["train"]), "Structural experiment holdouts must remain excluded"
 
     measured = args.output / "measurements.csv"
     if not args.reuse_measurements:
         rows = []
         for _, case in cases:
             collect_explain(case.sql_text, analyze=False)
-        print("All 60 queries passed PostgreSQL EXPLAIN preflight", flush=True)
+        print(f"All {len(cases)} queries passed PostgreSQL EXPLAIN preflight", flush=True)
         for number, (split, case) in enumerate(cases, 1):
             collect_sample(case, persist=False)
             samples = [collect_sample(case, persist=False).values for _ in range(3)]
@@ -107,13 +142,17 @@ def main():
     combined = args.output / "training.csv"
     pd.concat([base, train], ignore_index=True).to_csv(combined, index=False)
     candidates = {}
-    for transform in protocol["candidates"]:
-        destination = args.output / transform
-        train_xgboost(combined, destination, tune=False, feature_version="sql-v2",
+    for name in protocol["candidates"]:
+        feature_experiment = args.workload in {"structural", "flow"}
+        transform = "identity" if feature_experiment else name
+        version = name if feature_experiment else "sql-v2"
+        destination = args.output / name
+        train_xgboost(combined, destination, tune=False, feature_version=version,
                       target_transform=transform, template_balanced=True)
-        candidates[transform] = destination / "xgboost_query_time.joblib"
+        candidates[name] = destination / "xgboost_query_time.joblib"
     validation_results = {name: evaluate(path, validation) for name, path in candidates.items()}
-    selected = min(candidates, key=lambda name: validation_results[name]["mae_ms"])
+    selected = ({"structural": "sql-v3", "flow": "plan-v1"}.get(args.workload)
+                or min(candidates, key=lambda name: validation_results[name]["mae_ms"]))
     old_validation = evaluate(baseline, validation)
     old_acceptance = evaluate(baseline, acceptance)
     final_acceptance = evaluate(candidates[selected], acceptance)
@@ -137,11 +176,20 @@ def main():
               "known_data_regression_not_independent": {"baseline": old_regression, "selected": new_regression},
               "internal_gate": {"allowed": internal.allowed, "explanation": internal.explanation},
               "promotion_allowed": gate, "primary_replaced": False}
+    if args.workload in {"structural", "flow"}:
+        ablation = evaluate(candidates["sql-v2"], acceptance)
+        report["acceptance"]["same_data_sql_v2"] = ablation
+        report["feature_ablation_allowed"] = all(
+            validation_results[selected][metric] < validation_results["sql-v2"][metric]
+            and final_acceptance[metric] < ablation[metric]
+            for metric in ("mae_ms", "median_q_error")
+        )
+        report["promotion_allowed"] = gate and report["feature_ablation_allowed"]
     assert hashlib.sha256(baseline.read_bytes()).hexdigest() == baseline_hash
     (args.output / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     for section in ("validation", "acceptance", "known_data_regression_not_independent"):
         print(section, {key: {k: v for k, v in value.items() if k != "points"} for key, value in report[section].items()}, flush=True)
-    print("selected", selected, "promotion_allowed", gate, "internal_gate", internal.allowed, flush=True)
+    print("selected", selected, "promotion_allowed", report["promotion_allowed"], "internal_gate", internal.allowed, flush=True)
 
 
 if __name__ == "__main__":

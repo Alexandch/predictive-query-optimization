@@ -7,6 +7,41 @@ from pqo.plan_features import extract_plan_features
 
 
 class PlanFeatureTests(unittest.TestCase):
+    def test_flows_use_child_estimates_not_operator_output_or_actual_rows(self):
+        scan = {"Node Type": "Seq Scan", "Plan Rows": 10000, "Plan Width": 40,
+                "Actual Rows": 999999}
+        aggregate = {"Node Type": "Aggregate", "Strategy": "Hashed", "Plan Rows": 20,
+                     "Plan Width": 16, "Plans": [scan]}
+        sort = {"Node Type": "Incremental Sort", "Plan Rows": 20, "Plan Width": 16,
+                "Sort Key": ["revenue DESC"], "Plans": [aggregate]}
+        window = {"Node Type": "WindowAgg", "Plan Rows": 20, "Plan Width": 24,
+                  "Plans": [sort, {"Node Type": "Result", "Parent Relationship": "InitPlan",
+                                   "Plan Rows": 100000, "Plan Width": 100}]}
+        values = extract_plan_features({"Plan": window})
+        self.assertEqual(values.aggregate_input_rows_sum, 10000)
+        self.assertEqual(values.aggregate_input_bytes_sum, 400000)
+        self.assertEqual(values.sort_input_rows_sum, 20)
+        self.assertEqual(values.sort_input_bytes_max, 320)
+        self.assertEqual(values.window_input_rows_sum, 20)
+        self.assertEqual(values.window_input_bytes_sum, 320)
+        self.assertEqual(values.window_agg_node_count, 1)
+        self.assertEqual(values.incremental_sort_node_count, 1)
+        self.assertEqual(values.hashed_aggregate_node_count, 1)
+        self.assertEqual(values.distinct_sort_signature_count, 1)
+
+    def test_flow_signature_deduplication_and_empty_defaults(self):
+        child = {"Node Type": "Seq Scan", "Plan Rows": 100, "Plan Width": 8}
+        inner = {"Node Type": "Sort", "Plan Rows": 100, "Plan Width": 8,
+                 "Sort Key": ["a"], "Plans": [child]}
+        outer = {"Node Type": "Sort", "Sort Key": ["a"], "Plans": [inner]}
+        values = extract_plan_features({"Plan": outer})
+        self.assertEqual(values.sort_input_rows_sum, 200)
+        self.assertEqual(values.sort_input_rows_max, 100)
+        self.assertEqual(values.distinct_sort_signature_count, 1)
+        empty = extract_plan_features({"Plan": {"Node Type": "Result"}})
+        from pqo.plan_features import PLAN_FLOW_FEATURES
+        self.assertTrue(all(empty.as_dict()[name] == 0 for name in PLAN_FLOW_FEATURES))
+
     def test_extracts_and_aggregates_nested_plan_features(self):
         explain_json = [
             {

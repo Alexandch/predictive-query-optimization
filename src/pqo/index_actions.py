@@ -96,6 +96,10 @@ def generate_index_actions(
     predicate_columns = _columns_by_table(
         _predicate_nodes(tree), alias_to_table
     )
+    equality_columns = _columns_by_table(
+        _equality_nodes(tree),
+        alias_to_table,
+    )
     order_columns = _columns_by_table(tree.find_all(exp.Order), alias_to_table)
     selected_columns = _columns_by_table(
         (
@@ -135,11 +139,20 @@ def generate_index_actions(
         predicates = predicate_columns.get(alias, [])
         ordering = order_columns.get(alias, [])
         includes = selected_columns.get(alias, [])
+        equalities = [column for column in equality_columns.get(alias, [])
+                      if column in predicates]
 
         key_candidates: list[tuple[str, ...]] = [(column,) for column in predicates]
-        combined = _unique((*predicates, *ordering))[:3]
-        if len(combined) > 1:
-            key_candidates.append(tuple(combined))
+        # Equality keys first, then ordering keys: a range column mentioned
+        # first in SQL must not displace the equality prefix. Retain singles.
+        for combined in (
+            _unique((*equalities, *predicates, *ordering))[:3],
+            _unique((*equalities, *ordering, *predicates))[:3],
+        ):
+            if len(combined) > 1:
+                key_candidates.append(tuple(combined))
+        if not predicates and ordering:
+            key_candidates.append(tuple(_unique(ordering)[:3]))
 
         for keys in key_candidates:
             action = IndexAction.create(schema_name, table_name, keys)
@@ -179,6 +192,15 @@ def _predicate_nodes(tree: exp.Expression):
         condition = join.args.get("on")
         if condition is not None:
             yield condition
+
+
+def _equality_nodes(tree):
+    simple = (exp.Column, exp.Literal, exp.Boolean, exp.Cast)
+    for predicate in _predicate_nodes(tree):
+        for node in predicate.find_all(exp.EQ):
+            if (isinstance(node.this, simple) and isinstance(node.expression, simple)
+                    and (isinstance(node.this, exp.Column) or isinstance(node.expression, exp.Column))):
+                yield node
 
 
 def _columns_by_table(
