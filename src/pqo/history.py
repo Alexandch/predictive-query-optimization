@@ -50,6 +50,7 @@ class HistoryRecord:
     sequential_steps: tuple[HistorySequentialStep, ...] = ()
     structural_feedback: tuple[HistoryStructuralFeedback, ...] = ()
     baseline_timed_out: bool = False
+    candidate_trial_evidence: dict | None = None
 
 
 def load_analysis_history(
@@ -113,6 +114,10 @@ def load_analysis_history(
             "COALESCE((to_jsonb(sequential)->>'baseline_timed_out')::boolean, false)"
             if sequential_history_ready else "false"
         )
+        candidate_evidence_column = (
+            "to_jsonb(sequential)->'candidate_trial_evidence'"
+            if sequential_history_ready else "NULL"
+        )
         structural_feedback_join = (
             """
             LEFT JOIN LATERAL (
@@ -154,7 +159,8 @@ def load_analysis_history(
                 recommendation.estimated_improvement,
                 {sequential_columns},
                 {structural_feedback_column},
-                {baseline_timeout_column}
+                {baseline_timeout_column},
+                {candidate_evidence_column}
             FROM pqo.query_run AS qr
             LEFT JOIN pqo.execution_plan AS ep ON ep.query_run_id = qr.id
             LEFT JOIN LATERAL (
@@ -197,6 +203,7 @@ def load_analysis_history(
             measured_improvement_ratio=row[12],
             sequential_terminal_reason=row[13],
             baseline_timed_out=bool(row[16]),
+            candidate_trial_evidence=row[17],
             sequential_steps=tuple(
                 HistorySequentialStep(
                     step_number=step["step_number"],
@@ -227,6 +234,46 @@ def load_analysis_history(
         )
         for row in rows
     ]
+
+
+def format_candidate_trial_history(record: HistoryRecord) -> str:
+    """Read-only description; historical DDL is never executed."""
+    evidence = record.candidate_trial_evidence
+    if evidence is None:
+        return "Протокол индексных проб для этой записи не сохранён."
+    if evidence.get("version") != 1:
+        return "Версия протокола индексных проб не поддерживается."
+    checks = evidence["checks"]
+    reasons = {
+        "index_not_used": "PostgreSQL не использовал индекс",
+        "non_positive_reward": "выигрыш не компенсировал издержки",
+        "absolute_gain_too_small": "недостаточная абсолютная экономия",
+        "relative_gain_too_small": "недостаточный относительный выигрыш",
+        "budget_exceeded": "превышен бюджет размера",
+        "statement_timeout": "проверка остановлена по тайм-ауту",
+    }
+    lines = [
+        f"Проверено кандидатов: {len(checks)}; лимит на шаг: {evidence['max_candidates_per_step']}.",
+        "Ограниченная проверка по рейтингу модели, не полный перебор индексов.",
+    ]
+    for number, check in enumerate(checks, 1):
+        status = "принят в проверенный план" if check["accepted"] else "отклонён"
+        after = check["after_time_ms"]
+        timing = (f"{check['before_time_ms']:.2f} → {after:.2f} мс"
+                  if after is not None else "замер с индексом не завершён")
+        lines.extend([
+            f"{number}. Шаг {check['plan_step']}: {check['proposed_ddl']}",
+            f"{status}; {timing}; Q={check['predicted_q']:.4f}.",
+        ])
+        if check["rejection_reason"]:
+            reason = check["rejection_reason"]
+            lines.append(f"Причина отказа: {reasons.get(reason, reason)} ({reason}).")
+        if check["index_size_bytes"] is not None:
+            lines.append(f"Размер: {check['index_size_bytes']} байт.")
+        if check["creation_time_ms"] is not None:
+            lines.append(f"Построение: {check['creation_time_ms']:.2f} мс.")
+    lines.append("Это архив проверки с откатом, а не сведения о текущих индексах БД.")
+    return "\n".join(lines)
 
 
 def check_database_connection(settings: DatabaseSettings) -> str:

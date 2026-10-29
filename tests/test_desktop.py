@@ -50,6 +50,62 @@ from pqo.sql_rewrite import (
 
 
 class DesktopTests(unittest.TestCase):
+    def candidate_choice_plan(self):
+        original = "SELECT 1 AS value"
+        evaluations = (
+            SQLRewriteEvaluation(SQLRewriteCandidate("fast", "Быстрый вариант", "SELECT 1::int AS value"),
+                                 True, 100., 40., .6, True, None),
+            SQLRewriteEvaluation(SQLRewriteCandidate("slow", "Медленный вариант", "SELECT CAST(1 AS bigint) AS value"),
+                                 True, 100., 110., -.1, False, "improvement_too_small"),
+            SQLRewriteEvaluation(SQLRewriteCandidate("mismatch", "Другой результат", "SELECT 2 AS value"),
+                                 False, None, None, None, False, "result_mismatch"),
+        )
+        return SQLRewritePlan(original, evaluations, evaluations[0], 5., 5., .05, "recommended")
+
+    def test_rewrite_candidate_selector_preserves_source_and_rejects_unsafe_apply(self):
+        window = MainWindow()
+        try:
+            plan = self.candidate_choice_plan()
+            window.sql_editor.setPlainText(plan.original_sql)
+            window._show_rewrite_analysis(plan)
+            self.assertEqual(window.rewrite_candidate_combo.count(), 3)
+            self.assertTrue(window.apply_rewrite_button.isEnabled())
+            self.assertIn("100.00 → 40.00", window.rewrite_candidate_details.toPlainText())
+            window.rewrite_candidate_combo.setCurrentIndex(1)
+            self.assertEqual(window.rewrite_editor.toPlainText(), plan.evaluations[1].candidate.sql_text)
+            self.assertFalse(window.apply_rewrite_button.isEnabled())
+            self.assertIn("Недостаточное ускорение", window.rewrite_candidate_details.toPlainText())
+            window.rewrite_candidate_combo.setCurrentIndex(2)
+            self.assertIn("Результаты различаются", window.rewrite_candidate_details.toPlainText())
+            self.assertIn("замеры отсутствуют", window.rewrite_candidate_details.toPlainText())
+            self.assertFalse(window.apply_rewrite_button.isEnabled())
+            window.rewrite_candidate_combo.setCurrentIndex(0)
+            self.assertTrue(window.apply_rewrite_button.isEnabled())
+            self.assertEqual(window.sql_editor.toPlainText(), plan.original_sql)
+        finally:
+            window.close()
+
+    def test_rewrite_choices_cleared_on_source_edit_and_disabled_during_work(self):
+        window = MainWindow()
+        try:
+            plan = self.candidate_choice_plan()
+            window.sql_editor.setPlainText(plan.original_sql)
+            window._show_rewrite_analysis(plan)
+            window._set_query_actions_enabled(False)
+            self.assertFalse(window.rewrite_candidate_combo.isEnabled())
+            window._select_rewrite_candidate(2)
+            self.assertEqual(window.rewrite_editor.toPlainText(), plan.recommended.candidate.sql_text)
+            window._set_query_actions_enabled(True)
+            window.rewrite_editor.setPlainText("SELECT 3 AS value")
+            self.assertFalse(window.apply_rewrite_button.isEnabled())
+            self.assertEqual(window.rewrite_candidate_details.toPlainText(), "")
+            window.sql_editor.setPlainText("SELECT 4 AS value")
+            self.assertEqual(window.rewrite_candidate_combo.count(), 0)
+            self.assertFalse(window.rewrite_candidate_combo.isEnabled())
+            self.assertFalse(window.apply_rewrite_button.isEnabled())
+        finally:
+            window.close()
+
     def test_deep_result_shows_retries_without_enabling_rejected_plan(self):
         action = IndexAction.create("aviation", "flights", ("status",))
         checks = (SequentialCandidateCheck(action, 1, .8, False, "index_not_used", 100., 110.),)
@@ -664,6 +720,9 @@ class DesktopTests(unittest.TestCase):
             window._show_history([record])
 
             self.assertEqual(window.history_table.columnCount(), 11)
+            window.history_table.setCurrentCell(0, 0)
+            self.assertIn("не сохранён", window.history_candidate_details.toPlainText())
+            self.assertTrue(window.history_candidate_details.isReadOnly())
             self.assertEqual(window.history_table.item(0, 0).text(), "4/8")
             self.assertIn("4.12", window.history_table.item(0, 7).text())
             self.assertEqual(window.history_table.item(0, 8).text(), "+25.0%")

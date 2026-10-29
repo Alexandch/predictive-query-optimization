@@ -264,6 +264,8 @@ def _collect_batch_unlocked(cases, settings, output, *, max_cases, budget_second
             try:
                 plan = evaluate_sql_rewrites(
                     case.sql, settings, repetitions=repetitions,
+                    # Preserve the candidate contract of the frozen experiments.
+                    max_combined_candidates=0,
                     minimum_baseline_time_ms=0, minimum_absolute_improvement_ms=2,
                     minimum_improvement_ratio=.05,
                     journal_directory=output / "journal", journal_source=f"batch_{case.role}",

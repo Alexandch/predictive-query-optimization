@@ -244,8 +244,10 @@ def save_sequential_analysis(
     source: str = "application",
     connection=None,
 ) -> tuple[int, int]:
-    """Persist a measured sequential plan and all of its accepted steps."""
+    """Persist the plan, accepted steps, and rejected candidate evidence atomically."""
     import psycopg
+    from psycopg.types.json import Jsonb
+    from dataclasses import asdict
 
     settings = settings or DatabaseSettings.from_env()
     normalized_sql = sql_text.strip()
@@ -266,6 +268,16 @@ def save_sequential_analysis(
                 owned_connection.execute(
                     "ALTER TABLE pqo.sequential_analysis ADD COLUMN IF NOT EXISTS "
                     "baseline_timed_out boolean NOT NULL DEFAULT false"
+                )
+            evidence_ready = owned_connection.execute(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = 'pqo' AND table_name = 'sequential_analysis' "
+                "AND column_name = 'candidate_trial_evidence')"
+            ).fetchone()[0]
+            if not evidence_ready:
+                owned_connection.execute(
+                    "ALTER TABLE pqo.sequential_analysis ADD COLUMN IF NOT EXISTS "
+                    "candidate_trial_evidence jsonb"
                 )
             return save_sequential_analysis(
                 normalized_sql,
@@ -317,9 +329,9 @@ def save_sequential_analysis(
                 measured_improvement_ratio, storage_budget_bytes,
                 used_budget_bytes, candidate_count, decision_threshold,
                 minimum_baseline_time_ms, minimum_absolute_improvement_ms,
-                terminal_reason, baseline_timed_out
+                terminal_reason, candidate_trial_evidence, baseline_timed_out
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             ) RETURNING id
             """,
             (
@@ -335,6 +347,14 @@ def save_sequential_analysis(
                 plan.minimum_baseline_time_ms,
                 plan.minimum_absolute_improvement_ms,
                 plan.terminal_reason,
+                Jsonb({
+                    "version": 1,
+                    "max_candidates_per_step": plan.max_candidates_per_step,
+                    "checks": [
+                        {**asdict(check), "proposed_ddl": _proposed_ddl(check.action)}
+                        for check in plan.candidate_checks
+                    ],
+                }),
                 plan.baseline_timed_out,
             ),
         ).fetchone()[0]

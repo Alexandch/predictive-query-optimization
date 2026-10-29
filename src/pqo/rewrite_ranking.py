@@ -29,7 +29,7 @@ def ranking_cases(relationships):
             "rank-group-sort-having": f"SELECT q.{ck}, COUNT(*) AS n FROM (SELECT c.{ck} FROM {child} c WHERE c.{ck}>=1 AND c.{ck}<=256 ORDER BY c.{ck} DESC) q GROUP BY q.{ck} HAVING q.{ck}>1 ORDER BY q.{ck}",
         }
         for template, sql in templates.items():
-            candidates = generate_sql_rewrites(sql)
+            candidates = generate_sql_rewrites(sql, max_combined_candidates=0)
             if len(candidates) < 2:
                 raise ValueError(f"Ranking fixture has fewer than two candidates: {template}")
             case_id = hashlib.sha256((relation.family_id + template + sql).encode()).hexdigest()
@@ -210,7 +210,7 @@ def main():
         raise ValueError("Held-out relationships changed since training")
     cases = ranking_cases(relationships)
     for case in cases:
-        candidates = generate_sql_rewrites(case.sql)
+        candidates = generate_sql_rewrites(case.sql, max_combined_candidates=0)
         if any(sql_identity(sql)["shape_hash"] in shapes for sql in [case.sql, *(item.sql_text for item in candidates)]):
             raise ValueError("Ranking SQL overlaps development shapes")
     model_hash = hashlib.sha256(args.model.read_bytes()).hexdigest()

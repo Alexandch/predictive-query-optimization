@@ -48,6 +48,17 @@ class SQLRewritePlan:
     journal_warning: str | None = None
 
 
+def _select_fastest_accepted_rewrite(evaluations):
+    """Compare variant runtimes, not savings against different paired baselines.
+
+    Eligibility still comes from each candidate's own equivalence/threshold checks.
+    This is the lowest observed median, not proof of a statistically best variant.
+    """
+    eligible = [item for item in evaluations if item.accepted and item.equivalent
+                and item.rewritten_time_ms is not None]
+    return min(eligible, key=lambda item: item.rewritten_time_ms, default=None)
+
+
 def sql_rewrite_rules():
     """One rule registry for candidate generation and interface coverage labels."""
     return (
@@ -104,15 +115,26 @@ def sql_rewrite_rules():
     )
 
 
-def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
-    """Generate conservative PostgreSQL rewrites without executing SQL."""
+def generate_sql_rewrites(
+    sql_text: str, *, max_combined_candidates: int = 2,
+) -> tuple[SQLRewriteCandidate, ...]:
+    """Generate single rules and bounded two-rule variants without executing SQL.
+
+    Single-rule candidates keep their original priority. Combinations still need
+    independent snapshot equivalence and timing checks; no rule is applied twice.
+    """
     from sqlglot import parse_one
 
+    if (type(max_combined_candidates) is not int
+            or not 0 <= max_combined_candidates <= 4):
+        raise ValueError("max_combined_candidates must be an integer between 0 and 4")
     normalized = _assert_read_only_query(sql_text)
     parsed = parse_one(normalized, read="postgres")
     candidates = []
-    seen_sql = {normalized}
-    for rule_id, title, rewrite in sql_rewrite_rules():
+    seen_sql = {parsed.sql(dialect="postgres", pretty=True)}
+    rules = sql_rewrite_rules()
+    single_trees = []
+    for rule_id, title, rewrite in rules:
         rewritten, changed = rewrite(parsed.copy())
         if not changed:
             continue
@@ -122,11 +144,33 @@ def generate_sql_rewrites(sql_text: str) -> tuple[SQLRewriteCandidate, ...]:
         _assert_read_only_query(rendered)
         seen_sql.add(rendered)
         candidates.append(SQLRewriteCandidate(rule_id, title, rendered))
+        single_trees.append((rule_id, title, rewritten))
+    combined_count = 0
+    for first_id, first_title, tree in single_trees:
+        for second_id, second_title, rewrite in rules:
+            if combined_count >= max_combined_candidates:
+                return tuple(candidates)
+            if first_id == second_id:
+                continue
+            rewritten, changed = rewrite(tree.copy())
+            if not changed:
+                continue
+            rendered = rewritten.sql(dialect="postgres", pretty=True)
+            if rendered in seen_sql:
+                continue
+            _assert_read_only_query(rendered)
+            seen_sql.add(rendered)
+            candidates.append(SQLRewriteCandidate(
+                f"combined:{first_id}+{second_id}",
+                f"Сочетание: {first_title}; {second_title}", rendered,
+            ))
+            combined_count += 1
     return tuple(candidates)
 
 
 def evaluate_sql_rewrites(
     sql_text: str, settings: DatabaseSettings | None = None, *,
+    max_combined_candidates: int = 2,
     repetitions: int = 3, minimum_baseline_time_ms: float = 50.0,
     minimum_absolute_improvement_ms: float = 5.0, minimum_improvement_ratio: float = 0.05,
     _candidates: tuple[SQLRewriteCandidate, ...] | None = None,
@@ -152,6 +196,7 @@ def evaluate_sql_rewrites(
     try:
         result = _evaluate_sql_rewrites(
             sql_text, settings, repetitions=repetitions,
+            max_combined_candidates=max_combined_candidates,
             minimum_baseline_time_ms=minimum_baseline_time_ms,
             minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
             minimum_improvement_ratio=minimum_improvement_ratio,
@@ -173,6 +218,7 @@ def _evaluate_sql_rewrites(
     sql_text: str,
     settings: DatabaseSettings | None = None,
     *,
+    max_combined_candidates: int = 2,
     repetitions: int = 3,
     minimum_baseline_time_ms: float = 50.0,
     minimum_absolute_improvement_ms: float = 5.0,
@@ -194,7 +240,8 @@ def _evaluate_sql_rewrites(
 
     settings = settings or DatabaseSettings.from_env()
     original_sql = _assert_read_only_query(sql_text)
-    candidates = generate_sql_rewrites(original_sql) if _candidates is None else _candidates
+    candidates = (generate_sql_rewrites(original_sql, max_combined_candidates=max_combined_candidates)
+                  if _candidates is None else _candidates)
     if _recorder:
         _recorder.candidates(candidates)
     for candidate in candidates:
@@ -332,15 +379,7 @@ def _evaluate_sql_rewrites(
                 if _recorder:
                     _recorder.evaluation(index, evaluations[-1])
 
-    accepted_evaluations = [item for item in evaluations if item.accepted]
-    recommended = (
-        max(
-            accepted_evaluations,
-            key=lambda item: item.absolute_improvement_ms or 0.0,
-        )
-        if accepted_evaluations
-        else None
-    )
+    recommended = _select_fastest_accepted_rewrite(evaluations)
     return SQLRewritePlan(
         original_sql,
         tuple(evaluations),

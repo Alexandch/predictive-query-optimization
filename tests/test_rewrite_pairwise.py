@@ -24,7 +24,7 @@ class RewritePairwiseTests(unittest.TestCase):
     def test_new_final_forms_have_several_candidates_including_cte_window(self):
         relation = Relationship("retail", "order_items", "order_id", "retail", "customer_orders", "order_id")
         cases = final_cases([relation])
-        self.assertEqual([len(generate_sql_rewrites(case.sql)) for case in cases], [2, 3, 4])
+        self.assertEqual([len(generate_sql_rewrites(case.sql, max_combined_candidates=0)) for case in cases], [2, 3, 4])
         self.assertIn("DENSE_RANK", cases[2].sql)
         self.assertTrue(all(case.role == "control" for case in cases))
 
@@ -91,7 +91,7 @@ class RewritePairwiseTests(unittest.TestCase):
         run["dataset_role"] = "development"
         run["collection"] = {"family_id": case.family_id}
         run["candidates"] = []
-        for candidate in generate_sql_rewrites(sql):
+        for candidate in generate_sql_rewrites(sql, max_combined_candidates=0):
             entry = record()["candidates"][0]
             entry.update(rule_id=candidate.rule_id, variant_sql=candidate.sql_text, accepted=True)
             run["candidates"].append(entry)

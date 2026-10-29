@@ -43,6 +43,75 @@ from pqo.structural_validation import (
 class PostgreSQLIntegrationTests(unittest.TestCase):
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+    def test_combined_rewrites_are_checked_and_measured_with_duplicates_and_nulls(self):
+        import psycopg
+        from contextlib import nullcontext
+        from unittest.mock import patch
+
+        settings = DatabaseSettings.from_env()
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            connection.execute("CREATE TEMP TABLE pqo_combine_parent(id int)")
+            connection.execute("CREATE TEMP TABLE pqo_combine_child(parent_id int)")
+            connection.execute("INSERT INTO pqo_combine_parent VALUES (1),(1),(2),(3),(NULL)")
+            connection.execute("INSERT INTO pqo_combine_child VALUES (1),(1),(2),(NULL)")
+            connection.commit()  # Only connection-local TEMP data; no user tables changed.
+            sql = (
+                "SELECT q.id FROM (SELECT p.id FROM pqo_combine_parent p "
+                "WHERE (SELECT COUNT(*) FROM pqo_combine_child c WHERE c.parent_id=p.id)>0 "
+                "ORDER BY p.id DESC) q ORDER BY q.id LIMIT 20"
+            )
+            with patch("psycopg.connect", side_effect=lambda **kwargs: nullcontext(connection)):
+                plan = evaluate_sql_rewrites(sql, settings, repetitions=1,
+                    minimum_baseline_time_ms=0, minimum_absolute_improvement_ms=1000000)
+            combined = [item for item in plan.evaluations
+                        if item.candidate.rule_id.startswith("combined:")]
+            self.assertEqual(len(combined), 1)
+            self.assertTrue(combined[0].equivalent)
+            self.assertIsNotNone(combined[0].rewritten_time_ms)
+            self.assertFalse(combined[0].accepted)  # Equivalence alone never enables apply.
+            self.assertEqual(combined[0].rejection_reason, "improvement_too_small")
+            self.assertEqual(connection.execute(sql).fetchall(), [(1,), (1,), (2,)])
+
+    def test_candidate_evidence_history_roundtrip_and_atomic_rollback(self):
+        import psycopg
+        from contextlib import nullcontext
+        from unittest.mock import patch
+        from pqo.repository import save_sequential_analysis
+        from pqo.history import load_analysis_history
+        from pqo.sequential_recommendation import SequentialCandidateCheck, SequentialRecommendationPlan
+
+        settings = DatabaseSettings.from_env()
+        action = IndexAction.create("public", "evidence_history_test", ("id",))
+        plan = SequentialRecommendationPlan(
+            steps=(), baseline_time_ms=12, final_time_ms=12,
+            storage_budget_bytes=10000, used_budget_bytes=0, candidate_count=2,
+            decision_threshold=.1, minimum_baseline_time_ms=5,
+            minimum_absolute_improvement_ms=1, terminal_reason="statement_timeout",
+            candidate_checks=(SequentialCandidateCheck(
+                action, 1, .9, False, "statement_timeout", 12,
+            ),),
+        )
+        with psycopg.connect(**settings.connection_kwargs()) as connection:
+            with connection.transaction(force_rollback=True):
+                # Exercise the real owned-connection migration, twice, but leave
+                # both schema and evidence changes inside this rollback-only test.
+                with patch("psycopg.connect", side_effect=lambda **kwargs: nullcontext(connection)):
+                    run_id, analysis_id = save_sequential_analysis("SELECT 1", plan, settings)
+                    save_sequential_analysis("SELECT 1", plan, settings, query_run_id=run_id)
+                    record = next(row for row in load_analysis_history(settings, limit=10000)
+                                  if row.sequential_analysis_id == analysis_id)
+                self.assertEqual(record.candidate_trial_evidence["version"], 1)
+                check = record.candidate_trial_evidence["checks"][0]
+                self.assertFalse(check["accepted"])
+                self.assertIsNone(check["after_time_ms"])
+                self.assertEqual(check["rejection_reason"], "statement_timeout")
+                self.assertIsNone(connection.execute(
+                    "SELECT to_regclass('public.evidence_history_test')"
+                ).fetchone()[0])
+            self.assertIsNone(connection.execute(
+                "SELECT id FROM pqo.query_run WHERE id=%s", (run_id,)
+            ).fetchone())
+
     def test_candidate_savepoint_restores_real_ddl_budget_and_recovers_timeout(self):
         import psycopg
         from unittest.mock import patch

@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from pqo.index_actions import IndexAction
 from pqo.repository import save_sequential_analysis
 from pqo.sequential_recommendation import (
+    SequentialCandidateCheck,
     SequentialRecommendationPlan,
     SequentialRecommendationStep,
 )
@@ -66,6 +67,25 @@ def _plan():
 
 
 class SequentialRepositoryTests(unittest.TestCase):
+    def test_persists_rejected_and_accepted_trials_with_nullable_measurements(self):
+        import json
+        connection = _Connection()
+        action = _plan().steps[0].action
+        checks = (
+            SequentialCandidateCheck(action, 1, 0.9, False, "statement_timeout", 12),
+            SequentialCandidateCheck(action, 1, 0.8, True, None, 12, 0.0, 8192, 1.5),
+        )
+        save_sequential_analysis("SELECT 1", replace(_plan(), candidate_checks=checks),
+                                 connection=connection)
+        evidence = connection.calls[1][1][-2].obj
+        evidence = json.loads(json.dumps(evidence))
+        self.assertEqual(evidence["version"], 1)
+        self.assertEqual(evidence["max_candidates_per_step"], 3)
+        self.assertIsNone(evidence["checks"][0]["after_time_ms"])
+        self.assertEqual(evidence["checks"][1]["after_time_ms"], 0)
+        self.assertFalse(evidence["checks"][0]["accepted"])
+        self.assertIn("CREATE INDEX", evidence["checks"][1]["proposed_ddl"])
+
     def test_timeout_does_not_become_exact_execution_time(self):
         connection = _Connection()
         save_sequential_analysis(

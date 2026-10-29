@@ -13,7 +13,7 @@ import time
 from uuid import uuid4
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "rules-v1.9"
+GENERATOR_VERSION = "rules-v2.0"
 
 
 def _now():
@@ -52,7 +52,7 @@ class RewriteJournalRun:
             "started_at": _now(), "updated_at": _now(), "finished_at": None,
             "status": "running", "stage": "validation", "mode": mode,
             "generator_version": GENERATOR_VERSION,
-            "source": source, "dataset_role": {"smoke_test": "test", "batch_development": "development",
+            "source": source, "dataset_role": {"smoke_test": "test", "test": "test", "batch_development": "development",
                                                 "batch_control": "control"}.get(source, "unassigned"),
             "collection": dict(metadata or {}),
             "database_fingerprint": database_fingerprint(settings),

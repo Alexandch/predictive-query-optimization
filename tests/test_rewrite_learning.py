@@ -53,6 +53,13 @@ class RewriteLearningTests(unittest.TestCase):
         self.assertFalse(rows)
         self.assertEqual(report["excluded"]["protected_test_or_control"], 1)
 
+    def test_diagnostic_source_is_protected_even_in_old_unassigned_journals(self):
+        run = record()
+        run.update(source="test", dataset_role="unassigned")
+        rows, report = self.prepare([run], {"development_run_ids": ["a"]})
+        self.assertFalse(rows)
+        self.assertEqual(report["excluded"]["protected_test_or_control"], 1)
+
     def test_explicit_control_cannot_be_reassigned_to_development(self):
         run = record()
         run["dataset_role"] = "control"

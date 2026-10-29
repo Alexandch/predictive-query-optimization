@@ -128,7 +128,7 @@ def prepare_dataset(directories, manifest=None):
             report["runs"] += 1
             if run_id in selected:
                 found.add(run_id)
-            if (run.get("source") == "smoke_test" or run.get("dataset_role") == "test"
+            if (run.get("source") in {"smoke_test", "test"} or run.get("dataset_role") == "test"
                     or (run.get("dataset_role") == "control" and selected.get(run_id) != "control")):
                 report["excluded"]["protected_test_or_control"] += 1
                 continue

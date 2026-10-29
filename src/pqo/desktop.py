@@ -67,7 +67,7 @@ from .experiments import (
     export_history_records,
     promote_candidate_model,
 )
-from .history import check_database_connection, load_analysis_history
+from .history import check_database_connection, load_analysis_history, format_candidate_trial_history
 from .index_actions import IndexActionKind
 from .managed_indexes import (
     ManagedIndexDeployment,
@@ -446,6 +446,7 @@ class MainWindow(QMainWindow):
         self.preferences = QSettings("PQO", "PredictiveQueryOptimization")
         self._active_workers: set[Worker] = set()
         self.history_records = []
+        self._rewrite_choice_plan: SQLRewritePlan | None = None
         self.last_prediction_ms: float | None = None
         self.last_prediction_source = "ml"
         self.last_uncalibrated_prediction_ms: float | None = None
@@ -514,6 +515,7 @@ class MainWindow(QMainWindow):
         self.deep_analyze_button.setEnabled(enabled)
         self.rewrite_analyze_button.setEnabled(enabled)
         self.rewrite_editor.setReadOnly(not enabled)
+        self.rewrite_candidate_combo.setEnabled(enabled and self._rewrite_choice_plan is not None)
         self.rewrite_journal_check.setEnabled(enabled)
         self._sync_variant_button()
         if not enabled:
@@ -569,6 +571,7 @@ class MainWindow(QMainWindow):
         self.sql_editor.setFont(QFont("Cascadia Mono", 10))
         self.sql_editor.textChanged.connect(self._sync_rewrite_apply_button)
         self.sql_editor.textChanged.connect(self._sync_variant_button)
+        self.sql_editor.textChanged.connect(self._invalidate_rewrite_candidates)
         self.sql_splitter = QSplitter(Qt.Orientation.Horizontal)
         source_group = QGroupBox("Исходный / текущий SQL")
         source_layout = QVBoxLayout(source_group)
@@ -576,6 +579,22 @@ class MainWindow(QMainWindow):
         self.sql_splitter.addWidget(source_group)
         variant_group = QGroupBox("Вариант SQL — отдельно от исходного")
         variant_layout = QVBoxLayout(variant_group)
+        self.rewrite_candidate_combo = QComboBox()
+        self.rewrite_candidate_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.rewrite_candidate_combo.setMinimumContentsLength(24)
+        self.rewrite_candidate_combo.setPlaceholderText("Проверенные варианты появятся после анализа")
+        self.rewrite_candidate_combo.setEnabled(False)
+        self.rewrite_candidate_combo.setVisible(False)
+        self.rewrite_candidate_combo.currentIndexChanged.connect(self._select_rewrite_candidate)
+        variant_layout.addWidget(self.rewrite_candidate_combo)
+        self.rewrite_candidate_details = QPlainTextEdit()
+        self.rewrite_candidate_details.setReadOnly(True)
+        self.rewrite_candidate_details.setVisible(False)
+        self.rewrite_candidate_details.setMaximumHeight(105)
+        self.rewrite_candidate_details.setPlaceholderText("Статус, замеры и изменения выбранного варианта")
+        variant_layout.addWidget(self.rewrite_candidate_details)
         self.rewrite_editor = QPlainTextEdit()
         self.rewrite_editor.setFont(QFont("Cascadia Mono", 10))
         self.rewrite_editor.setMinimumHeight(210)
@@ -916,6 +935,12 @@ class MainWindow(QMainWindow):
         header_view.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.history_table)
+        self.history_candidate_details = QPlainTextEdit()
+        self.history_candidate_details.setReadOnly(True)
+        self.history_candidate_details.setPlaceholderText("Выберите запись истории для просмотра индексных проб.")
+        self.history_candidate_details.setMaximumHeight(200)
+        layout.addWidget(self.history_candidate_details)
+        self.history_table.itemSelectionChanged.connect(self._show_history_candidate_details)
         journal_group = QGroupBox("Локальный журнал переписываний — без служебной схемы pqo")
         journal_layout = QVBoxLayout(journal_group)
         journal_controls = QHBoxLayout()
@@ -2527,7 +2552,76 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(self._query_action_failed)
         self._start_worker(worker)
 
+    def _invalidate_rewrite_candidates(self):
+        self._rewrite_choice_plan = None
+        if not hasattr(self, "rewrite_candidate_combo"):
+            return
+        self.rewrite_candidate_combo.blockSignals(True)
+        self.rewrite_candidate_combo.clear()
+        self.rewrite_candidate_combo.blockSignals(False)
+        self.rewrite_candidate_combo.setEnabled(False)
+        self.rewrite_candidate_details.clear()
+        self.rewrite_candidate_combo.setVisible(False)
+        self.rewrite_candidate_details.setVisible(False)
+
+    def _populate_rewrite_candidates(self, plan: SQLRewritePlan):
+        self._invalidate_rewrite_candidates()
+        if not plan.evaluations:
+            return
+        self._rewrite_choice_plan = plan
+        self.rewrite_candidate_combo.setVisible(True)
+        self.rewrite_candidate_combo.blockSignals(True)
+        for number, evaluation in enumerate(plan.evaluations, 1):
+            state = "принят" if evaluation.accepted else "отклонён"
+            self.rewrite_candidate_combo.addItem(f"{number}. [{state}] {evaluation.candidate.title}")
+        selected = (next((i for i, item in enumerate(plan.evaluations)
+                          if item == plan.recommended), 0)
+                    if plan.recommended is not None else
+                    min(range(len(plan.evaluations)), key=lambda i:
+                        plan.evaluations[i].rewritten_time_ms
+                        if plan.evaluations[i].rewritten_time_ms is not None else float("inf")))
+        self.rewrite_candidate_combo.setCurrentIndex(selected)
+        self.rewrite_candidate_combo.blockSignals(False)
+        self.rewrite_candidate_combo.setEnabled(not self._query_operation_active)
+        self._select_rewrite_candidate(selected)
+
+    def _select_rewrite_candidate(self, index: int):
+        plan = self._rewrite_choice_plan
+        if self._query_operation_active or plan is None or not 0 <= index < len(plan.evaluations):
+            return
+        evaluation = plan.evaluations[index]
+        self.rewrite_candidate_combo.setToolTip(evaluation.candidate.title)
+        self._clear_verified_rewrite()
+        self.rewrite_editor.setPlainText(evaluation.candidate.sql_text)
+        lines = [evaluation.candidate.title]
+        if evaluation.accepted:
+            self._set_verified_rewrite(plan.original_sql, evaluation.candidate.sql_text,
+                "Результаты совпали на снимке; достаточное ускорение подтверждено.",
+                title=evaluation.candidate.title, baseline_time_ms=evaluation.baseline_time_ms,
+                candidate_time_ms=evaluation.rewritten_time_ms)
+            lines.append("Принят по результатам проверки; применение только отдельной кнопкой.")
+        else:
+            reasons = {
+                "result_mismatch": "Вариант не прошёл проверку. Результаты различаются. Применять нельзя.",
+                "improvement_too_small": "Результаты совпали на текущих данных. Недостаточное ускорение. Применение недоступно.",
+            }
+            lines.append(reasons.get(evaluation.rejection_reason,
+                f"Проверка не завершена: {evaluation.rejection_reason or 'нет подтверждения'}"))
+            self.variant_status.setText(lines[-1])
+        if evaluation.baseline_time_ms is not None and evaluation.rewritten_time_ms is not None:
+            lines.append(f"Медианы: {evaluation.baseline_time_ms:.2f} → {evaluation.rewritten_time_ms:.2f} мс.")
+        else:
+            lines.append("Полные замеры отсутствуют, это не нулевое время.")
+        lines.append(f"Пороги: {plan.minimum_absolute_improvement_ms:g} мс и {plan.minimum_improvement_ratio:.1%}.")
+        lines.append("Изменения (- удалено, + добавлено):\n" +
+                     _format_sql_rewrite_diff(plan.original_sql, evaluation.candidate.sql_text))
+        self.rewrite_candidate_details.setPlainText("\n".join(lines))
+        self.rewrite_candidate_details.setVisible(True)
+
     def _variant_edited(self):
+        if hasattr(self, "rewrite_candidate_details"):
+            self.rewrite_candidate_details.clear()
+            self.rewrite_candidate_details.setVisible(False)
         self._sync_variant_button()
         self._sync_rewrite_apply_button()
         if self.rewrite_editor.toPlainText().strip():
@@ -2581,6 +2675,7 @@ class MainWindow(QMainWindow):
         self._rewrite_check_active = False
         self._set_query_actions_enabled(True)
         self.structural_management_group.setVisible(False)
+        self._invalidate_rewrite_candidates()
         if plan.journal_run_id:
             self.rewrite_journal_status.setText(f"ID проверки: {plan.journal_run_id}")
             self._refresh_rewrite_journal()
@@ -2622,6 +2717,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Найдено и измерено безопасное переписывание SQL"
             )
+            self._populate_rewrite_candidates(plan)
             return
 
         if plan.terminal_reason == "no_candidates":
@@ -2695,6 +2791,7 @@ class MainWindow(QMainWindow):
             else:
                 self.variant_status.setText(f"Вариант не прошёл проверку: {preview.rejection_reason}.")
         self.statusBar().showMessage("Безопасное ускоряющее переписывание не найдено")
+        self._populate_rewrite_candidates(plan)
 
     def _clear_verified_rewrite(self) -> None:
         self.verified_rewrite_original_sql = None
@@ -2816,8 +2913,18 @@ class MainWindow(QMainWindow):
         worker.signals.failed.connect(self._task_failed)
         self._start_worker(worker)
 
+    def _show_history_candidate_details(self) -> None:
+        row = self.history_table.currentRow()
+        if 0 <= row < len(self.history_records):
+            self.history_candidate_details.setPlainText(
+                format_candidate_trial_history(self.history_records[row])
+            )
+        else:
+            self.history_candidate_details.clear()
+
     def _show_history(self, records) -> None:
         self.history_records = list(records)
+        self.history_candidate_details.clear()
         self.history_export_button.setEnabled(bool(records))
         self.history_table.setRowCount(len(records))
         for row_index, record in enumerate(records):
@@ -2903,6 +3010,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setToolTip(record.sql_text if column == 2 else value)
                 self.history_table.setItem(row_index, column, item)
+        self._show_history_candidate_details()
         self.statusBar().showMessage(f"Загружено записей: {len(records)}")
 
     def _export_history(self) -> None:

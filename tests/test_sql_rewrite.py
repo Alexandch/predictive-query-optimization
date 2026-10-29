@@ -4,6 +4,57 @@ from pqo.sql_rewrite import generate_sql_rewrites, evaluate_sql_variant
 
 
 class SQLRewriteTests(unittest.TestCase):
+    def test_selection_prefers_fastest_variant_despite_paired_baseline_drift(self):
+        from pqo.sql_rewrite import SQLRewriteCandidate, SQLRewriteEvaluation, _select_fastest_accepted_rewrite
+        from dataclasses import replace
+        slower = SQLRewriteEvaluation(SQLRewriteCandidate("one", "one", "SELECT 1"),
+            True, 805.317, 171.198, .787, True, None)
+        faster = SQLRewriteEvaluation(SQLRewriteCandidate("two", "two", "SELECT 1::int"),
+            True, 764.577, 146.340, .809, True, None)
+        self.assertGreater(slower.absolute_improvement_ms, faster.absolute_improvement_ms)
+        self.assertIs(_select_fastest_accepted_rewrite((slower, faster)), faster)
+        rejected = replace(faster, accepted=False, rewritten_time_ms=1, rejection_reason="improvement_too_small")
+        mismatch = replace(faster, equivalent=False, rewritten_time_ms=.5)
+        self.assertIs(_select_fastest_accepted_rewrite((slower, rejected, mismatch)), slower)
+        self.assertIsNone(_select_fastest_accepted_rewrite((rejected, mismatch)))
+
+    COMBINED_SQL = (
+        "SELECT q.id FROM (SELECT p.id FROM retail.products p "
+        "WHERE (SELECT COUNT(*) FROM retail.order_items c WHERE c.product_id=p.id)>0 "
+        "ORDER BY p.id DESC) q ORDER BY q.id LIMIT 20"
+    )
+
+    def test_combined_rewrite_removes_sort_and_count_filter(self):
+        candidates = generate_sql_rewrites(self.COMBINED_SQL)
+        combined = [item for item in candidates if item.rule_id.startswith("combined:")]
+        self.assertEqual(len(combined), 1)  # Both rule orders produce the same AST.
+        self.assertIn("EXISTS", combined[0].sql_text)
+        self.assertNotIn("COUNT(*)", combined[0].sql_text)
+        self.assertNotIn("DESC", combined[0].sql_text)
+        self.assertIn("ORDER BY", combined[0].sql_text)
+        self.assertIn("LIMIT 20", combined[0].sql_text)
+        self.assertTrue(candidates[-1].rule_id.startswith("combined:"))
+        self.assertEqual(len({item.sql_text for item in candidates}), len(candidates))
+
+    def test_combined_candidate_limit_and_determinism(self):
+        sql = self.COMBINED_SQL.replace("WHERE (SELECT", "WHERE (p.id=1 OR p.id=2) AND (SELECT")
+        for limit in (0, 1, 2, 4):
+            with self.subTest(limit=limit):
+                candidates = generate_sql_rewrites(sql, max_combined_candidates=limit)
+                self.assertLessEqual(sum(item.rule_id.startswith("combined:") for item in candidates), limit)
+                self.assertEqual(candidates, generate_sql_rewrites(sql, max_combined_candidates=limit))
+        for invalid in (True, -1, 5, 1.5):
+            with self.assertRaises(ValueError):
+                generate_sql_rewrites(sql, max_combined_candidates=invalid)
+
+    def test_combining_rules_preserves_source_and_single_rule_variants(self):
+        from sqlglot import parse_one
+        before = parse_one(self.COMBINED_SQL, read="postgres")
+        singles = generate_sql_rewrites(self.COMBINED_SQL, max_combined_candidates=0)
+        all_candidates = generate_sql_rewrites(self.COMBINED_SQL)
+        self.assertEqual(all_candidates[:len(singles)], singles)
+        self.assertEqual(before, parse_one(self.COMBINED_SQL, read="postgres"))
+
     def rule(self, sql, rule):
         return next((item for item in generate_sql_rewrites(sql) if item.rule_id == rule), None)
 
