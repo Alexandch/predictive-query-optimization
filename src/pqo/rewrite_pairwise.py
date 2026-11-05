@@ -46,7 +46,7 @@ def final_cases(relationships):
             "final-cte-window": f"WITH subset AS (SELECT c.{ck} FROM {child} c WHERE c.{ck}>=1 AND c.{ck}<=256), totals AS (SELECT q.{ck},COUNT(*) AS n FROM (SELECT {ck} FROM subset ORDER BY {ck} DESC) q GROUP BY q.{ck} HAVING q.{ck}>1) SELECT t.{ck},t.n,DENSE_RANK() OVER(ORDER BY t.n DESC) AS n_rank FROM totals t JOIN subset s ON s.{ck}=t.{ck} GROUP BY t.{ck},t.n ORDER BY n_rank,t.{ck}",
         }
         for template, sql in sqls.items():
-            if len(generate_sql_rewrites(sql, max_combined_candidates=0)) < 2:
+            if len(generate_sql_rewrites(sql, max_combined_candidates=0, include_window_materialization=False)) < 2:
                 raise ValueError("Final scenario needs multiple candidates")
             cases.append(BatchCase(digest([relation.family_id, template, sql]), relation.family_id, "control", template, sql))
     return cases
@@ -67,7 +67,7 @@ def make_plan(relationships, families, reference_identity, settings):
                         ("validation", [c for c in development if c.role == "control"]), ("final", final)):
         for case in cases:
             shapes[role].update(sql_identity(sql)["shape_hash"] for sql in
-                                [case.sql, *(c.sql_text for c in generate_sql_rewrites(case.sql, max_combined_candidates=0))])
+                                [case.sql, *(c.sql_text for c in generate_sql_rewrites(case.sql, max_combined_candidates=0, include_window_materialization=False))])
     if any(shapes[a] & shapes[b] for a, b in (("train", "validation"), ("train", "final"), ("validation", "final"))):
         raise ValueError("SQL shape leakage across planned splits")
     return {"schema_version": PAIRWISE_VERSION, "generator_version": GENERATOR_VERSION,
@@ -110,7 +110,7 @@ def load_groups(directory, cases):
             candidates = run["candidates"]
             if len(candidates) < 2:
                 raise ValueError("Need multiple candidates")
-            expected = [(item.rule_id, sql_identity(item.sql_text)["sql_hash"]) for item in generate_sql_rewrites(case.sql, max_combined_candidates=0)]
+            expected = [(item.rule_id, sql_identity(item.sql_text)["sql_hash"]) for item in generate_sql_rewrites(case.sql, max_combined_candidates=0, include_window_materialization=False)]
             measured = [(item["rule_id"], sql_identity(item["variant_sql"])["sql_hash"]) for item in candidates]
             if expected != measured:
                 raise ValueError("Candidate list differs from the frozen generator")

@@ -112,11 +112,17 @@ def sql_rewrite_rules():
             "Объединить коррелированные агрегаты в одну группировку и LEFT JOIN",
             _rewrite_shared_scalar_aggregates,
         ),
+        (
+            "materialize-aggregate-before-window",
+            "Проверить MATERIALIZED для агрегирующего CTE перед оконной функцией",
+            _rewrite_materialized_window_input,
+        ),
     )
 
 
 def generate_sql_rewrites(
     sql_text: str, *, max_combined_candidates: int = 2,
+    include_window_materialization: bool = True,
 ) -> tuple[SQLRewriteCandidate, ...]:
     """Generate single rules and bounded two-rule variants without executing SQL.
 
@@ -132,7 +138,8 @@ def generate_sql_rewrites(
     parsed = parse_one(normalized, read="postgres")
     candidates = []
     seen_sql = {parsed.sql(dialect="postgres", pretty=True)}
-    rules = sql_rewrite_rules()
+    rules = tuple(rule for rule in sql_rewrite_rules()
+                  if include_window_materialization or rule[0] != "materialize-aggregate-before-window")
     single_trees = []
     for rule_id, title, rewrite in rules:
         rewritten, changed = rewrite(parsed.copy())
@@ -171,6 +178,7 @@ def generate_sql_rewrites(
 def evaluate_sql_rewrites(
     sql_text: str, settings: DatabaseSettings | None = None, *,
     max_combined_candidates: int = 2,
+    include_window_materialization: bool = True,
     repetitions: int = 3, minimum_baseline_time_ms: float = 50.0,
     minimum_absolute_improvement_ms: float = 5.0, minimum_improvement_ratio: float = 0.05,
     _candidates: tuple[SQLRewriteCandidate, ...] | None = None,
@@ -197,6 +205,7 @@ def evaluate_sql_rewrites(
         result = _evaluate_sql_rewrites(
             sql_text, settings, repetitions=repetitions,
             max_combined_candidates=max_combined_candidates,
+            include_window_materialization=include_window_materialization,
             minimum_baseline_time_ms=minimum_baseline_time_ms,
             minimum_absolute_improvement_ms=minimum_absolute_improvement_ms,
             minimum_improvement_ratio=minimum_improvement_ratio,
@@ -219,6 +228,7 @@ def _evaluate_sql_rewrites(
     settings: DatabaseSettings | None = None,
     *,
     max_combined_candidates: int = 2,
+    include_window_materialization: bool = True,
     repetitions: int = 3,
     minimum_baseline_time_ms: float = 50.0,
     minimum_absolute_improvement_ms: float = 5.0,
@@ -240,7 +250,8 @@ def _evaluate_sql_rewrites(
 
     settings = settings or DatabaseSettings.from_env()
     original_sql = _assert_read_only_query(sql_text)
-    candidates = (generate_sql_rewrites(original_sql, max_combined_candidates=max_combined_candidates)
+    candidates = (generate_sql_rewrites(original_sql, max_combined_candidates=max_combined_candidates,
+                                       include_window_materialization=include_window_materialization)
                   if _candidates is None else _candidates)
     if _recorder:
         _recorder.candidates(candidates)
@@ -527,6 +538,35 @@ def _rewrite_subquery_orders(expression):
             select.set("order", None)
             changed = True
     return expression, changed
+
+
+def _rewrite_materialized_window_input(expression):
+    """Trial planner boundary, not a promise to optimize arbitrary window SQL."""
+    from sqlglot import exp
+    with_clause = expression.args.get("with_")
+    if with_clause is None or any(item.args.get("recursive") for item in expression.find_all(exp.With)):
+        return expression, False
+    tables = list(expression.find_all(exp.Table))
+    for cte in with_clause.expressions:
+        source = cte.this
+        if (not isinstance(source, exp.Select) or source.args.get("group") is None
+                or cte.args.get("materialized") is not None
+                or source.find(exp.Window) is not None):
+            continue
+        # Do not alter evaluation boundaries for arbitrary user functions.
+        if any(not isinstance(func, (exp.Count, exp.Sum, exp.Avg, exp.Min, exp.Max, exp.Cast))
+               for func in source.find_all(exp.Func)):
+            continue
+        refs = [table for table in tables if not table.db and table.name == cte.alias_or_name]
+        if len(refs) != 1:
+            continue
+        consumer = refs[0].find_ancestor(exp.Select)
+        if consumer is None or not any(window.find_ancestor(exp.Select) is consumer
+                                       for window in consumer.find_all(exp.Window)):
+            continue
+        cte.set("materialized", True)
+        return expression, True  # One boundary per candidate, bounded trial work.
+    return expression, False
 
 
 def _rewrite_reused_ctes(expression):

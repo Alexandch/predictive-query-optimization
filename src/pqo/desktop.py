@@ -99,6 +99,7 @@ from .structural_validation import (
     validate_and_save_structural_recommendation,
 )
 from .training import train_xgboost
+from .transaction_desktop import TransactionTabMixin
 
 
 PROJECT_ROOT = resource_root()
@@ -150,6 +151,14 @@ def _qt_message_handler(message_type, context, message):
             stream.write(f"{message_type.name}: {message}\n")
     except OSError:
         pass
+
+
+def _enable_desktop_fault_handler(stream):
+    # Windows COM/Qt may raise handled first-chance exceptions while model
+    # imports run in a different thread. On CPython 3.13.3, walking that other
+    # thread's changing frames from the native handler itself can crash.
+    # Keep the faulting thread's trace; never traverse live worker frames here.
+    faulthandler.enable(stream, all_threads=sys.platform != "win32")
 
 
 def _gui_exception_handler(exc_type, exc_value, exc_traceback):
@@ -439,7 +448,7 @@ def _format_verified_index_summary(
     return "\n".join(lines)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(TransactionTabMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -481,6 +490,7 @@ class MainWindow(QMainWindow):
         self._build_settings_tab()
         self._build_experiments_tab()
         self._build_training_tab()
+        self._build_transaction_tab()
         self._refresh_calibration_status()
         self._refresh_managed_index_state()
         self._apply_style()
@@ -490,6 +500,7 @@ class MainWindow(QMainWindow):
         """Use Python-owned thread states; deliver results to Qt only via signals."""
         self._active_workers.add(worker)
         self._refresh_trial_controls()
+        self._sync_transaction_controls()
         worker.signals.completed.connect(
             self._worker_completed, Qt.ConnectionType.QueuedConnection
         )
@@ -499,6 +510,7 @@ class MainWindow(QMainWindow):
     def _worker_completed(self, worker):
         self._active_workers.discard(worker)
         self._refresh_trial_controls()
+        self._sync_transaction_controls()
 
     def closeEvent(self, event):
         if self._active_workers:
@@ -509,6 +521,7 @@ class MainWindow(QMainWindow):
 
     def _set_query_actions_enabled(self, enabled: bool) -> None:
         self._query_operation_active = not enabled
+        self._sync_transaction_controls()
         self._refresh_trial_controls()
         self.sql_editor.setReadOnly(not enabled)
         self.analyze_button.setEnabled(enabled)
@@ -541,6 +554,8 @@ class MainWindow(QMainWindow):
         if self._rewrite_check_active:
             self._rewrite_check_active = False
             self.variant_status.setText(f"Проверка не завершена: {message}")
+            self.rewrite_notice.setText(f"Проверка переписывания не завершена: {message}")
+            self.rewrite_notice.show()
             if self.rewrite_journal_check.isChecked():
                 self._refresh_rewrite_journal()
         if self.rewrite_measurement_operation is not None:
@@ -558,6 +573,13 @@ class MainWindow(QMainWindow):
         title = QLabel("Анализ SQL-запроса")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
+
+        self.rewrite_notice = QLabel()
+        self.rewrite_notice.setWordWrap(True)
+        self.rewrite_notice.setTextFormat(Qt.TextFormat.PlainText)
+        self.rewrite_notice.setStyleSheet("background: #1e293b; color: #f8fafc; padding: 10px; border: 1px solid #60a5fa;")
+        self.rewrite_notice.hide()
+        layout.addWidget(self.rewrite_notice)
 
         self.sql_editor = QPlainTextEdit()
         self.sql_editor.setPlaceholderText("Введите один SELECT или WITH-запрос…")
@@ -2508,6 +2530,9 @@ class MainWindow(QMainWindow):
         if not candidates:
             self._clear_verified_rewrite()
             self._set_query_actions_enabled(False)
+            self._rewrite_check_active = True
+            self.rewrite_notice.setText("Проверка переписывания: проверяю применимость правил…")
+            self.rewrite_notice.show()
             worker = Worker(evaluate_sql_rewrites, sql_text, self._database_settings(),
                             journal_directory=self._rewrite_journal_directory(),
                             journal_source=self._rewrite_journal_source)
@@ -2534,6 +2559,8 @@ class MainWindow(QMainWindow):
             "Формирую варианты, проверяю эквивалентность и измеряю время…"
         )
         self.statusBar().showMessage("Проверка переписывания SQL…")
+        self.rewrite_notice.setText(f"Проверка переписывания: сформировано вариантов {len(candidates)}. Проверяю результаты и время…")
+        self.rewrite_notice.show()
         self._rewrite_check_active = True
         worker = Worker(
             evaluate_sql_rewrites,
@@ -2554,6 +2581,9 @@ class MainWindow(QMainWindow):
 
     def _invalidate_rewrite_candidates(self):
         self._rewrite_choice_plan = None
+        if hasattr(self, "rewrite_notice"):
+            self.rewrite_notice.clear()
+            self.rewrite_notice.hide()
         if not hasattr(self, "rewrite_candidate_combo"):
             return
         self.rewrite_candidate_combo.blockSignals(True)
@@ -2718,6 +2748,8 @@ class MainWindow(QMainWindow):
                 "Найдено и измерено безопасное переписывание SQL"
             )
             self._populate_rewrite_candidates(plan)
+            self.rewrite_notice.setText("Проверка переписывания завершена: найден вариант с подтверждённым ускорением. SQL показан справа; исходный текст не изменён.")
+            self.rewrite_notice.show()
             return
 
         if plan.terminal_reason == "no_candidates":
@@ -2742,6 +2774,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Фактическая проверка не запускалась: безопасных вариантов нет"
             )
+            self.rewrite_notice.setText(f"Проверка переписывания завершена: проверены {len(sql_rewrite_rules())} правил, вариантов нет. SQL не выполнялся. Это ограничение набора правил, а не доказательство невозможности оптимизации.")
+            self.rewrite_notice.show()
             return
 
         reasons = {
@@ -2792,6 +2826,8 @@ class MainWindow(QMainWindow):
                 self.variant_status.setText(f"Вариант не прошёл проверку: {preview.rejection_reason}.")
         self.statusBar().showMessage("Безопасное ускоряющее переписывание не найдено")
         self._populate_rewrite_candidates(plan)
+        self.rewrite_notice.setText("Проверка переписывания завершена: " + reasons.get(plan.terminal_reason, plan.terminal_reason) + ". Подробности — в результатах проверки.")
+        self.rewrite_notice.show()
 
     def _clear_verified_rewrite(self) -> None:
         self.verified_rewrite_original_sql = None
@@ -3341,10 +3377,37 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    transaction_replay_smoke_test = "--transaction-replay-smoke-test" in sys.argv
+    if transaction_replay_smoke_test:
+        sys.argv.remove("--transaction-replay-smoke-test")
+    transaction_select_rewrite_smoke_test = "--transaction-select-rewrite-smoke-test" in sys.argv
+    if transaction_select_rewrite_smoke_test:
+        sys.argv.remove("--transaction-select-rewrite-smoke-test")
+    startup_smoke_test = "--startup-smoke-test" in sys.argv
+    if startup_smoke_test:
+        sys.argv.remove("--startup-smoke-test")
     smoke_test = "--smoke-test" in sys.argv
     deep_smoke_test = "--deep-smoke-test" in sys.argv
     quick_smoke_test = "--quick-smoke-test" in sys.argv
     rewrite_smoke_test = "--rewrite-smoke-test" in sys.argv
+    transaction_smoke_test = "--transaction-smoke-test" in sys.argv
+    transaction_trial_smoke_test = "--transaction-trial-smoke-test" in sys.argv
+    transaction_comparison_smoke_test = "--transaction-comparison-smoke-test" in sys.argv
+    transaction_parameters_smoke_test = "--transaction-parameters-smoke-test" in sys.argv
+    transaction_holdout_smoke_test = "--transaction-holdout-smoke-test" in sys.argv
+    transaction_write_smoke_test = "--transaction-write-smoke-test" in sys.argv
+    if transaction_write_smoke_test:
+        sys.argv.remove("--transaction-write-smoke-test")
+    if transaction_holdout_smoke_test:
+        sys.argv.remove("--transaction-holdout-smoke-test")
+    if transaction_parameters_smoke_test:
+        sys.argv.remove("--transaction-parameters-smoke-test")
+    if transaction_comparison_smoke_test:
+        sys.argv.remove("--transaction-comparison-smoke-test")
+    if transaction_trial_smoke_test:
+        sys.argv.remove("--transaction-trial-smoke-test")
+    if transaction_smoke_test:
+        sys.argv.remove("--transaction-smoke-test")
     if rewrite_smoke_test:
         sys.argv.remove("--rewrite-smoke-test")
     if quick_smoke_test:
@@ -3357,12 +3420,334 @@ def main() -> int:
     crash_stream = (ARTIFACT_ROOT / "desktop-crash.log").open(
         "a", encoding="utf-8"
     )
-    faulthandler.enable(crash_stream, all_threads=True)
+    _enable_desktop_fault_handler(crash_stream)
     sys.excepthook = _gui_exception_handler
     qInstallMessageHandler(_qt_message_handler)
     application = QApplication(sys.argv)
     application.setApplicationName("Predictive Query Optimization")
     application.setOrganizationName("PQO")
+    if transaction_replay_smoke_test:
+        from .transaction_replay_smoke import run_replay_smoke
+        return run_replay_smoke(application, MainWindow, PROJECT_ROOT, ARTIFACT_ROOT)
+    if transaction_select_rewrite_smoke_test:
+        from .transaction_select_rewrite_smoke import run_select_rewrite_smoke
+        return run_select_rewrite_smoke(application, MainWindow, PROJECT_ROOT, ARTIFACT_ROOT)
+    if transaction_write_smoke_test:
+        write_log = ARTIFACT_ROOT / "transaction-write-smoke-test.log"
+        try:
+            from .transaction_planning import collect_transaction_plans
+            from .transaction_indexes import collect_transaction_index_candidates
+            from .transaction_write_pressure import assess_write_pressure
+            if os.getenv("PQO_SMOKE_PREVIEW") == "1":
+                from PyQt6.QtGui import QFontDatabase
+                for font in ("arial.ttf", "consola.ttf"):
+                    QFontDatabase.addApplicationFont(str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / font))
+                application.setFont(QFont("Arial", 10))
+            write_window = MainWindow()
+            settings = write_window._database_settings()
+            if settings.dbname not in {"pqo_university_unseen", "pqo_university_index_lab"}:
+                raise ValueError("Write scenario smoke is limited to the known synthetic university databases")
+            source = (PROJECT_ROOT / "examples/transactions/university-shared-index.sql").read_text(encoding="utf-8-sig")
+            plans = collect_transaction_plans(source, settings)
+            indices = collect_transaction_index_candidates(source, settings, plans=plans)
+            write_window.transaction_editor.setPlainText(source)
+            write_window._transaction_inspected((source, plans.inspection))
+            write_window._transaction_planned((source, settings, plans))
+            write_window._transaction_indexes_ready((source, settings, indices))
+            write_window.transaction_write_source.setCurrentIndex(1)
+            row = next(i for i, item in enumerate(indices.candidates) if item.status != "covered"
+                and item.action.key_columns == ("student_id",) and "status" in item.action.include_columns)
+            write_window.transaction_index_table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+            actions, trial = write_window._write_actions_and_trial()
+            unknown = assess_write_pressure(source, plans, indices, actions, budget=1000)
+            if unknown.unknown_commands != (3, 4, 5) or unknown.budget_state != "unknown":
+                raise RuntimeError("Unknown affected rows silently became zero")
+            for row, repetitions, rows in ((0, 10, "100"), (1, 50, "1"), (2, 2, "100")):
+                write_window.transaction_write_table.cellWidget(row, 3).setValue(repetitions)
+                write_window.transaction_write_table.cellWidget(row, 4).setText(rows)
+            write_window.transaction_write_budget.setText("1000")
+            assumptions = write_window._write_assumptions_input()
+            result = assess_write_pressure(source, plans, indices, actions, assumptions=assumptions, budget=1000)
+            write_window._transaction_write_ready((source, source, settings, plans, indices, actions, assumptions, 1000, "checked", None, result))
+            if (result.known_exposure != 1250 or result.budget_state != "exceeded" or result.net_benefit_ms is not None
+                    or result.rows[0].include_columns_in_set != ("status",)
+                    or write_window.transaction_write_report is not result
+                    or write_window.transaction_editor.toPlainText() != source or write_window.transaction_index_report is not indices):
+                raise RuntimeError("Write scenario arithmetic/HOT/UI isolation contract failed")
+            if os.getenv("PQO_SMOKE_PREVIEW") == "1":
+                write_window.tabs.setCurrentIndex(1)
+                write_window.resize(1740, 1030)
+                write_window.show()
+                application.processEvents()
+                write_window.grab().save(str(ARTIFACT_ROOT / "transaction-write-preview.png"))
+                write_window.resize(1280, 800)
+                application.processEvents()
+                write_window.grab().save(str(ARTIFACT_ROOT / "transaction-write-preview-small.png"))
+            write_log.write_text("OK: plans/catalogs only, no DML replay/index creation; explicit scenario rows, unknown-vs-zero, "
+                "INCLUDE/HOT risk and budget checked; no net-time claim; original SQL/candidates preserved.\n"
+                + json.dumps({"known_exposure": result.known_exposure, "budget_state": result.budget_state,
+                    "scope_complete": result.scope_complete, "net_benefit_ms": result.net_benefit_ms,
+                    "rows": [{"number": item.number, "kind": item.kind, "exposure": item.exposure,
+                        "plan_input_rows": item.plan_input_rows, "hot_status": item.hot_status,
+                        "incremental_hot_columns": item.incremental_hot_columns, "limitations": item.limitations} for item in result.rows]},
+                    ensure_ascii=False, indent=2), encoding="utf-8")
+            write_window.close()
+        except Exception:
+            write_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
+        return 0
+    if transaction_holdout_smoke_test:
+        holdout_log = ARTIFACT_ROOT / "transaction-holdout-smoke-test.log"
+        try:
+            from .transaction_comparison import compare_transaction_indexes
+            from .transaction_holdout import validate_index_holdout
+            from .transaction_planning import collect_transaction_plans
+            from .transaction_indexes import collect_transaction_index_candidates
+            if os.getenv("PQO_TRIAL_COPY_CONFIRMED") != "1" or not os.getenv("PQO_TRIAL_COPY_DATABASE"):
+                raise ValueError("Explicit opt-in copy confirmation/name required")
+            if os.getenv("PQO_SMOKE_PREVIEW") == "1":
+                from PyQt6.QtGui import QFontDatabase
+                for font in ("arial.ttf", "consola.ttf"):
+                    QFontDatabase.addApplicationFont(str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / font))
+                application.setFont(QFont("Arial", 10))
+            holdout_window = MainWindow()
+            source = (PROJECT_ROOT / "examples/transactions/university-index-comparison.sql").read_text(encoding="utf-8-sig")
+            settings = holdout_window._database_settings()
+            target = os.environ["PQO_TRIAL_COPY_DATABASE"]
+            plans = collect_transaction_plans(source, settings)
+            indices = collect_transaction_index_candidates(source, settings, plans=plans)
+            holdout_window.transaction_editor.setPlainText(source)
+            holdout_window._transaction_inspected((source, plans.inspection))
+            holdout_window._transaction_planned((source, settings, plans))
+            holdout_window._transaction_indexes_ready((source, settings, indices))
+            holdout_window.transaction_copy_edit.setText(target)
+            holdout_window.transaction_copy_check.setChecked(True)
+            for key in ("student_id", "offering_id"):
+                row = next(i for i, item in enumerate(indices.candidates) if item.status != "covered"
+                    and item.action.key_columns == (key, "registered_at") and not item.action.include_columns)
+                holdout_window.transaction_index_table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+            actions = holdout_window._checked_transaction_indexes()
+            weights = holdout_window._transaction_frequencies()
+            comparison = compare_transaction_indexes(source, settings, target, actions,
+                frequencies=weights, test_copy_confirmed=True, series_count=2)
+            eligible = [i for i, trial in enumerate(comparison.trials) if trial.status == "measured"
+                and trial.accepted_for_reads and trial.rollback_verified]
+            if not comparison.completed or not eligible:
+                raise RuntimeError("Development fixture has no eligible accepted reading trial; no evidence fabricated")
+            chosen = comparison.preferred_variant if comparison.preferred_variant is not None else max(eligible,
+                key=lambda i: len(comparison.trials[i].actions))
+            holdout_window._transaction_comparison_ready((source, settings, target, actions, weights, source, 2, comparison))
+            holdout_window.transaction_compare_table.selectRow(chosen)
+            holdout_window.transaction_views.setCurrentIndex(6)
+            if not holdout_window.transaction_holdout_editor.isReadOnly():
+                raise RuntimeError("Control editor opened before selection freeze")
+            holdout_window._freeze_transaction_holdout()
+            selection = holdout_window._transaction_holdout_selection
+            if selection is None:
+                raise RuntimeError(holdout_window.transaction_holdout_status.text())
+            # Reveal/load control only AFTER freezing the actual development variant.
+            control_sql = (PROJECT_ROOT / "examples/transactions/university-index-holdout.sql").read_text(encoding="utf-8-sig")
+            holdout_window.transaction_holdout_editor.setPlainText(control_sql)
+            holdout_window._transaction_holdout_attempted = True
+            holdout_window._set_query_actions_enabled(False)
+            result = validate_index_holdout(selection, control_sql, settings, target, test_copy_confirmed=True)
+            holdout_window._transaction_holdout_ready((source, source, settings, target, comparison, selection, control_sql, result))
+            if (not result.completed or len(result.trials) != 2
+                    or any(trial.status != "measured" or not trial.rollback_verified for trial in result.trials)
+                    or holdout_window.transaction_holdout_report is not result
+                    or holdout_window.transaction_holdout_table.rowCount() != 2
+                    or holdout_window.transaction_holdout_run_button.isEnabled()
+                    or not holdout_window.transaction_holdout_editor.isReadOnly()
+                    or holdout_window.transaction_editor.toPlainText() != source
+                    or holdout_window.transaction_compare_report is not comparison):
+                raise RuntimeError("Control measurements/rollback/UI isolation contract failed")
+            if os.getenv("PQO_SMOKE_PREVIEW") == "1":
+                holdout_window.tabs.setCurrentIndex(1)
+                holdout_window.resize(1740, 1030)
+                holdout_window.show()
+                application.processEvents()
+                holdout_window.grab().save(str(ARTIFACT_ROOT / "transaction-holdout-preview.png"))
+                holdout_window.resize(1280, 800)
+                application.processEvents()
+                holdout_window.grab().save(str(ARTIFACT_ROOT / "transaction-holdout-preview-small.png"))
+            holdout_log.write_text("OK: actual development comparison, frozen eligible variant before control reveal; "
+                "three new SELECTs in two control series; no adaptive selection, DML, persistent indexes or training; "
+                "rollback verified; one-attempt UI, original SQL/comparison preserved. No SQL/values logged here.\n"
+                + json.dumps({"development_stable": selection.development_stable, "variant": selection.variant_number,
+                    "index_count": len(selection.actions), "control_passed": result.passed_for_reads,
+                    "validated_on_both": result.validated_on_both, "reasons": result.reasons,
+                    "trials": [{"baseline": trial.weighted_baseline_ms, "indexed": trial.weighted_indexed_ms,
+                        "accepted": trial.accepted_for_reads, "rollback_verified": trial.rollback_verified,
+                        "used_index_count": len(trial.used_index_names), "reasons": trial.reasons} for trial in result.trials]},
+                    ensure_ascii=False, indent=2), encoding="utf-8")
+            holdout_window.close()
+        except Exception:
+            holdout_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
+        return 0
+    if transaction_parameters_smoke_test:
+        parameter_log = ARTIFACT_ROOT / "transaction-parameters-smoke-test.log"
+        try:
+            from .transaction_planning import collect_transaction_plans
+            from .transaction_indexes import collect_transaction_index_candidates
+            from .transaction_index_trial import run_transaction_index_set_trial
+            from .transaction_inspection import inspect_transaction
+            if os.getenv("PQO_TRIAL_COPY_CONFIRMED") != "1" or not os.getenv("PQO_TRIAL_COPY_DATABASE"):
+                raise ValueError("Explicit opt-in copy confirmation/name required")
+            parameter_window = MainWindow()
+            path = PROJECT_ROOT / "examples/transactions/university-parameters.sql"
+            text = path.read_text(encoding="utf-8-sig")
+            settings = parameter_window._database_settings()
+            target = os.environ["PQO_TRIAL_COPY_DATABASE"]
+            parameter_window.transaction_editor.setPlainText(text)
+            parameter_window._transaction_inspected((text, inspect_transaction(text)))
+            fixture_values = (("integer", "17001"), ("integer", "50"), ("integer", "350"), ("integer", "200"),
+                ("text", "completed"), ("integer", "17001"), ("integer", "350"))
+            if parameter_window.transaction_plan_button.isEnabled():
+                raise RuntimeError("Parameters were accepted without explicit types/values")
+            for row, (kind, value) in enumerate(fixture_values):
+                combo = parameter_window.transaction_parameter_table.cellWidget(row, 2)
+                combo.setCurrentIndex(combo.findData(kind))
+                parameter_window.transaction_parameter_table.cellWidget(row, 4).setText(value)
+            parameter_window._apply_transaction_parameters()
+            effective = parameter_window._transaction_effective_sql()
+            if parameter_window._transaction_binding is None or effective == text:
+                raise RuntimeError("Explicit bindings did not create an isolated value scenario")
+            plans = collect_transaction_plans(effective, settings)
+            if any(plan.status != "planned" for plan in plans.statements):
+                raise RuntimeError("Parameterized fixture plans failed")
+            parameter_window._transaction_planned((text, settings, effective, plans))
+            indices = collect_transaction_index_candidates(effective, settings, plans=plans)
+            parameter_window._transaction_indexes_ready((text, settings, effective, indices))
+            actions = tuple(next(item.action for item in indices.candidates
+                if item.action.key_columns == (key, "registered_at") and not item.action.include_columns)
+                for key in ("student_id", "offering_id"))
+            trial = run_transaction_index_set_trial(effective, settings, target, actions, test_copy_confirmed=True)
+            if trial.status != "measured" or not trial.rollback_verified or len(trial.used_index_names) != 2 or trial.skipped_writes != (3,):
+                raise RuntimeError("Parameterized SELECT-only pair trial failed")
+            parameter_window.transaction_parameter_table.cellWidget(0, 4).setText("17002")
+            parameter_window._transaction_planned((text, settings, effective, plans))
+            if (parameter_window.transaction_plan_report is not None or parameter_window.transaction_index_report is not None
+                    or parameter_window.transaction_editor.toPlainText() != text):
+                raise RuntimeError("Parameter invalidation/source preservation failed")
+            parameter_log.write_text("OK: seven explicit per-statement typed bindings; three estimated plans; "
+                "two temporary indexes used on copy; DML skipped; rollback verified; stale bindings rejected. "
+                "No parameter values/source SQL recorded here.\n"
+                + json.dumps(asdict(trial), ensure_ascii=False, indent=2), encoding="utf-8")
+            parameter_window.close()
+        except Exception:
+            parameter_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
+        return 0
+    if transaction_comparison_smoke_test:
+        comparison_log = ARTIFACT_ROOT / "transaction-comparison-smoke-test.log"
+        try:
+            from .transaction_comparison import compare_transaction_indexes
+            from .transaction_planning import collect_transaction_plans
+            from .transaction_indexes import collect_transaction_index_candidates
+            if os.getenv("PQO_TRIAL_COPY_CONFIRMED") != "1" or not os.getenv("PQO_TRIAL_COPY_DATABASE"):
+                raise ValueError("Explicit opt-in copy confirmation/name required")
+            comparison_window = MainWindow()
+            path = PROJECT_ROOT / "examples/transactions/university-index-comparison.sql"
+            text = path.read_text(encoding="utf-8-sig")
+            settings = comparison_window._database_settings()
+            target = os.environ["PQO_TRIAL_COPY_DATABASE"]
+            plans = collect_transaction_plans(text, settings)
+            indices = collect_transaction_index_candidates(text, settings, plans=plans)
+            comparison_window.transaction_editor.setPlainText(text)
+            comparison_window._transaction_inspected((text, plans.inspection))
+            comparison_window._transaction_planned((text, settings, plans))
+            comparison_window._transaction_indexes_ready((text, settings, indices))
+            comparison_window.transaction_copy_edit.setText(target)
+            for key in ("student_id", "offering_id"):
+                row = next(i for i, item in enumerate(indices.candidates) if item.status != "covered"
+                    and item.action.key_columns == (key, "registered_at") and not item.action.include_columns)
+                comparison_window.transaction_index_table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+            comparison_window.transaction_frequency_table.cellWidget(0, 1).setValue(10)
+            comparison_window.transaction_copy_check.setChecked(True)
+            if not comparison_window.transaction_compare_button.isEnabled():
+                raise RuntimeError("Confirmed comparison did not become available")
+            actions = comparison_window._checked_transaction_indexes()
+            weights = comparison_window._transaction_frequencies()
+            result = compare_transaction_indexes(text, settings, target, actions, frequencies=weights,
+                test_copy_confirmed=True, minimum_gain_ms=1, series_count=2)
+            comparison_window._transaction_comparison_ready((text, settings, target, actions, weights, text, 2, result))
+            if (not result.completed or result.completed_series != 2 or len(result.trials) != 6
+                    or comparison_window.transaction_compare_table.rowCount() != 6
+                    or any(trial.status != "measured" or not trial.rollback_verified for trial in result.trials)
+                    or result.coordinates != ((1, 1), (1, 2), (1, 3), (2, 3), (2, 2), (2, 1))
+                    or any(len(trial.used_index_names) != 2 for trial in result.trials if len(trial.actions) == 2)):
+                raise RuntimeError(str(result))
+            comparison_window.transaction_compare_table.selectRow(2)
+            if comparison_window.transaction_details.toPlainText().count("CREATE INDEX") != 2:
+                raise RuntimeError("Pair details do not show both actions")
+            if comparison_window.transaction_trial_report is not None:
+                raise RuntimeError("Pair evidence leaked into the single-index tab")
+            comparison_window.transaction_frequency_table.cellWidget(0, 1).setValue(11)
+            if comparison_window.transaction_compare_report is not None or comparison_window.transaction_editor.toPlainText() != text:
+                raise RuntimeError("Frequency invalidation/source preservation failed")
+            comparison_log.write_text("OK: two repeated series, reversed order, stable variant numbers; "
+                "two singles and a pair measured on copy in each; both indexes used in pairs; "
+                "rollback verified; DML skipped; explicit frequencies, GUI rendering and invalidation checked.\n"
+                + json.dumps(asdict(result), ensure_ascii=False, indent=2), encoding="utf-8")
+            comparison_window.close()
+        except Exception:
+            comparison_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
+        return 0
+    if transaction_trial_smoke_test:
+        trial_log = ARTIFACT_ROOT / "transaction-trial-smoke-test.log"
+        try:
+            from .transaction_planning import collect_transaction_plans
+            from .transaction_indexes import collect_transaction_index_candidates
+            from .transaction_index_trial import run_transaction_index_trial
+            if os.getenv("PQO_TRIAL_COPY_CONFIRMED") != "1" or not os.getenv("PQO_TRIAL_COPY_DATABASE"):
+                raise ValueError("Set PQO_TRIAL_COPY_CONFIRMED=1 and PQO_TRIAL_COPY_DATABASE for an isolated copy")
+            trial_window = MainWindow()
+            filename = os.getenv("PQO_SMOKE_SQL_FILE")
+            path = Path(filename) if filename else PROJECT_ROOT / "examples/transactions/university-shared-index.sql"
+            text = path.read_text(encoding="utf-8-sig")
+            settings = trial_window._database_settings()
+            target = os.environ["PQO_TRIAL_COPY_DATABASE"]
+            plans = collect_transaction_plans(text, settings)
+            indices = collect_transaction_index_candidates(text, settings, plans=plans)
+            wanted = next((item for item in indices.candidates if item.status != "covered"
+                and item.action.key_columns == ("student_id", "registered_at") and not item.action.include_columns), None)
+            if wanted is None:
+                raise ValueError("Smoke fixture has no expected test index candidate")
+            trial_window.transaction_editor.setPlainText(text)
+            trial_window._transaction_inspected((text, plans.inspection))
+            trial_window._transaction_planned((text, settings, plans))
+            trial_window._transaction_indexes_ready((text, settings, indices))
+            trial_window.transaction_copy_edit.setText(target)
+            result = run_transaction_index_trial(text, settings, target, wanted.action,
+                test_copy_confirmed=True, minimum_gain_ms=1, repetitions=3)
+            trial_window._transaction_index_trial_ready((text, settings, target, result))
+            if result.status != "measured" or not result.rollback_verified or trial_window.transaction_trial_table.rowCount() != len(result.readings):
+                raise RuntimeError(str(result))
+            trial_window.transaction_views.setCurrentIndex(1)
+            if "НЕ ПРОВЕРЕН УСКОРЕНИЕМ" in trial_window.transaction_details.toPlainText():
+                raise RuntimeError("Measured trial was not attached to its index card")
+            dml_only = next((i for i, item in enumerate(indices.candidates)
+                if item.action.key_columns == ("offering_id",) and not item.action.include_columns), None)
+            if dml_only is not None:
+                trial_window.transaction_index_table.selectRow(dml_only)
+                trial_window.transaction_copy_check.setChecked(True)
+                if trial_window.transaction_trial_button.isEnabled() or trial_window.transaction_trial_report is not None:
+                    raise RuntimeError("DML-only candidate inherited another index's SELECT trial")
+            row = next(i for i, item in enumerate(indices.candidates) if item.action == wanted.action)
+            trial_window.transaction_index_table.selectRow(row)
+            trial_window.transaction_views.setCurrentIndex(2)
+            if trial_window.transaction_trial_report != result:
+                raise RuntimeError("Selecting an index lost its own trial evidence")
+            trial_log.write_text("OK: SELECT-only A/B/A experiment on a separate copy; index rolled back and absence verified; "
+                "DML skipped; no transaction-time claim; per-candidate evidence and DML-only UI guard checked.\n"
+                + json.dumps(asdict(result), ensure_ascii=False, indent=2), encoding="utf-8")
+            trial_window.close()
+        except Exception:
+            trial_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
+        return 0
     if APP_ICON.is_file():
         application.setWindowIcon(QIcon(str(APP_ICON)))
     if smoke_test:
@@ -3430,7 +3815,14 @@ def main() -> int:
                 )
                 return 3
             smoke_log.write_text("Constructing the main window...", encoding="utf-8")
-            MainWindow()
+            smoke_window = MainWindow()
+            smoke_sql = (PROJECT_ROOT / "examples/transactions/university-inspection.sql").read_text(encoding="utf-8-sig")
+            from .transaction_inspection import inspect_transaction
+            smoke_window.transaction_editor.setPlainText(smoke_sql)
+            smoke_window._transaction_inspected((smoke_sql, inspect_transaction(smoke_sql)))
+            if smoke_window.transaction_table.rowCount() != 3:
+                raise RuntimeError("Transaction inventory GUI smoke check failed")
+            smoke_window.close()
         except Exception:
             smoke_log.write_text(traceback.format_exc(), encoding="utf-8")
             return 3
@@ -3438,6 +3830,40 @@ def main() -> int:
             "OK: GUI, SQL parser, XGBoost, DQN, sequential DQN and strategy selector loaded.",
             encoding="utf-8",
         )
+        return 0
+    if transaction_smoke_test:
+        # Explicit opt-in integration check: only EXPLAIN, no user DML replay.
+        transaction_log = ARTIFACT_ROOT / "transaction-smoke-test.log"
+        try:
+            from .transaction_inspection import inspect_transaction
+            from .transaction_planning import collect_transaction_plans
+            from .transaction_indexes import collect_transaction_index_candidates
+            transaction_window = MainWindow()
+            filename = os.getenv("PQO_SMOKE_SQL_FILE")
+            sql_path = Path(filename) if filename else PROJECT_ROOT / "examples/transactions/university-inspection.sql"
+            sql_text = sql_path.read_text(encoding="utf-8-sig")
+            settings = transaction_window._database_settings()
+            inspection = inspect_transaction(sql_text)
+            transaction_window.transaction_editor.setPlainText(sql_text)
+            transaction_window._transaction_inspected((sql_text, inspection))
+            report = collect_transaction_plans(sql_text, settings)
+            transaction_window._transaction_planned((sql_text, settings, report))
+            if transaction_window.transaction_plan_report is None:
+                raise RuntimeError("Estimated plans were not displayed")
+            if any(item.status != "planned" for item in report.statements):
+                raise RuntimeError(str([(item.number, item.status, item.explanation) for item in report.statements]))
+            index_report = collect_transaction_index_candidates(sql_text, settings, plans=report)
+            transaction_window._transaction_indexes_ready((sql_text, settings, index_report))
+            if transaction_window.transaction_index_report is None or transaction_window.transaction_index_table.rowCount() != len(index_report.candidates):
+                raise RuntimeError("Workload index hypotheses were not displayed")
+            transaction_log.write_text(
+                f"OK: database={report.database_name}; statements={len(report.statements)}; "
+                f"index_candidates={len(index_report.candidates)}; inventory, estimated plans and index hypotheses displayed; no transaction commands executed; "
+                "no ANALYZE, index creation or calibration.\n", encoding="utf-8")
+            transaction_window.close()
+        except Exception:
+            transaction_log.write_text(traceback.format_exc(), encoding="utf-8")
+            return 3
         return 0
     if deep_smoke_test:
         deep_smoke_log = ARTIFACT_ROOT / "deep-smoke-test.log"
@@ -3466,12 +3892,34 @@ def main() -> int:
         return 0
     window = MainWindow()
     window.show()
-    window._start_worker(Worker(
+    warm_worker = Worker(
         _warm_inference_models,
         Path(window.xgb_model_edit.text()),
         Path(window.dqn_model_edit.text()),
         Path(window.strategy_model_edit.text()),
-    ))
+    )
+    if startup_smoke_test:
+        startup_state = {"warmed": False}
+        warm_worker.signals.succeeded.connect(
+            lambda _result: startup_state.__setitem__("warmed", True),
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+        def finish_startup_check():
+            result = {
+                "models_warmed": startup_state["warmed"],
+                "active_workers": len(window._active_workers),
+                "window_visible": window.isVisible(),
+                "qt_platform": application.platformName(),
+                "observation_seconds": 20,
+            }
+            (ARTIFACT_ROOT / "startup-smoke-test.log").write_text(
+                json.dumps(result, indent=2), encoding="utf-8"
+            )
+            application.exit(0 if result["models_warmed"] and not result["active_workers"] and result["window_visible"] else 3)
+
+        QTimer.singleShot(20000, finish_startup_check)
+    window._start_worker(warm_worker)
     if rewrite_smoke_test:
         window._rewrite_journal_source = "smoke_test"
         window.rewrite_journal_check.blockSignals(True)

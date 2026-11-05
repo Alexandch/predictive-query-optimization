@@ -4,6 +4,26 @@ from pqo.sql_rewrite import generate_sql_rewrites, evaluate_sql_variant
 
 
 class SQLRewriteTests(unittest.TestCase):
+    def test_window_input_materialization_is_bounded_and_can_be_disabled(self):
+        from pathlib import Path
+        sql = (Path(__file__).resolve().parents[1] / "examples/university-unseen/04-window.sql").read_text(encoding="utf-8")
+        candidates = generate_sql_rewrites(sql)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].rule_id, "materialize-aggregate-before-window")
+        self.assertIn("scores AS MATERIALIZED", candidates[0].sql_text)
+        self.assertIn("DENSE_RANK()", candidates[0].sql_text)
+        self.assertFalse(generate_sql_rewrites(sql, include_window_materialization=False))
+        self.assertFalse(generate_sql_rewrites(candidates[0].sql_text))
+
+    def test_window_materialization_respects_explicit_hint_and_volatile_functions(self):
+        query = ("WITH s AS (SELECT product_id,SUM(quantity) AS n FROM retail.order_items GROUP BY product_id) "
+                 "SELECT product_id,DENSE_RANK() OVER (ORDER BY n) FROM s")
+        for sql in (query.replace("s AS (", "s AS NOT MATERIALIZED ("),
+                    query.replace("SUM(quantity)", "SUM(quantity)+random()"),
+                    query.replace("WITH s", "WITH RECURSIVE s")):
+            self.assertFalse(any(item.rule_id == "materialize-aggregate-before-window"
+                                 for item in generate_sql_rewrites(sql)))
+
     def test_selection_prefers_fastest_variant_despite_paired_baseline_drift(self):
         from pqo.sql_rewrite import SQLRewriteCandidate, SQLRewriteEvaluation, _select_fastest_accepted_rewrite
         from dataclasses import replace

@@ -15,6 +15,9 @@ datas = [
     (str(ROOT / "examples" / "logistics-rewrite-check.sql"), "examples"),
     (str(ROOT / "examples" / "retail-scalar-aggregate-rewrite.sql"), "examples"),
     (str(ROOT / "examples" / "logistics-distinct-join-rewrite.sql"), "examples"),
+    (str(ROOT / "examples" / "university-unseen"), "examples/university-unseen"),
+    (str(ROOT / "examples" / "defense"), "examples/defense"),
+    (str(ROOT / "examples" / "transactions"), "examples/transactions"),
     (str(ROOT / "models"), "models"),
     (str(ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"), "dataset/postgresql"),
     (

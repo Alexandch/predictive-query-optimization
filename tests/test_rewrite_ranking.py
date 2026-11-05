@@ -17,7 +17,7 @@ class RewriteRankingTests(unittest.TestCase):
         relation = Relationship("retail", "order_items", "order_id", "retail", "customer_orders", "order_id")
         cases = ranking_cases([relation])
         self.assertEqual(len(cases), 3)
-        self.assertEqual([len(generate_sql_rewrites(case.sql, max_combined_candidates=0)) for case in cases], [2, 3, 3])
+        self.assertEqual([len(generate_sql_rewrites(case.sql, max_combined_candidates=0, include_window_materialization=False)) for case in cases], [2, 3, 3])
         self.assertTrue(all(case.role == "control" for case in cases))
         self.assertTrue(all(case.family_id == relation.family_id for case in cases))
 
