@@ -47,7 +47,7 @@ class HistoryTests(unittest.TestCase):
         record = self.record()
         evidence = {"version": 1, "checks": [], "max_candidates_per_step": 3}
         row = (1, record.started_at, "completed", "SELECT 1", None, None, None,
-               None, None, 3, 10, 10, 0, "index_not_used", None, None, False, evidence)
+               None, None, 3, 10, 10, 0, "index_not_used", None, None, False, evidence, 42, "accepted")
         connection = MagicMock()
         connection.execute.return_value.fetchone.return_value = (True, False)
         connection.execute.return_value.fetchall.return_value = [row]
@@ -55,6 +55,8 @@ class HistoryTests(unittest.TestCase):
             connect.return_value.__enter__.return_value = connection
             records = load_analysis_history()
         self.assertEqual(records[0].candidate_trial_evidence, evidence)
+        self.assertEqual(records[0].index_recommendation_id, 42)
+        self.assertEqual(records[0].index_recommendation_status, "accepted")
         queries = "\n".join(call.args[0] for call in connection.execute.call_args_list)
         self.assertIn("to_jsonb(sequential)->'candidate_trial_evidence'", queries)
         self.assertNotIn("ALTER", queries)

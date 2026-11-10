@@ -23,6 +23,7 @@ def save_analysis(
     source: str = "dataset-collector",
     template_id: str = "external",
     connection=None,
+    target_settings: DatabaseSettings | None = None,
 ) -> int:
     import psycopg
 
@@ -41,6 +42,7 @@ def save_analysis(
                 source=source,
                 template_id=template_id,
                 connection=owned_connection,
+                target_settings=target_settings,
             )
 
     with connection.transaction():
@@ -48,6 +50,8 @@ def save_analysis(
             "SELECT pqo.register_query_run(%s, %s, %s, %s)",
             (sql_text, sql_hash, source, template_id),
         ).fetchone()[0]
+
+        _save_target_context(connection, query_run_id, target_settings)
 
         connection.execute(
             """
@@ -190,6 +194,7 @@ def save_optimization_result(
     *,
     model_name: str = "xgboost",
     model_version: str = "52-templates-v2",
+    connection=None,
 ) -> None:
     """Persist model output produced for an already stored estimated plan."""
     import psycopg
@@ -197,7 +202,11 @@ def save_optimization_result(
     from .index_actions import IndexActionKind
 
     settings = settings or DatabaseSettings.from_env()
-    with psycopg.connect(**settings.connection_kwargs()) as connection:
+    if connection is None:
+        with psycopg.connect(**settings.connection_kwargs()) as owned:
+            return save_optimization_result(query_run_id,predicted_time_ms,recommendation,settings,
+                model_name=model_name,model_version=model_version,connection=owned)
+    with connection.transaction():
         connection.execute(
             """
             INSERT INTO pqo.model_prediction (
@@ -243,6 +252,7 @@ def save_sequential_analysis(
     model_version: str = "unknown",
     source: str = "application",
     connection=None,
+    target_settings: DatabaseSettings | None = None,
 ) -> tuple[int, int]:
     """Persist the plan, accepted steps, and rejected candidate evidence atomically."""
     import psycopg
@@ -287,6 +297,7 @@ def save_sequential_analysis(
                 model_version=model_version,
                 source=source,
                 connection=owned_connection,
+                target_settings=target_settings,
             )
 
     with connection.transaction():
@@ -322,6 +333,7 @@ def save_sequential_analysis(
                 (None if plan.baseline_timed_out else plan.baseline_time_ms, query_run_id),
             )
 
+        _save_target_context(connection, query_run_id, target_settings)
         sequential_analysis_id = connection.execute(
             """
             INSERT INTO pqo.sequential_analysis (
@@ -392,6 +404,18 @@ def save_sequential_analysis(
             )
 
     return query_run_id, sequential_analysis_id
+
+
+def _save_target_context(connection, query_run_id, settings):
+    if settings is None:
+        return
+    from .connections import target_context
+    context=Jsonb(target_context(settings))
+    row=connection.execute('UPDATE pqo.query_run SET target_context=%s WHERE id=%s '
+        "AND (target_context='{}'::jsonb OR target_context=%s) RETURNING id",
+        (context,query_run_id,context)).fetchone()
+    if row is None:
+        raise ValueError('Saved analysis belongs to another target connection')
 
 
 def _proposed_ddl(action) -> str:

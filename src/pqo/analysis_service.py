@@ -40,6 +40,7 @@ class QueryAnalysis:
     calibration_observation: CalibrationObservation | None = None
     prediction_latency_ms: float | None = None
     analysis_latency_ms: float | None = None
+    persistence_error: str | None = None
 
 
 def analyze_query_adaptive(
@@ -52,6 +53,7 @@ def analyze_query_adaptive(
     recommendation_threshold_ms: float = 50.0,
     persist: bool = True,
     strategy_model_path: str | Path | None = None,
+    history_settings: DatabaseSettings | None = None,
 ) -> QueryAnalysis:
     """Measure, update the local profile, then return a calibrated analysis."""
     settings = settings or DatabaseSettings.from_env()
@@ -70,6 +72,7 @@ def analyze_query_adaptive(
         persist=persist,
         calibration_profile_path=calibration_profile_path,
         strategy_model_path=strategy_model_path,
+        history_settings=history_settings,
     )
     return replace(
         analysis,
@@ -88,6 +91,7 @@ def analyze_query(
     calibration_profile_path: str | Path | None = None,
     strategy_model_path: str | Path | None = None,
     prediction_ready: Callable[[QueryTimePrediction, float], None] | None = None,
+    history_settings: DatabaseSettings | None = None,
 ) -> QueryAnalysis:
     started = perf_counter()
     if recommendation_threshold_ms < 0:
@@ -244,7 +248,28 @@ def analyze_query(
         )
 
     query_run_id = None
-    if persist:
+    persistence_error = None
+    if persist and history_settings is not None:
+        # Service writes are atomic and use a separate connection. A service
+        # outage must not discard a completed source analysis or write to source.
+        import psycopg
+        try:
+            with psycopg.connect(**history_settings.connection_kwargs()) as storage:
+                storage.execute("SELECT set_config('statement_timeout','10000',true), set_config('lock_timeout','2000',true)")
+                query_run_id=save_analysis(normalized_sql,estimated_plan.plan_json,sql_features,
+                    estimated_plan.features,database_features,settings=history_settings,
+                    source='application',connection=storage,target_settings=settings)
+                save_optimization_result(query_run_id,predicted_time,recommendation,
+                    settings=history_settings,connection=storage)
+                if structural_recommendations:
+                    structural_recommendations=save_structural_recommendations(query_run_id,
+                        structural_recommendations,settings=history_settings,connection=storage)
+        except Exception as exc:
+            query_run_id=None
+            structural_recommendations=tuple(replace(item,recommendation_id=None)
+                                               for item in structural_recommendations)
+            persistence_error=f'{type(exc).__name__}: {exc}'
+    elif persist:
         query_run_id = save_analysis(
             normalized_sql,
             estimated_plan.plan_json,
@@ -276,4 +301,5 @@ def analyze_query(
         structural_recommendations=structural_recommendations,
         prediction_latency_ms=prediction_latency_ms,
         analysis_latency_ms=(perf_counter() - started) * 1000,
+        persistence_error=persistence_error,
     )

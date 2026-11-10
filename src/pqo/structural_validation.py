@@ -60,6 +60,7 @@ def validate_and_save_structural_recommendation(
     minimum_baseline_time_ms: float = 0.0,
     minimum_absolute_improvement_ms: float = 5.0,
     minimum_improvement_ratio: float = 0.05,
+    history_settings: DatabaseSettings | None = None,
 ) -> StructuralValidationResult:
     """Run a rolled-back trial, persist evidence, and update accepted feedback."""
     from .structural_feedback import record_recommendation_measurement
@@ -78,7 +79,7 @@ def validate_and_save_structural_recommendation(
         return result
     if recommendation.recommendation_id is None:
         raise ValueError("Save the analysis before automatic validation")
-    result = save_structural_validation(result, settings)
+    result = save_structural_validation(result, history_settings or settings)
     note = (
         f"Автопроверка #{result.validation_id}: {result.validation_method}; "
         f"эквивалентность={result.equivalent}; rollback={result.rolled_back}"
@@ -88,7 +89,7 @@ def validate_and_save_structural_recommendation(
         result.baseline_time_ms,
         result.candidate_time_ms,
         note,
-        settings,
+        history_settings or settings,
     )
     return result
 

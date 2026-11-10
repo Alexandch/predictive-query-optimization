@@ -51,6 +51,9 @@ class HistoryRecord:
     structural_feedback: tuple[HistoryStructuralFeedback, ...] = ()
     baseline_timed_out: bool = False
     candidate_trial_evidence: dict | None = None
+    index_recommendation_id: int | None = None
+    index_recommendation_status: str | None = None
+    target_context: dict | None = None
 
 
 def load_analysis_history(
@@ -160,7 +163,10 @@ def load_analysis_history(
                 {sequential_columns},
                 {structural_feedback_column},
                 {baseline_timeout_column},
-                {candidate_evidence_column}
+                {candidate_evidence_column},
+                recommendation.id,
+                recommendation.status,
+                to_jsonb(qr)->'target_context'
             FROM pqo.query_run AS qr
             LEFT JOIN pqo.execution_plan AS ep ON ep.query_run_id = qr.id
             LEFT JOIN LATERAL (
@@ -171,10 +177,11 @@ def load_analysis_history(
                 LIMIT 1
             ) AS prediction ON true
             LEFT JOIN LATERAL (
-                SELECT ir.table_name, ir.index_columns, ir.estimated_improvement
+                SELECT ir.table_name, ir.index_columns, ir.estimated_improvement,
+                       ir.id, ir.status
                 FROM pqo.index_recommendation AS ir
                 WHERE ir.query_run_id = qr.id
-                ORDER BY ir.created_at DESC
+                ORDER BY ir.created_at DESC, ir.id DESC
                 LIMIT 1
             ) AS recommendation ON true
             {sequential_join}
@@ -204,6 +211,9 @@ def load_analysis_history(
             sequential_terminal_reason=row[13],
             baseline_timed_out=bool(row[16]),
             candidate_trial_evidence=row[17],
+            index_recommendation_id=row[18],
+            index_recommendation_status=row[19],
+            target_context=row[20] if len(row)>20 else None,
             sequential_steps=tuple(
                 HistorySequentialStep(
                     step_number=step["step_number"],

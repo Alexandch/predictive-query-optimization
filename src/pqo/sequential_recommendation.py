@@ -73,6 +73,7 @@ class SequentialRecommendationPlan:
     baseline_timed_out: bool = False
     candidate_checks: tuple[SequentialCandidateCheck, ...] = ()
     max_candidates_per_step: int = 3
+    persistence_error: str | None = None
 
     @property
     def baseline_min_time_ms(self) -> float:
@@ -165,6 +166,7 @@ def recommend_sequential_indexes(
     query_run_id: int | None = None,
     control: AnalysisControl | None = None,
     max_candidates_per_step: int = 3,
+    history_settings: DatabaseSettings | None = None,
 ) -> SequentialRecommendationPlan:
     """Measure a model-selected plan and discard all trial indexes on exit."""
     import psycopg
@@ -326,13 +328,16 @@ def recommend_sequential_indexes(
     if persist:
         from .repository import save_sequential_analysis
 
-        saved_query_run_id, sequential_analysis_id = save_sequential_analysis(
-            sql_text,
-            plan,
-            settings=settings,
-            query_run_id=query_run_id,
-            model_version=Path(model_path).name,
-        )
+        try:
+            saved_query_run_id, sequential_analysis_id = save_sequential_analysis(
+                sql_text, plan, settings=history_settings or settings,
+                query_run_id=query_run_id, model_version=Path(model_path).name,
+                **({'target_settings':settings} if history_settings is not None else {}),
+            )
+        except Exception as exc:
+            if history_settings is None:
+                raise
+            return replace(plan,persistence_error=f'{type(exc).__name__}: {exc}')
         plan = replace(
             plan,
             query_run_id=saved_query_run_id,

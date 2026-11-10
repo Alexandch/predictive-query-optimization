@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from difflib import unified_diff
 import faulthandler
 import json
@@ -68,6 +68,7 @@ from .experiments import (
     promote_candidate_model,
 )
 from .history import check_database_connection, load_analysis_history, format_candidate_trial_history
+from .recommendation_status import set_index_recommendation_status
 from .index_actions import IndexActionKind
 from .managed_indexes import (
     ManagedIndexDeployment,
@@ -100,6 +101,9 @@ from .structural_validation import (
 )
 from .training import train_xgboost
 from .transaction_desktop import TransactionTabMixin
+from .desktop_session import DesktopSessionMixin
+from .desktop_connections import DesktopConnectionsMixin
+from .desktop_preferences import read_number
 
 
 PROJECT_ROOT = resource_root()
@@ -448,7 +452,7 @@ def _format_verified_index_summary(
     return "\n".join(lines)
 
 
-class MainWindow(TransactionTabMixin, QMainWindow):
+class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -491,6 +495,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self._build_experiments_tab()
         self._build_training_tab()
         self._build_transaction_tab()
+        self._build_session_controls()
         self._refresh_calibration_status()
         self._refresh_managed_index_state()
         self._apply_style()
@@ -499,8 +504,10 @@ class MainWindow(TransactionTabMixin, QMainWindow):
     def _start_worker(self, worker: Worker) -> None:
         """Use Python-owned thread states; deliver results to Qt only via signals."""
         self._active_workers.add(worker)
+        self._sync_application_availability()
         self._refresh_trial_controls()
         self._sync_transaction_controls()
+        self._sync_history_decision_controls()
         worker.signals.completed.connect(
             self._worker_completed, Qt.ConnectionType.QueuedConnection
         )
@@ -509,8 +516,10 @@ class MainWindow(TransactionTabMixin, QMainWindow):
     @pyqtSlot(object)
     def _worker_completed(self, worker):
         self._active_workers.discard(worker)
+        self._sync_application_availability()
         self._refresh_trial_controls()
         self._sync_transaction_controls()
+        self._sync_history_decision_controls()
 
     def closeEvent(self, event):
         if self._active_workers:
@@ -521,8 +530,10 @@ class MainWindow(TransactionTabMixin, QMainWindow):
 
     def _set_query_actions_enabled(self, enabled: bool) -> None:
         self._query_operation_active = not enabled
+        enabled = enabled and not self._active_workers
         self._sync_transaction_controls()
         self._refresh_trial_controls()
+        self._sync_history_decision_controls()
         self.sql_editor.setReadOnly(not enabled)
         self.analyze_button.setEnabled(enabled)
         self.deep_analyze_button.setEnabled(enabled)
@@ -530,6 +541,10 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.rewrite_editor.setReadOnly(not enabled)
         self.rewrite_candidate_combo.setEnabled(enabled and self._rewrite_choice_plan is not None)
         self.rewrite_journal_check.setEnabled(enabled)
+        for control in (self.threshold_spin, self.minimum_gain_spin,
+                        self.minimum_gain_percent_spin, self.persist_check,
+                        self.calibrate_button, self.batch_calibrate_button):
+            control.setEnabled(enabled)
         self._sync_variant_button()
         if not enabled:
             self.apply_indexes_button.setEnabled(False)
@@ -679,13 +694,14 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         )
         self.rewrite_analyze_button.clicked.connect(self._start_rewrite_analysis)
         controls.addWidget(self.rewrite_analyze_button)
-        self.persist_check = QCheckBox("Сохранять в историю pqo")
+        self.persist_check = QCheckBox("Сохранять в служебную историю")
         self.persist_check.setChecked(
             str(self.preferences.value("persist_analysis", "false")).lower()
             in {"1", "true", "yes"}
         )
         self.persist_check.setToolTip(
-            "Включайте только если в подключённой БД установлена служебная схема pqo."
+            "История сохраняется через отдельное служебное подключение в настройках. "
+            "Установка pqo в исследуемой БД не требуется."
         )
         controls.addWidget(self.persist_check)
         controls.addStretch()
@@ -694,7 +710,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.threshold_spin.setRange(0, 1_000_000)
         self.threshold_spin.setDecimals(1)
         self.threshold_spin.setValue(
-            float(self.preferences.value("threshold_ms", 50.0))
+            read_number(self.preferences, "threshold_ms", 50.0, minimum=0, maximum=1_000_000)
         )
         controls.addWidget(self.threshold_spin)
         layout.addLayout(controls)
@@ -706,7 +722,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.minimum_gain_spin.setDecimals(1)
         self.minimum_gain_spin.setSuffix(" мс")
         self.minimum_gain_spin.setValue(
-            float(self.preferences.value("minimum_gain_ms", 5.0))
+            read_number(self.preferences, "minimum_gain_ms", 5.0, minimum=0, maximum=1_000_000)
         )
         evidence_controls.addWidget(self.minimum_gain_spin)
         self.minimum_gain_percent_spin = QDoubleSpinBox()
@@ -714,7 +730,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.minimum_gain_percent_spin.setDecimals(1)
         self.minimum_gain_percent_spin.setSuffix(" %")
         self.minimum_gain_percent_spin.setValue(
-            float(self.preferences.value("minimum_gain_percent", 5.0))
+            read_number(self.preferences, "minimum_gain_percent", 5.0, minimum=0, maximum=100)
         )
         evidence_controls.addWidget(self.minimum_gain_percent_spin)
         evidence_hint = QLabel(
@@ -931,7 +947,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         title.setObjectName("pageTitle")
         header.addWidget(title)
         header.addStretch()
-        refresh = QPushButton("Обновить")
+        refresh = self.history_refresh_button = QPushButton("Обновить")
         refresh.clicked.connect(self._refresh_history)
         header.addWidget(refresh)
         self.history_export_button = QPushButton("Экспорт CSV/JSON")
@@ -940,12 +956,12 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         header.addWidget(self.history_export_button)
         layout.addLayout(header)
 
-        self.history_table = QTableWidget(0, 11)
+        self.history_table = QTableWidget(0, 12)
         self.history_table.setHorizontalHeaderLabels(
             [
                 "ID", "Время", "SQL", "ML-прогноз", "План",
                 "Рекомендация", "Q/Reward", "Факт до → после",
-                "Выигрыш", "Итог глубокого анализа", "Структурная ОС",
+                "Выигрыш", "Итог глубокого анализа", "Структурная ОС", "БД источника",
             ]
         )
         self.history_table.setAlternatingRowColors(True)
@@ -957,12 +973,24 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         header_view.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.history_table)
+        decisions = QHBoxLayout()
+        self.history_accept_index_button = QPushButton("Принять индексный кандидат")
+        self.history_reject_index_button = QPushButton("Отклонить индексный кандидат")
+        self.history_accept_index_button.clicked.connect(lambda: self._record_history_index_decision("accepted"))
+        self.history_reject_index_button.clicked.connect(lambda: self._record_history_index_decision("rejected"))
+        decisions.addWidget(self.history_accept_index_button)
+        decisions.addWidget(self.history_reject_index_button)
+        self.history_index_decision_status = QLabel("Решение по кандидату не создаёт индекс и не подтверждает ускорение.")
+        self.history_index_decision_status.setWordWrap(True)
+        decisions.addWidget(self.history_index_decision_status, 1)
+        layout.addLayout(decisions)
         self.history_candidate_details = QPlainTextEdit()
         self.history_candidate_details.setReadOnly(True)
         self.history_candidate_details.setPlaceholderText("Выберите запись истории для просмотра индексных проб.")
         self.history_candidate_details.setMaximumHeight(200)
         layout.addWidget(self.history_candidate_details)
         self.history_table.itemSelectionChanged.connect(self._show_history_candidate_details)
+        self._sync_history_decision_controls()
         journal_group = QGroupBox("Локальный журнал переписываний — без служебной схемы pqo")
         journal_layout = QVBoxLayout(journal_group)
         journal_controls = QHBoxLayout()
@@ -1061,18 +1089,21 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.rewrite_journal_status.setText(message)
 
     def _build_settings_tab(self) -> None:
-        page = QWidget()
+        page = self.settings_page = QWidget()
         layout = QVBoxLayout(page)
         title = QLabel("Настройки")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        form = QFormLayout()
+        self._build_profile_header(layout)
+        form = self.settings_form = QFormLayout()
+        self._advanced_settings_rows = []
 
         defaults = DatabaseSettings.from_env()
         self.host_edit = QLineEdit(str(self.preferences.value("db_host", defaults.host)))
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
-        self.port_spin.setValue(int(self.preferences.value("db_port", defaults.port)))
+        self.port_spin.setValue(read_number(self.preferences, "db_port", defaults.port,
+                                           minimum=1, maximum=65535, integer=True))
         self.database_edit = QLineEdit(
             str(self.preferences.value("db_name", defaults.dbname))
         )
@@ -1085,7 +1116,9 @@ class MainWindow(TransactionTabMixin, QMainWindow):
                 )
             )
         )
-        self.password_edit = QLineEdit(defaults.password)
+        local_credentials = (self.host_edit.text().strip().lower(), self.port_spin.value(), self.user_edit.text().strip())
+        default_credentials = (defaults.host.lower(), defaults.port, defaults.user)
+        self.password_edit = QLineEdit(defaults.password if local_credentials == default_credentials else "")
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.xgb_model_edit = QLineEdit(
             str(self.preferences.value("xgb_model", str(DEFAULT_XGB_MODEL)))
@@ -1109,29 +1142,34 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         )
         form.addRow("Хост", self.host_edit)
         form.addRow("Порт", self.port_spin)
-        form.addRow("База данных", self.database_edit)
+        form.addRow("Исследуемая база", self.database_edit)
         form.addRow("Пользователь", self.user_edit)
-        form.addRow("Разрешённые схемы", self.allowed_schemas_edit)
+        form.addRow("Схемы для анализа", self.allowed_schemas_edit)
         form.addRow("Пароль", self.password_edit)
+        self._advanced_settings_rows.append(form.rowCount())
         form.addRow("Модель XGBoost", self._path_row(self.xgb_model_edit, False))
         trial_actions = QHBoxLayout()
-        self.activate_trial_button = QPushButton("Тестировать новую XGBoost")
-        self.restore_model_button = QPushButton("Вернуть прежнюю модель")
+        self.activate_trial_button = QPushButton("Подключить plan-v1")
+        self.restore_model_button = QPushButton("Вернуть прежние веса")
         self.activate_trial_button.clicked.connect(self._activate_model_trial)
         self.restore_model_button.clicked.connect(self._rollback_model_trial)
         trial_actions.addWidget(self.activate_trial_button)
         trial_actions.addWidget(self.restore_model_button)
-        form.addRow("Тестовая модель", trial_actions)
+        self._advanced_settings_rows.append(form.rowCount())
+        form.addRow("Смена модели", trial_actions)
         self.trial_model_status = QLabel()
         self.trial_model_status.setWordWrap(True)
-        form.addRow("", self.trial_model_status)
+        form.addRow("Активная модель", self.trial_model_status)
         self.xgb_model_edit.textChanged.connect(self._refresh_trial_controls)
         self._refresh_trial_controls()
+        self._advanced_settings_rows.append(form.rowCount())
         form.addRow("Модель DQN", self._path_row(self.dqn_model_edit, False))
+        self._advanced_settings_rows.append(form.rowCount())
         form.addRow(
             "Последовательная DQN",
             self._path_row(self.sequential_dqn_model_edit, False),
         )
+        self._advanced_settings_rows.append(form.rowCount())
         form.addRow(
             "Селектор стратегии",
             self._path_row(self.strategy_model_edit, False),
@@ -1153,26 +1191,39 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         actions.addWidget(save_button)
         actions.addStretch()
         layout.addLayout(actions)
+        self._build_connection_manager(layout)
         layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(page)
         self.tabs.addTab(scroll, "Настройки")
+        for editor in (self.host_edit, self.database_edit, self.user_edit,
+                       self.password_edit, self.allowed_schemas_edit):
+            editor.textChanged.connect(self._sync_history_decision_controls)
+        self.port_spin.valueChanged.connect(self._sync_history_decision_controls)
 
     def _refresh_trial_controls(self):
         if not hasattr(self, "activate_trial_button"):
             return
         busy = bool(self._active_workers) or getattr(self, "_query_operation_active", False)
-        current = Path(self.xgb_model_edit.text()).resolve()
-        state = trial_state(self.preferences)
-        selected = bool(state and current == Path(state["trial_path"]).resolve())
+        try:
+            current = Path(self.xgb_model_edit.text()).resolve()
+            state = trial_state(self.preferences)
+            selected = bool(state and current == Path(state["trial_path"]).resolve())
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            self.activate_trial_button.setEnabled(False)
+            self.restore_model_button.setEnabled(False)
+            self.trial_model_status.setText(
+                f"Запись отката повреждена: {exc}. Выбранные веса не изменены."
+            )
+            return
         available = (PROJECT_ROOT / "models/xgboost/trial/xgboost_query_time.joblib").is_file()
         self.activate_trial_button.setEnabled(not busy and available and not selected)
         self.restore_model_button.setEnabled(not busy and selected)
         self.trial_model_status.setText(
-            "Выбрана тестовая plan-v1. Прежняя модель сохранена для отката. "
+            "XGBoost plan-v1 активна. Прежние веса сохранены для отката. "
             "Контроль: aviation/retail; точность на других БД не гарантирована."
-            if selected else "Тестовая plan-v1 подключается отдельно, без замены основных весов."
+            if selected else f"Выбрана XGBoost: {current.name}. Смена модели доступна в расширенном режиме."
         )
 
     def _switch_model_trial(self, restore=False):
@@ -1208,7 +1259,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self._switch_model_trial(restore=True)
 
     def _build_experiments_tab(self) -> None:
-        page = QWidget()
+        page = self.experiments_page = QWidget()
         layout = QVBoxLayout(page)
         header = QHBoxLayout()
         title = QLabel("Эксперименты")
@@ -1253,7 +1304,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.tabs.insertTab(2, page, "Эксперименты")
 
     def _build_training_tab(self) -> None:
-        page = QWidget()
+        page = self.training_page = QWidget()
         layout = QVBoxLayout(page)
         title = QLabel("Обучение моделей")
         title.setObjectName("pageTitle")
@@ -1356,6 +1407,8 @@ class MainWindow(TransactionTabMixin, QMainWindow):
                 for schema in self.allowed_schemas_edit.text().split(",")
                 if schema.strip()
             ),
+            sslmode=self.source_ssl_combo.currentData() if hasattr(self, "source_ssl_combo") else None,
+            sslrootcert=(self.source_cert_edit.text().strip() or None) if hasattr(self, "source_cert_edit") else None,
         )
 
     def _calibration_path(self) -> Path:
@@ -1431,6 +1484,8 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         )
 
     def _start_calibration(self) -> None:
+        if not self._user_action_ready():
+            return
         sql_text = self.sql_editor.toPlainText().strip()
         model_path = Path(self.xgb_model_edit.text())
         if not sql_text:
@@ -1482,6 +1537,8 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         )
 
     def _start_batch_calibration(self) -> None:
+        if not self._user_action_ready():
+            return
         selected, _ = QFileDialog.getOpenFileName(
             self,
             "Выберите набор запросов для калибровки",
@@ -1564,7 +1621,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self._task_failed(message)
 
     def _start_analysis(self) -> None:
-        if self._query_operation_active:
+        if not self._user_action_ready():
             return
         sql_text = self.sql_editor.toPlainText().strip()
         if not sql_text:
@@ -1596,6 +1653,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             self._database_settings(),
             recommendation_threshold_ms=self.threshold_spin.value(),
             persist=self.persist_check.isChecked(),
+            history_settings=self._service_database_settings() if self.persist_check.isChecked() else None,
             calibration_profile_path=self._calibration_path(),
             strategy_model_path=strategy_path,
         )
@@ -1616,7 +1674,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
 
     def _start_rewrite_control_measurement(self) -> None:
         """Measure only after an explicit apply/rollback action."""
-        if self._query_operation_active:
+        if not self._user_action_ready():
             return
         sql_text = self.sql_editor.toPlainText().strip()
         xgb_path = Path(self.xgb_model_edit.text())
@@ -1646,6 +1704,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             self._database_settings(),
             recommendation_threshold_ms=self.threshold_spin.value(),
             persist=self.persist_check.isChecked(),
+            history_settings=self._service_database_settings() if self.persist_check.isChecked() else None,
             strategy_model_path=strategy_path,
         )
         worker.signals.succeeded.connect(self._show_analysis)
@@ -1827,7 +1886,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             self.rewrite_measurement_operation = None
             self._reset_structural_feedback()
             self.structural_management_group.setVisible(False)
-        self.analyze_button.setEnabled(True)
+        self.analyze_button.setEnabled(not self._active_workers)
         self._refresh_calibration_status()
         status_prefix = (
             "Контрольный замер SQL завершён"
@@ -1840,6 +1899,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
                f"весь анализ {analysis.analysis_latency_ms:.0f} мс"
                if analysis.prediction_latency_ms is not None else "")
         )
+        self._show_persistence_error(analysis.persistence_error)
 
     def _reset_structural_feedback(self) -> None:
         self.last_structural_recommendations = ()
@@ -1943,7 +2003,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             recommendation_id,
             decision,
             self.structural_feedback_note.text(),
-            self._database_settings(),
+            self._service_database_settings(),
         )
         worker.signals.succeeded.connect(self._structural_decision_saved)
         worker.signals.failed.connect(self._structural_feedback_failed)
@@ -1977,7 +2037,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             before,
             after,
             self.structural_feedback_note.text(),
-            self._database_settings(),
+            self._service_database_settings(),
         )
         worker.signals.succeeded.connect(self._structural_measurement_saved)
         worker.signals.failed.connect(self._structural_feedback_failed)
@@ -2025,6 +2085,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             self.last_analyzed_sql,
             recommendation,
             self._database_settings(),
+            history_settings=self._service_database_settings(),
             repetitions=3,
             work_mem_mb=64,
             minimum_baseline_time_ms=self.threshold_spin.value(),
@@ -2094,7 +2155,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self._task_failed(message)
 
     def _start_sequential_analysis(self) -> None:
-        if self._query_operation_active:
+        if not self._user_action_ready():
             return
         sql_text = self.sql_editor.toPlainText().strip()
         if not sql_text:
@@ -2147,6 +2208,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
                 self.minimum_gain_percent_spin.value() / 100.0
             ),
             persist=self.persist_check.isChecked(),
+            history_settings=self._service_database_settings() if self.persist_check.isChecked() else None,
             query_run_id=(
                 self.last_query_run_id
                 if self.last_query_run_id is not None
@@ -2373,8 +2435,20 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.statusBar().showMessage(
             f"Глубокий анализ завершён; изменения откачены{saved}"
         )
+        self._show_persistence_error(plan.persistence_error)
+
+    def _show_persistence_error(self, message):
+        if not message:
+            return
+        self.recommendation_text.appendPlainText(
+            "\nРезультат получен, но НЕ СОХРАНЁН: служебная БД недоступна или не подготовлена. "
+            "Проверьте отдельное служебное подключение в настройках.\n" + message
+        )
+        self.statusBar().showMessage("Анализ завершён; служебная история не сохранена. См. результат.")
 
     def _start_apply_indexes(self) -> None:
+        if not self._user_action_ready():
+            return
         plan = self.last_sequential_plan
         sql_text = self.sql_editor.toPlainText().strip()
         if plan is None or not plan.steps:
@@ -2451,6 +2525,8 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.statusBar().showMessage("Проверенные индексы применены к PostgreSQL")
 
     def _start_rollback_indexes(self) -> None:
+        if not self._user_action_ready():
+            return
         deployment = self.managed_index_deployment
         if deployment is None:
             self._refresh_managed_index_state()
@@ -2509,7 +2585,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self._task_failed(message)
 
     def _start_rewrite_analysis(self) -> None:
-        if self._query_operation_active:
+        if not self._user_action_ready():
             return
         sql_text = self.sql_editor.toPlainText().strip()
         if not sql_text:
@@ -2668,7 +2744,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         )
 
     def _start_variant_comparison(self):
-        if self._query_operation_active:
+        if not self._user_action_ready():
             return
         original = self.sql_editor.toPlainText().strip()
         variant = self.rewrite_editor.toPlainText().strip()
@@ -2943,20 +3019,91 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self._start_rewrite_control_measurement()
 
     def _refresh_history(self) -> None:
+        if self._active_workers or getattr(self, "_query_operation_active", False):
+            return
         self.statusBar().showMessage("Загрузка истории…")
-        worker = Worker(load_analysis_history, self._database_settings(), limit=200)
-        worker.signals.succeeded.connect(self._show_history)
+        try:
+            settings = self._service_database_settings()
+        except ValueError as exc:
+            self._history_connection_settings = None
+            self._sync_history_decision_controls()
+            self.history_index_decision_status.setText(f"Проверьте настройки подключения: {exc}")
+            return
+        worker = Worker(load_analysis_history, settings, limit=200)
+        worker.signals.succeeded.connect(lambda records: self._show_history_for_connection(records, settings))
         worker.signals.failed.connect(self._task_failed)
         self._start_worker(worker)
+
+    def _show_history_for_connection(self, records, settings) -> None:
+        if not self._history_settings_match(settings):
+            self.history_index_decision_status.setText("Подключение изменилось. Обновите историю.")
+            return
+        self._history_connection_settings = settings
+        self._show_history(records)
+
+    def _history_settings_match(self, settings) -> bool:
+        try:
+            return settings is not None and settings == self._service_database_settings()
+        except (AttributeError, ValueError):
+            return False
+
+    def _sync_history_decision_controls(self) -> None:
+        if not hasattr(self, "history_accept_index_button"):
+            return
+        busy = bool(self._active_workers) or getattr(self, "_query_operation_active", False)
+        row = self.history_table.currentRow()
+        record = self.history_records[row] if 0 <= row < len(self.history_records) else None
+        same_connection = self._history_settings_match(getattr(self, "_history_connection_settings", None))
+        available = (not busy and same_connection and record is not None
+                     and record.index_recommendation_id is not None
+                     and record.index_recommendation_status == "proposed")
+        self.history_accept_index_button.setEnabled(bool(available))
+        self.history_reject_index_button.setEnabled(bool(available))
+        self.history_refresh_button.setEnabled(not busy)
+
+    def _record_history_index_decision(self, decision: str) -> None:
+        if decision not in {"accepted", "rejected"}:
+            return
+        self._sync_history_decision_controls()
+        if not self.history_accept_index_button.isEnabled():
+            return
+        record = self.history_records[self.history_table.currentRow()]
+        settings = self._service_database_settings()
+        self.history_index_decision_status.setText("Сохраняю решение через хранимую процедуру…")
+        worker = Worker(set_index_recommendation_status, record.index_recommendation_id,
+                        record.index_recommendation_status, decision, settings)
+        worker.signals.succeeded.connect(lambda update: self._history_index_decision_saved(update, settings))
+        worker.signals.failed.connect(self._history_index_decision_failed)
+        self._start_worker(worker)
+
+    def _history_index_decision_saved(self, update, settings) -> None:
+        if not self._history_settings_match(settings):
+            self.history_index_decision_status.setText("Решение сохранено в прежнем подключении. Обновите историю текущей БД.")
+            return
+        records = [replace(record, index_recommendation_status=update.status)
+                   if record.index_recommendation_id == update.recommendation_id else record
+                   for record in self.history_records]
+        self._show_history(records)
+        self.history_index_decision_status.setText(
+            f"Решение по кандидату #{update.recommendation_id}: {update.status}. Индекс не создавался."
+        )
+
+    def _history_index_decision_failed(self, message: str) -> None:
+        # The shown row may now be stale. Require an explicit refresh before retry.
+        self._history_connection_settings = None
+        self.history_index_decision_status.setText(f"Решение не сохранено: {message}")
+        self.statusBar().showMessage("Обновите историю перед повторным решением")
 
     def _show_history_candidate_details(self) -> None:
         row = self.history_table.currentRow()
         if 0 <= row < len(self.history_records):
             self.history_candidate_details.setPlainText(
-                format_candidate_trial_history(self.history_records[row])
+                "БД источника: " + self._history_source_label(self.history_records[row]) + "\n\n"
+                + format_candidate_trial_history(self.history_records[row])
             )
         else:
             self.history_candidate_details.clear()
+        self._sync_history_decision_controls()
 
     def _show_history(self, records) -> None:
         self.history_records = list(records)
@@ -2972,6 +3119,9 @@ class MainWindow(TransactionTabMixin, QMainWindow):
                 recommendation = "\n".join(
                     step.proposed_ddl for step in record.sequential_steps
                 )
+            if record.index_recommendation_id is not None:
+                recommendation += (f"\nКандидат #{record.index_recommendation_id}: "
+                                   f"{record.index_recommendation_status} (решение, не проверка ускорения)")
             measured_time = "—"
             if record.measured_baseline_time_ms is not None:
                 measured_time = (
@@ -3041,6 +3191,7 @@ class MainWindow(TransactionTabMixin, QMainWindow):
                 measured_gain,
                 record.sequential_terminal_reason or "—",
                 structural_feedback,
+                self._history_source_label(record),
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -3066,6 +3217,8 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             self.statusBar().showMessage(f"История экспортирована: {selected}")
 
     def _load_experiments(self) -> None:
+        if not self._user_action_ready(database=False):
+            return
         xgb_model = Path(self.xgb_model_edit.text())
         dqn_model = Path(self.dqn_model_edit.text())
         dqn_stress = dqn_model.parent / "stress_metrics.json"
@@ -3174,15 +3327,19 @@ class MainWindow(TransactionTabMixin, QMainWindow):
             self.statusBar().showMessage(f"Эксперимент экспортирован: {selected}")
 
     def _test_connection(self) -> None:
-        self.statusBar().showMessage("Проверка PostgreSQL…")
-        worker = Worker(check_database_connection, self._database_settings())
-        worker.signals.succeeded.connect(
-            lambda message: QMessageBox.information(self, "Подключение работает", message)
-        )
-        worker.signals.failed.connect(self._task_failed)
-        self._start_worker(worker)
+        if not self._user_action_ready():
+            return
+        self._load_source_schemas()
 
     def _save_settings(self) -> None:
+        if not self._user_action_ready():
+            return
+        try:
+            if not self._save_connection_profiles():
+                return
+        except (ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "Проверьте подключения", str(exc))
+            return
         self.preferences.setValue("db_host", self.host_edit.text().strip())
         self.preferences.setValue("db_port", self.port_spin.value())
         self.preferences.setValue("db_name", self.database_edit.text().strip())
@@ -3211,6 +3368,8 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self.statusBar().showMessage("Настройки сохранены (пароль не сохранялся)")
 
     def _start_xgb_training(self) -> None:
+        if not self._user_action_ready(database=False):
+            return
         output_directory = Path(self.xgb_output_edit.text())
         self.xgb_train_button.setEnabled(False)
         self.promote_xgb_button.setEnabled(False)
@@ -3240,6 +3399,8 @@ class MainWindow(TransactionTabMixin, QMainWindow):
         self._start_worker(worker)
 
     def _start_dqn_training(self) -> None:
+        if not self._user_action_ready(database=False):
+            return
         output_directory = Path(self.dqn_output_edit.text())
         self.dqn_train_button.setEnabled(False)
         self.promote_dqn_button.setEnabled(False)
@@ -3933,13 +4094,16 @@ def main() -> int:
         QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
 
         def begin_rewrite_check():
+            if window._active_workers or window._query_operation_active:
+                QTimer.singleShot(100, begin_rewrite_check)
+                return
             window.sql_editor.setPlainText(original)
             window.rewrite_editor.setPlainText(variants[rewrite_state["case"]])
             rewrite_state["started"] = True
             window._start_variant_comparison()
 
         def check_rewrite_result():
-            if not rewrite_state["started"] or window._query_operation_active:
+            if not rewrite_state["started"] or window._query_operation_active or window._active_workers:
                 return
             expected = "Результаты совпали" if rewrite_state["case"] == 0 else "не прошёл проверку"
             status = window.variant_status.text()
@@ -3962,7 +4126,8 @@ def main() -> int:
     if quick_smoke_test:
         # Exercise real queued GUI signals, not just imports/model loading.
         quick_log = ARTIFACT_ROOT / "quick-smoke-test.log"
-        window.persist_check.setChecked(False)
+        persist_smoke = os.environ.get("PQO_SMOKE_PERSIST") == "1"
+        window.persist_check.setChecked(persist_smoke)
         sql_file = os.environ.get("PQO_SMOKE_SQL_FILE")
         if sql_file:
             window.sql_editor.setPlainText(Path(sql_file).read_text(encoding="utf-8"))
@@ -3970,11 +4135,14 @@ def main() -> int:
         state = {"started": False, "runs": 0}
 
         def begin_quick_check():
+            if window._active_workers or window._query_operation_active:
+                QTimer.singleShot(100, begin_quick_check)
+                return
             state["started"] = True
             window._start_analysis()
 
         def check_quick_result():
-            if not state["started"] or window._query_operation_active:
+            if not state["started"] or window._query_operation_active or window._active_workers:
                 return
             status = window.statusBar().currentMessage()
             if not status.startswith("Быстрый ML-прогноз завершён"):
@@ -3982,6 +4150,13 @@ def main() -> int:
                 application.exit(3)
                 return
             state["runs"] += 1
+            if persist_smoke:
+                records = load_analysis_history(window._service_database_settings())
+                matched = next((row for row in records if row.query_run_id == window.last_query_run_id), None)
+                if matched is None or (matched.target_context or {}).get("database") != window._database_settings().dbname:
+                    quick_log.write_text("FAILED: separate service history or target attribution", encoding="utf-8")
+                    application.exit(3)
+                    return
             if state["runs"] < int(os.environ.get("PQO_SMOKE_RUNS", "3")):
                 begin_quick_check()
                 return

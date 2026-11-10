@@ -63,7 +63,23 @@ def install_trial(source, destination):
 
 def trial_state(preferences):
     value = preferences.value(TRIAL_STATE_KEY, "")
-    return json.loads(str(value)) if value else None
+    if not value:
+        return None
+    try:
+        state = json.loads(str(value))
+        paths = ("trial_path", "previous_path", "backup_path")
+        if not isinstance(state, dict) or any(
+            not isinstance(state.get(key), str) or not state[key].strip() for key in paths
+        ):
+            raise ValueError("Missing model rollback paths")
+        digest = state.get("previous_sha256", "")
+        if not isinstance(digest, str) or len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest.lower()
+        ):
+            raise ValueError("Invalid model rollback fingerprint")
+        return state
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Не удалось прочитать сохранённые сведения об откате модели") from exc
 
 
 def materialize_trial(resource_path, destination):

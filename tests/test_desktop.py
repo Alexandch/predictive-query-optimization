@@ -1136,7 +1136,7 @@ class DesktopTests(unittest.TestCase):
 
             window._show_history([record])
 
-            self.assertEqual(window.history_table.columnCount(), 11)
+            self.assertEqual(window.history_table.columnCount(), 12)
             window.history_table.setCurrentCell(0, 0)
             self.assertIn("не сохранён", window.history_candidate_details.toPlainText())
             self.assertTrue(window.history_candidate_details.isReadOnly())

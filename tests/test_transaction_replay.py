@@ -309,6 +309,44 @@ class DisposableReplayPostgresTests(TestCase):
         with psycopg.connect(**replace(self.settings,dbname=self.reference).connection_kwargs()) as connection:
             self.assertEqual(connection.execute('SELECT value FROM university.items WHERE id=1').fetchone()[0],1)
 
+    def test_real_statement_timeout_after_write_refuses_recommendation_and_cleans_copies(self):
+        from pqo.transaction_replay import _timeout
+        with psycopg.connect(**replace(self.settings,dbname=self.reference).connection_kwargs()) as connection:
+            connection.execute("INSERT INTO university.items SELECT i,i%100,'fixture' FROM generate_series(5001,100000) i")
+            connection.execute('ANALYZE university.items')
+        text = ('BEGIN; UPDATE university.items SET value=700 WHERE id=1 RETURNING id,value; '
+                'SELECT SUM(CAST(value AS numeric)/3) FROM university.items; COMMIT;')
+        control = AnalysisControl()
+        running_select = False
+        def progress(message):
+            nonlocal running_select
+            if message.startswith('Последовательное выполнение: 2'):
+                running_select = True
+        control.progress = progress
+        def timeout(connection, deadline, settings):
+            _timeout(connection, deadline, settings)
+            if running_select:
+                connection.execute("SET statement_timeout='1ms'")
+        # Actual PostgreSQL cancellation, not a mocked QueryCanceled exception.
+        # Limit only the tested SELECT so catalog/state checks remain independent.
+        with patch('pqo.transaction_replay._timeout', side_effect=timeout):
+            report = run_transaction_replay(text,self.settings,self.reference,
+                (IndexAction.create('university','items',('value',)),), series=2,
+                test_copy_confirmed=True,disposable_databases_confirmed=True,control=control)
+        self.assertTrue(running_select)
+        self.assertEqual(report.status,'error',report.reasons)
+        self.assertTrue(any('57014' in reason for reason in report.reasons),report.reasons)
+        self.assertFalse(report.correctness_verified)
+        self.assertFalse(report.recommendation.recommended)
+        self.assertTrue(report.cleanup_verified)
+        self.assertFalse(report.leftover_databases)
+        self.assertEqual(len(report.created_databases),2)
+        with psycopg.connect(**replace(self.settings,dbname=self.reference).connection_kwargs()) as connection:
+            self.assertEqual(connection.execute('SELECT value FROM university.items WHERE id=1').fetchone()[0],1)
+        with psycopg.connect(**replace(self.settings,dbname='postgres').connection_kwargs()) as connection:
+            self.assertFalse(connection.execute('SELECT datname FROM pg_database WHERE datname=ANY(%s)',
+                                               (list(report.created_databases),)).fetchall())
+
     def test_catalog_features_are_refused_before_creating_any_scratch_database(self):
         cases=(
             ('ALTER TABLE university.items ENABLE ROW LEVEL SECURITY','ALTER TABLE university.items DISABLE ROW LEVEL SECURITY'),

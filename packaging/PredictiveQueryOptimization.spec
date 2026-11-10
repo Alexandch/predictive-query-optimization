@@ -19,6 +19,7 @@ datas = [
     (str(ROOT / "examples" / "defense"), "examples/defense"),
     (str(ROOT / "examples" / "transactions"), "examples/transactions"),
     (str(ROOT / "models"), "models"),
+    (str(ROOT / "database" / "init"), "database/init"),
     (str(ROOT / "dataset" / "postgresql" / "aviation_dataset.csv"), "dataset/postgresql"),
     (
         str(ROOT / "dataset" / "postgresql" / "multidomain_dqn_augmented.jsonl"),

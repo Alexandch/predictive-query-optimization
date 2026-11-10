@@ -296,11 +296,15 @@ def export_history_records(
         "structural_feedback",
         "baseline_timed_out",
         "candidate_trial_evidence",
+        "index_recommendation_id",
+        "index_recommendation_status",
+        "target_context",
     ]
     with destination.open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
+            row["target_context"] = json.dumps(row["target_context"], ensure_ascii=False)
             row["recommended_columns"] = ", ".join(row["recommended_columns"])
             row["candidate_trial_evidence"] = json.dumps(
                 row["candidate_trial_evidence"], ensure_ascii=False
