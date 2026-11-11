@@ -33,7 +33,7 @@ class TransactionParameterTabMixin:
         self.transaction_parameter_table.verticalHeader().setVisible(False)
         self.transaction_parameter_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.transaction_parameter_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.transaction_parameter_table)
+        layout.addWidget(self.transaction_parameter_table,1)
         self.transaction_parameter_button.clicked.connect(self._apply_transaction_parameters)
 
     def _clear_transaction_parameters(self):

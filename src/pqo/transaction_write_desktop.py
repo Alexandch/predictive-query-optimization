@@ -65,7 +65,7 @@ class TransactionWriteTabMixin(TransactionReplayTabMixin):
         self.transaction_write_table.verticalHeader().setVisible(False)
         self.transaction_write_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.transaction_write_table.setMinimumHeight(160)
-        layout.addWidget(self.transaction_write_table)
+        layout.addWidget(self.transaction_write_table,1)
         self.transaction_write_button.clicked.connect(self._start_transaction_write)
         self.transaction_write_source.currentIndexChanged.connect(self._transaction_write_input_changed)
         self.transaction_write_budget.textChanged.connect(self._transaction_write_input_changed)

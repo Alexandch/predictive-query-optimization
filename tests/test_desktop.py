@@ -23,7 +23,6 @@ from pqo.desktop import (
     _format_index_impact,
     _format_index_candidate_checks,
     _format_prediction,
-    _format_sql_rewrite_diff,
     _format_structural_recommendations,
     _sql_editor_identity,
 )
@@ -741,14 +740,15 @@ class DesktopTests(unittest.TestCase):
         )
 
     def test_rewrite_diff_makes_removed_order_by_explicit(self):
-        diff = _format_sql_rewrite_diff(
-            "SELECT * FROM (SELECT id FROM t ORDER BY id) q",
-            "SELECT * FROM (SELECT id FROM t) q",
-        )
-
-        self.assertIn("--- исходный SQL", diff)
-        self.assertIn("+++ переписанный SQL", diff)
-        self.assertIn("-  ORDER BY", diff)
+        window = MainWindow()
+        try:
+            window.sql_editor.setPlainText("SELECT * FROM (\n  SELECT id FROM t\n  ORDER BY id\n) q")
+            window.rewrite_editor.setPlainText("SELECT * FROM (\n  SELECT id FROM t\n) q")
+            window.sql_diff_view.refresh()
+            self.assertEqual(window.sql_diff_view.source_marks[2].kind, "removed")
+            self.assertIn("ORDER BY id", window.sql_diff_view.variant_marks[2].previous)
+        finally:
+            window.close()
 
     def test_rewrite_result_does_not_append_structural_hypotheses(self):
         window = MainWindow()
@@ -775,8 +775,12 @@ class DesktopTests(unittest.TestCase):
             window._show_rewrite_analysis(plan)
 
             text = window.recommendation_text.toPlainText()
-            self.assertIn("ТОЧНОЕ ИЗМЕНЕНИЕ", text)
+            window.sql_diff_view.refresh()
+            self.assertTrue(window.sql_diff_view.variant_marks)
             self.assertNotIn("СТРУКТУРНЫЕ РЕКОМЕНДАЦИИ", text)
+            self.assertNotIn("ТОЧНОЕ ИЗМЕНЕНИЕ", text)
+            self.assertNotIn("ПЕРЕПИСАННЫЙ SQL:", text)
+            self.assertNotIn("Изменения (-", window.rewrite_candidate_details.toPlainText())
             self.assertTrue(window.structural_management_group.isHidden())
             self.assertTrue(window.apply_rewrite_button.isEnabled())
         finally:

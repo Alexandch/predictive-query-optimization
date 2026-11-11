@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -16,6 +16,7 @@ from .transaction_inspection import inspect_transaction
 from .transaction_planning import collect_transaction_plans
 from .transaction_indexes import collect_transaction_index_candidates
 from .transaction_trial_desktop import TransactionTrialTabMixin
+from .transaction_workspace import TransactionWorkspaceMixin
 
 
 _WARNINGS = {
@@ -38,7 +39,7 @@ _INDEX_STATUSES = {"candidate": "к проверке", "covered": "уже пок
                    "covering_review": "только INCLUDE — спорно"}
 
 
-class TransactionTabMixin(TransactionTrialTabMixin):
+class TransactionTabMixin(TransactionWorkspaceMixin, TransactionTrialTabMixin):
     def _build_transaction_tab(self):
         self.transaction_inspection = None
         self.transaction_plan_report = None
@@ -49,12 +50,14 @@ class TransactionTabMixin(TransactionTrialTabMixin):
         title = QLabel("Транзакции: индексы и переписывание SELECT на копиях")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        note = QLabel(
+        full_note = (
             "Вставьте один блок BEGIN … COMMIT/ROLLBACK. Разбор выполняется локально. "
             "Планы и подбор кандидатов не запускают команды и не создают индексы. "
             "SELECT-проба выполняется отдельно на подтверждённой тестовой копии. "
             "Реальная запись доступна отдельно в «Выполнение на копиях» и «Переписывание SELECT»: ограниченные режимы с новыми одноразовыми БД."
         )
+        note = QLabel('Разбор и планы не запускают команды. Фактические пробы — на тестовых копиях; запись и COMMIT — только на новых одноразовых БД.')
+        note.setToolTip(full_note)
         note.setWordWrap(True)
         layout.addWidget(note)
         self.transaction_editor = QPlainTextEdit()
@@ -123,23 +126,17 @@ class TransactionTabMixin(TransactionTrialTabMixin):
         self.transaction_views.addTab(self.transaction_write_page, "Запись и индексы")
         self.transaction_views.addTab(self.transaction_replay_page, "Выполнение на копиях")
         self.transaction_views.addTab(self.transaction_select_rewrite_page, "Переписывание SELECT")
-        lower = QSplitter(Qt.Orientation.Horizontal)
-        lower.addWidget(self.transaction_views)
-        lower.addWidget(self.transaction_details)
-        lower.setSizes([650, 450])
-        layout.addWidget(self.transaction_editor, 2)
         layout.addLayout(actions)
-        layout.addLayout(index_actions)
-        layout.addLayout(trial_actions)
-        layout.addLayout(comparison_actions)
+        self._build_transaction_workspace(layout, index_actions, trial_actions, comparison_actions)
         layout.addWidget(self.transaction_status)
-        layout.addWidget(lower, 3)
-        limits = QLabel(
+        full_limits = (
             "Планы относятся к исходному состоянию БД: последующие команды не видят изменений предыдущих. "
             "Стоимость PostgreSQL — не время в миллисекундах. Обычные индексные SELECT-пробы не выполняют DML. "
             "Полная запись и COMMIT доступны отдельно в «Выполнение на копиях» и «Переписывание SELECT» для ограниченного SQL на новых одноразовых БД. "
             "Применения к исходной БД нет. SQL автоматически не сохраняется."
         )
+        limits = QLabel('Планы относятся к исходному состоянию; стоимость PostgreSQL — не миллисекунды. Применения к исходной БД нет. SQL автоматически не сохраняется.')
+        limits.setToolTip(full_limits)
         limits.setWordWrap(True)
         limits.setObjectName("mutedLabel")
         layout.addWidget(limits)
@@ -233,6 +230,7 @@ class TransactionTabMixin(TransactionTrialTabMixin):
             self.transaction_inspection = inspection
             self._render_transaction_parameter_inputs()
             self._render_transaction_inventory()
+            self._transaction_reveal_analysis()
             writes = sum(item.changes_data for item in inspection.statements)
             self.transaction_status.setText(
                 f"Разобрано команд: {len(inspection.statements)}; с записью: {writes}; "
@@ -293,6 +291,7 @@ class TransactionTabMixin(TransactionTrialTabMixin):
         else:
             self.transaction_plan_report = report
             self._render_transaction_inventory()
+            self._transaction_reveal_analysis()
             planned = sum(item.status == "planned" for item in report.statements)
             self.transaction_status.setText(
                 f"База {report.database_name}: планов получено {planned}/{len(report.statements)}. "
@@ -465,6 +464,7 @@ class TransactionTabMixin(TransactionTrialTabMixin):
             self._clear_transaction_trial()
             self.transaction_index_report = report
             self._render_transaction_indexes()
+            self._transaction_reveal_analysis()
             self._render_transaction_write_inputs()
             self.transaction_status.setText("Индексные кандидаты сгруппированы. Индексы не создавались; ускорение и цена записи не измерялись.")
         self._set_query_actions_enabled(True)

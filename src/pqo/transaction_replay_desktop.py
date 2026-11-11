@@ -1,10 +1,11 @@
 """Explicitly confirmed real DML experiment on fresh, tracked disposable DBs."""
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QCheckBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QVBoxLayout, QWidget)
+    QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QHeaderView, QVBoxLayout, QWidget)
 
 from .analysis_control import AnalysisControl
 from .transaction_select_rewrite_desktop import TransactionSelectRewriteTabMixin
+from .transaction_workspace import collapsible_notice
 from .transaction_replay import run_transaction_replay, validate_reference
 from .transaction_replay_guard import prepare_replay
 from .transaction_mixed_recommendation import MixedReplayPolicy, replay_request_digest
@@ -19,10 +20,12 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
         content = QWidget()
         layout = QVBoxLayout(content)
         self.transaction_replay_page.setWidget(content)
-        note = QLabel('РЕАЛЬНОЕ выполнение SELECT и записи только в одноразовых БД. '
+        full_note = ('РЕАЛЬНОЕ выполнение SELECT и записи только в одноразовых БД. '
             'Каждый A1/B/A2 начинается с новой копии одного закрытого снимка эталона. '
             'Эталон должен быть отдельной лабораторной БД на доверенном тестовом сервере, без активных подключений в момент снимка. '
             'Нужны права CREATEDB и владение эталоном. Исходная БД не запускается.')
+        note = QLabel('Реальное выполнение SELECT и записи — на новых A1/B/A2-копиях. Эталон — отдельная лабораторная БД; нужны CREATEDB и владение эталоном.')
+        note.setToolTip(full_note)
         note.setWordWrap(True)
         layout.addWidget(note)
         row = QHBoxLayout()
@@ -30,16 +33,13 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
         self.transaction_replay_reference = QLineEdit()
         self.transaction_replay_reference.setPlaceholderText('Например, pqo_university_index_lab; не исходная БД')
         row.addWidget(self.transaction_replay_reference, 1)
-        layout.addLayout(row)
         options = QHBoxLayout()
         options.addWidget(QLabel('Серий A1/B/A2:'))
         self.transaction_replay_series = QSpinBox()
         self.transaction_replay_series.setRange(1,3)
         self.transaction_replay_series.setValue(2)
         options.addWidget(self.transaction_replay_series)
-        options.addWidget(QLabel('1 — диагностика; 2–3 — итоговый вывод'))
-        options.addStretch()
-        layout.addLayout(options)
+        self.transaction_replay_series.setToolTip('1 — диагностика; 2–3 — итоговый вывод')
         thresholds = QHBoxLayout()
         thresholds.addWidget(QLabel('Общий выигрыш ≥'))
         self.transaction_replay_gain_ms = QDoubleSpinBox()
@@ -55,7 +55,8 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
         self.transaction_replay_gain_percent.setSuffix(' %')
         thresholds.addWidget(self.transaction_replay_gain_percent)
         thresholds.addStretch()
-        layout.addLayout(thresholds)
+        options.addLayout(thresholds)
+        layout.addLayout(options)
         budget = QHBoxLayout()
         budget.addWidget(QLabel('Бюджет новых индексов:'))
         self.transaction_replay_size_mib = QSpinBox()
@@ -63,24 +64,21 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
         self.transaction_replay_size_mib.setValue(64)
         self.transaction_replay_size_mib.setSuffix(' МиБ')
         budget.addWidget(self.transaction_replay_size_mib)
-        budget.addStretch()
-        layout.addLayout(budget)
-        policy_note = QLabel('Пороги фиксируются до пробы. В каждой серии нужны оба порога общего выигрыша. '
+        row.addLayout(budget)
+        layout.addLayout(row)
+        policy_note = ('Пороги фиксируются до пробы. В каждой серии нужны оба порога общего выигрыша. '
             'Регрессия SELECT/DML или отдельной команды > 2 мс И > 10% блокирует рекомендацию; '
             'дрейф A1/A2 либо между сериями > 2 мс И > 20% означает недостаточно данных. '
             'Смена порогов сбрасывает вывод и требует нового прогона.')
-        policy_note.setWordWrap(True)
-        layout.addWidget(policy_note)
         self.transaction_replay_confirm = QCheckBox('Разрешаю CREATE/DROP одноразовых копий лабораторного эталона')
         self.transaction_replay_confirm.setToolTip('Подтверждаю лабораторный сервер/эталон; разрешаю создание и удаление только одноразовых pqo_replay_* текущей пробы, не исходной БД.')
         layout.addWidget(self.transaction_replay_confirm)
-        limits = QLabel('Первый режим: BEGIN … COMMIT, 2–20 простых команд; одна таблица на команду, '
+        limits = ('Первый режим: BEGIN … COMMIT, 2–20 простых команд; одна таблица на команду, '
             'без JOIN/CTE/функций/неявных текущих дат; INSERT VALUES с явными столбцами, UPDATE/DELETE с WHERE. '
             'До 8 обычных таблиц с PK, без DEFAULT/identity/генерации/RLS/пользовательских триггеров/каскадов/расширений. '
             'БД до 256 МиБ; до 10000 строк результата/изменения на команду. Отметьте 1–2 индексных кандидата. '
             'Вывод относится только к отмеченному набору и этой нагрузке, без автоматического применения.')
-        limits.setWordWrap(True)
-        layout.addWidget(limits)
+        layout.addWidget(collapsible_notice('Ограничения и правила итогового вывода', policy_note+'\n\n'+limits))
         self.transaction_replay_button = QPushButton('Выполнить A1/B/A2 на новых одноразовых копиях')
         layout.addWidget(self.transaction_replay_button)
         self.transaction_replay_status = QLabel('Эксперимент не запускался. Копии создаются только после отдельного подтверждения.')
@@ -90,13 +88,15 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
         self.transaction_replay_table = QTableWidget(0,6)
         self.transaction_replay_table.setHorizontalHeaderLabels(['Серия / фаза','Клиент BEGIN–COMMIT, мс','SELECT, мс','DML, мс','Новые индексы, МиБ','Построение, мс'])
         self.transaction_replay_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.transaction_replay_table.setMinimumHeight(160)
-        layout.addWidget(self.transaction_replay_table,1)
+        self.transaction_replay_table.setMinimumHeight(120)
         self.transaction_replay_effect_table = QTableWidget(0,4)
         self.transaction_replay_effect_table.setHorizontalHeaderLabels(['Метрика / команда','База, мс','Индексы, мс','Выигрыш, мс / %'])
         self.transaction_replay_effect_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.transaction_replay_effect_table.setMinimumHeight(160)
-        layout.addWidget(self.transaction_replay_effect_table)
+        self.transaction_replay_effect_table.setMinimumHeight(120)
+        self.transaction_replay_results = QTabWidget()
+        self.transaction_replay_results.addTab(self.transaction_replay_effect_table,'Итог и команды')
+        self.transaction_replay_results.addTab(self.transaction_replay_table,'Прогоны A1/B/A2')
+        layout.addWidget(self.transaction_replay_results,1)
         self.transaction_replay_button.clicked.connect(self._start_transaction_replay)
         self.transaction_index_table.itemChanged.connect(self._clear_transaction_replay)
         for signal in (self.transaction_replay_reference.textChanged, self.transaction_replay_series.valueChanged,

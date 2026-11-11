@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from difflib import unified_diff
 import faulthandler
 import json
 import math
@@ -104,6 +103,7 @@ from .transaction_desktop import TransactionTabMixin
 from .desktop_session import DesktopSessionMixin
 from .desktop_connections import DesktopConnectionsMixin
 from .desktop_preferences import read_number
+from .sql_diff_view import SQLDiffView
 
 
 PROJECT_ROOT = resource_root()
@@ -254,33 +254,6 @@ def _format_structural_recommendations(recommendations) -> str:
         if item.suggested_sql:
             lines.append(f"   Шаблон SQL:\n{item.suggested_sql}")
     return "\n".join(lines)
-
-
-def _format_sql_rewrite_diff(original_sql: str, rewritten_sql: str) -> str:
-    """Show the actual SQL change after normalizing formatting on both sides."""
-    from sqlglot import parse_one
-
-    try:
-        original = parse_one(original_sql, read="postgres").sql(
-            dialect="postgres", pretty=True
-        )
-        rewritten = parse_one(rewritten_sql, read="postgres").sql(
-            dialect="postgres", pretty=True
-        )
-    except Exception:
-        original = original_sql.strip()
-        rewritten = rewritten_sql.strip()
-    changes = list(
-        unified_diff(
-            original.splitlines(),
-            rewritten.splitlines(),
-            fromfile="исходный SQL",
-            tofile="переписанный SQL",
-            lineterm="",
-            n=2,
-        )
-    )
-    return "\n".join(changes) if changes else "Изменений текста не обнаружено."
 
 
 def _sql_editor_identity(sql_text: str) -> str:
@@ -630,7 +603,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self.rewrite_candidate_details.setReadOnly(True)
         self.rewrite_candidate_details.setVisible(False)
         self.rewrite_candidate_details.setMaximumHeight(105)
-        self.rewrite_candidate_details.setPlaceholderText("Статус, замеры и изменения выбранного варианта")
+        self.rewrite_candidate_details.setPlaceholderText("Статус и замеры выбранного варианта")
         variant_layout.addWidget(self.rewrite_candidate_details)
         self.rewrite_editor = QPlainTextEdit()
         self.rewrite_editor.setFont(QFont("Cascadia Mono", 10))
@@ -661,6 +634,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self.variant_status.setWordWrap(True)
         variant_layout.addWidget(self.variant_status)
         self.rewrite_editor.textChanged.connect(self._variant_edited)
+        self.sql_diff_view = SQLDiffView(self.sql_editor, self.rewrite_editor)
         self.sql_splitter.addWidget(variant_group)
         self.sql_splitter.setSizes([600, 600])
         layout.addWidget(self.sql_splitter)
@@ -2699,7 +2673,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self.rewrite_candidate_combo.setToolTip(evaluation.candidate.title)
         self._clear_verified_rewrite()
         self.rewrite_editor.setPlainText(evaluation.candidate.sql_text)
-        lines = [evaluation.candidate.title]
+        lines = []
         if evaluation.accepted:
             self._set_verified_rewrite(plan.original_sql, evaluation.candidate.sql_text,
                 "Результаты совпали на снимке; достаточное ускорение подтверждено.",
@@ -2719,8 +2693,6 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         else:
             lines.append("Полные замеры отсутствуют, это не нулевое время.")
         lines.append(f"Пороги: {plan.minimum_absolute_improvement_ms:g} мс и {plan.minimum_improvement_ratio:.1%}.")
-        lines.append("Изменения (- удалено, + добавлено):\n" +
-                     _format_sql_rewrite_diff(plan.original_sql, evaluation.candidate.sql_text))
         self.rewrite_candidate_details.setPlainText("\n".join(lines))
         self.rewrite_candidate_details.setVisible(True)
 
@@ -2806,14 +2778,9 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
             )
             self.recommendation_text.setPlainText(
                 "ПРОВЕРЕННОЕ ПЕРЕПИСЫВАНИЕ SQL:\n"
-                f"Правило: {result.candidate.title}\n"
                 f"Фактическое время: {result.baseline_time_ms:.2f} → "
                 f"{result.rewritten_time_ms:.2f} мс "
                 f"({result.improvement_ratio:+.1%})\n\n"
-                "ТОЧНОЕ ИЗМЕНЕНИЕ («-» удалено, «+» добавлено):\n"
-                f"{_format_sql_rewrite_diff(plan.original_sql, result.candidate.sql_text)}\n\n"
-                "ПЕРЕПИСАННЫЙ SQL:\n"
-                f"{result.candidate.sql_text}\n\n"
                 "Мультимножества строк совпали на текущем снимке БД (EXCEPT ALL); "
                 "это не доказательство для всех возможных данных или порядка строк.\n"
                 "Для установки этого текста в редактор используйте отдельную кнопку "
@@ -2944,8 +2911,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self._sync_rewrite_apply_button()
         self.rewrite_management_status.setText(
             status
-            + " Текст отличается от исходного; точное изменение показано выше. "
-            "Его можно применить и затем вернуть."
+            + " SQL можно применить и затем вернуть."
         )
 
     def _apply_verified_rewrite(self) -> None:
@@ -4111,11 +4077,28 @@ def main() -> int:
                 rewrite_log.write_text("FAILED: " + status, encoding="utf-8")
                 application.exit(3)
                 return
+            # The frozen executable must show both colors and the old SQL on
+            # a real Qt tooltip event, not merely import the annotation module.
+            from PyQt6.QtGui import QHelpEvent, QTextCursor
+            from PyQt6.QtCore import QEvent
+            from PyQt6.QtWidgets import QToolTip
+            window.sql_diff_view.refresh()
+            if not window.rewrite_editor.extraSelections():
+                rewrite_log.write_text("FAILED: rewrite line highlights missing", encoding="utf-8")
+                application.exit(3)
+                return
+            position = window.rewrite_editor.cursorRect(QTextCursor(window.rewrite_editor.document().firstBlock())).center()
+            QApplication.sendEvent(window.rewrite_editor.viewport(), QHelpEvent(
+                QEvent.Type.ToolTip, position, window.rewrite_editor.viewport().mapToGlobal(position)))
+            if original not in QToolTip.text():
+                rewrite_log.write_text("FAILED: original SQL tooltip missing", encoding="utf-8")
+                application.exit(3)
+                return
             rewrite_state["case"] += 1
             if rewrite_state["case"] < len(variants):
                 begin_rewrite_check()
                 return
-            rewrite_log.write_text("OK: side-by-side comparison; equivalence, duplicate mismatch, source unchanged", encoding="utf-8")
+            rewrite_log.write_text("OK: side-by-side comparison; equivalence, duplicate mismatch, source unchanged, colored lines and old SQL tooltip", encoding="utf-8")
             application.exit(0)
 
         rewrite_timer = QTimer(window)

@@ -1,5 +1,4 @@
 """Side-by-side single SELECT replacement; other transaction commands stay fixed."""
-from difflib import unified_diff
 from sqlglot import parse_one
 
 from PyQt6.QtCore import Qt
@@ -8,6 +7,8 @@ from PyQt6.QtWidgets import (QCheckBox,QComboBox,QDoubleSpinBox,QHBoxLayout,QLab
     QMessageBox,QPlainTextEdit,QPushButton,QScrollArea,QSpinBox,QSplitter,QVBoxLayout,QWidget)
 
 from .analysis_control import AnalysisControl
+from .sql_diff_view import SQLDiffView
+from .transaction_workspace import collapsible_notice
 from .transaction_parameters_desktop import TransactionParameterTabMixin
 from .transaction_mixed_recommendation import MixedReplayPolicy
 from .transaction_select_rewrite import (generate_transaction_select_rewrites,prepare_select_replacement,
@@ -25,18 +26,28 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         content = QWidget()
         self.transaction_select_rewrite_page.setWidget(content)
         layout = QVBoxLayout(content)
-        note = QLabel('Замена одного SELECT без изменения остальных команд и их порядка. '
+        full_note = ('Замена одного SELECT без изменения остальных команд и их порядка. '
             'Подготовка вариантов локальная. Фактическая проверка выполняет всю BEGIN … COMMIT транзакцию '
             'на свежих одноразовых БД A1/B/A2; выбранный SELECT в B видит предыдущие записи. Новые индексы не создаются.')
+        note = self.transaction_select_rewrite_note = QLabel('Замена одного SELECT; порядок остальных команд сохраняется. Реальные DML/COMMIT — только на одноразовых копиях.')
+        note.setToolTip(full_note)
         note.setWordWrap(True)
         layout.addWidget(note)
         self.transaction_select_rewrite_generate = QPushButton('Подготовить замены SELECT (без подключения)')
-        layout.addWidget(self.transaction_select_rewrite_generate)
+        tools = QHBoxLayout()
+        tools.addWidget(self.transaction_select_rewrite_generate)
         self.transaction_select_rewrite_choice = QComboBox()
         self.transaction_select_rewrite_choice.setMinimumContentsLength(18)
         self.transaction_select_rewrite_choice.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        layout.addWidget(self.transaction_select_rewrite_choice)
-        editors = QSplitter(Qt.Orientation.Horizontal)
+        tools.addWidget(self.transaction_select_rewrite_choice,1)
+        self.transaction_select_rewrite_expand = QPushButton('Развернуть редакторы SQL')
+        self.transaction_select_rewrite_expand.setCheckable(True)
+        self.transaction_select_rewrite_expand.toggled.connect(self._expand_transaction_select_editors)
+        tools.addWidget(self.transaction_select_rewrite_expand)
+        layout.addLayout(tools)
+        editors = self.transaction_select_rewrite_editor_splitter = QSplitter(Qt.Orientation.Horizontal)
+        editors.setChildrenCollapsible(False)
+        editors.setHandleWidth(8)
         for name,title,readonly in (('original','Исходный SELECT — только чтение',True),('variant','Замена SELECT — можно редактировать',False)):
             panel = QWidget(); panel_layout = QVBoxLayout(panel)
             panel_layout.setContentsMargins(0,0,0,0)
@@ -44,20 +55,24 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             editor = QPlainTextEdit()
             editor.setFont(QFont('Consolas',10))
             editor.setReadOnly(readonly)
-            editor.setMinimumHeight(180)
+            editor.setMinimumHeight(150)
             setattr(self,'transaction_select_rewrite_'+name,editor)
-            panel_layout.addWidget(editor)
+            panel_layout.addWidget(editor,1)
             editors.addWidget(panel)
         editors.setSizes([300,300])
-        layout.addWidget(editors)
+        layout.addWidget(editors,1)
+        self.transaction_select_rewrite_diff = SQLDiffView(
+            self.transaction_select_rewrite_original, self.transaction_select_rewrite_variant)
         self.transaction_select_rewrite_preview = QPushButton('Показать замену и порядок команд (без запуска)')
-        layout.addWidget(self.transaction_select_rewrite_preview)
+        settings = self.transaction_select_rewrite_settings = QWidget()
+        settings_layout = QVBoxLayout(settings)
+        settings_layout.setContentsMargins(0,0,0,0)
         row = QHBoxLayout()
         row.addWidget(QLabel('Лабораторный эталон:'))
         self.transaction_select_rewrite_reference = QLineEdit()
         self.transaction_select_rewrite_reference.setPlaceholderText('Отдельная БД, например pqo_university_index_lab')
         row.addWidget(self.transaction_select_rewrite_reference,1)
-        layout.addLayout(row)
+        settings_layout.addLayout(row)
         options = QHBoxLayout()
         options.addWidget(QLabel('Серий A1/B/A2:'))
         self.transaction_select_rewrite_series = QSpinBox()
@@ -73,19 +88,22 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         self.transaction_select_rewrite_gain_percent.setRange(0,100); self.transaction_select_rewrite_gain_percent.setValue(5.)
         self.transaction_select_rewrite_gain_percent.setSuffix(' %')
         options.addWidget(self.transaction_select_rewrite_gain_percent)
-        layout.addLayout(options)
-        limits = QLabel('Только доверенный тестовый сервер и отдельный эталон; нужны CREATEDB и владение эталоном. '
+        settings_layout.addLayout(options)
+        limits = ('Только доверенный тестовый сервер и отдельный эталон; нужны CREATEDB и владение эталоном. '
             'Сохраняется узкий контракт простых SELECT/DML. Дополнительно: одна FROM-подвыборка под внешним агрегатом. '
             'JOIN, CTE, функции вне разрешённых агрегатов, триггеры, DEFAULT/identity, каскады и RLS исключены. '
             'Внешние ORDER BY/LIMIT замены неизменны. Совпадение данных не означает ускорение; '
             'рекомендация требует двух полных устойчивых серий. Регрессия любой команды > 2 мс И > 10% блокирует рекомендацию; '
             'дрейф > 2 мс И > 20% означает недостаточно данных. Пороги фиксируются до запуска.')
-        limits.setWordWrap(True)
-        layout.addWidget(limits)
+        settings_layout.addWidget(collapsible_notice('Ограничения и правила проверки',limits))
         self.transaction_select_rewrite_confirm = QCheckBox('Разрешаю реальный DML/COMMIT и CREATE/DROP новых одноразовых лабораторных копий')
-        layout.addWidget(self.transaction_select_rewrite_confirm)
+        settings_layout.addWidget(self.transaction_select_rewrite_confirm)
         self.transaction_select_rewrite_button = QPushButton('Проверить замену в контексте всей транзакции на копиях')
-        layout.addWidget(self.transaction_select_rewrite_button)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.transaction_select_rewrite_preview)
+        buttons.addWidget(self.transaction_select_rewrite_button)
+        settings_layout.addLayout(buttons)
+        layout.addWidget(settings)
         self.transaction_select_rewrite_status = QLabel('Начните с локальной подготовки. Исходный редактор транзакции не изменяется.')
         self.transaction_select_rewrite_status.setWordWrap(True)
         self.transaction_select_rewrite_status.setTextFormat(Qt.TextFormat.PlainText)
@@ -186,6 +204,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             for option in options: self.transaction_select_rewrite_choice.addItem(f'SELECT № {option.number}: {option.title}')
             self.transaction_select_rewrite_choice.blockSignals(False)
             self._transaction_select_rewrite_selected()
+            self._transaction_reveal_analysis()
             automatic = sum(option.rule_id!='manual' for option in options)
             message = f'Подготовлено автоматических вариантов: {automatic}. Ничего не выполнялось. '
             message += 'Выберите вариант или измените SELECT справа.' if automatic else 'Поддерживаемых автоматических замен нет; доступен ручной вариант справа.'
@@ -214,13 +233,17 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
     def _show_transaction_select_rewrite_preview(self):
         try:
             _,prepared = self._select_rewrite_prepared()
-            diff = '\n'.join(unified_diff(parse_one(prepared.original_sql,read='postgres').sql(dialect='postgres',pretty=True).splitlines(),
-                parse_one(prepared.variant_sql,read='postgres').sql(dialect='postgres',pretty=True).splitlines(),
-                fromfile='Исходный SELECT',tofile='Вариант SELECT',lineterm=''))
             self.transaction_details.setPlainText(f'ЛОКАЛЬНЫЙ ПРОСМОТР — НЕ ЗАПУСК\nМеняется только SELECT № {prepared.number}. '
-                'Все остальные команды и их порядок неизменны.\n'+diff+'\n\nТранзакция с заменой (нормализованный SQL):\n'+_render(prepared.variant.commands))
+                'Все остальные команды и их порядок неизменны.\n\nТранзакция с заменой (нормализованный SQL):\n'+_render(prepared.variant.commands))
+            if self.transaction_workspace_mode.currentData() != 'report':
+                self._transaction_open_protocol()
         except ValueError as exc:
             self.transaction_select_rewrite_status.setText(str(exc))
+
+    def _expand_transaction_select_editors(self, expanded):
+        self.transaction_select_rewrite_settings.setVisible(not expanded)
+        self.transaction_select_rewrite_note.setVisible(not expanded)
+        self.transaction_select_rewrite_expand.setText('Показать настройки проверки' if expanded else 'Развернуть редакторы SQL')
 
     def _start_transaction_select_rewrite_trial(self):
         if self._query_operation_active or self._active_workers: return

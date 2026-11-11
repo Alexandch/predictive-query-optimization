@@ -44,6 +44,16 @@ def run_select_rewrite_smoke(application,window_type,resources,artifacts):
                     row=next(n for n,item in enumerate(window._transaction_select_rewrite_options)
                         if item.number==2 and item.rule_id=='subquery-order-without-limit')
                     window.transaction_select_rewrite_choice.setCurrentIndex(row)
+                    window.transaction_workspace_mode.setCurrentIndex(window.transaction_workspace_mode.findData('analysis'))
+                    window.transaction_select_rewrite_expand.setChecked(True)
+                    application.processEvents()
+                    if (window.transaction_sections.count()!=10
+                            or window.transaction_select_rewrite_settings.isVisible()
+                            or window.transaction_select_rewrite_variant.viewport().height()<450
+                            or not window.transaction_cancel_button.isVisible()
+                            or window.transaction_editor.toPlainText()!=text):
+                        raise RuntimeError('Expanded transaction workspace geometry/state check failed')
+                    window.transaction_select_rewrite_expand.setChecked(False)
                     window.transaction_select_rewrite_reference.setText('pqo_university_index_lab')
                     window.transaction_select_rewrite_confirm.setChecked(True)
                     old_question=QMessageBox.question
@@ -71,6 +81,7 @@ def run_select_rewrite_smoke(application,window_type,resources,artifacts):
                     application.processEvents()
                     window.grab().save(str(artifacts/'transaction-select-rewrite-preview-small.png'))
                 finish(0,'OK: local queued preparation, side-by-side replacement of SELECT 2 after UPDATE, '
+                    'expanded workspace geometry and visible cancellation, '
                     'full sequential A1/B/A2 on six fresh clones, matching every output/final state, '
                     'seven databases removed, no new indexes/source editor changes; timing refusal allowed.\n'
                     +json.dumps(asdict(result),ensure_ascii=False,indent=2))

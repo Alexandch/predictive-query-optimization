@@ -66,6 +66,10 @@ class TransactionSelectRewriteDesktopTests(TestCase):
             window._show_transaction_select_rewrite_preview()
             self.assertIn('Меняется только SELECT № 2',window.transaction_details.toPlainText())
             self.assertIn('UPDATE university.items',window.transaction_details.toPlainText())
+            self.assertNotIn('--- Исходный SELECT',window.transaction_details.toPlainText())
+            window.transaction_select_rewrite_diff.refresh()
+            self.assertTrue(window.transaction_select_rewrite_diff.source_marks)
+            self.assertTrue(window.transaction_select_rewrite_diff.variant_marks)
         finally: window.close()
 
     def test_real_queued_trial_locks_other_actions_and_preserves_source(self):
