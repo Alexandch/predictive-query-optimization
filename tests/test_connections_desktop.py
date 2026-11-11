@@ -50,6 +50,16 @@ class DesktopConnectionsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "должны быть разными"):
             window._service_database_settings()
 
+    def test_fresh_ssl_environment_is_applied_without_duplicate_default_profile(self):
+        with patch.dict(os.environ, {"POSTGRES_SSLMODE": "verify-full", "POSTGRES_SSLROOTCERT": "C:/test/ca.crt"}):
+            window = MainWindow()
+            try:
+                self.assertEqual(window._database_settings().sslmode, "verify-full")
+                self.assertEqual(window._database_settings().sslrootcert, "C:/test/ca.crt")
+                self.assertEqual(len(window._connection_profiles), 1)
+            finally:
+                window.close()
+
     def test_save_and_switch_profiles_never_persists_password_or_model_changes(self):
         window = self.window
         original = window._database_settings()

@@ -92,10 +92,14 @@ class DesktopConnectionsMixin:
         self._schema_snapshot = None
         self._build_schema_picker(layout)
         self.source_ssl_combo = ssl_choice()
+        source_defaults = DatabaseSettings.from_env()
+        self.source_ssl_combo.setCurrentIndex(
+            max(0, self.source_ssl_combo.findData(source_defaults.sslmode))
+        )
         self.source_ssl_combo.setToolTip(
             "Для удалённой БД рекомендуется verify-full с доверенным корневым сертификатом."
         )
-        self.source_cert_edit = QLineEdit()
+        self.source_cert_edit = QLineEdit(source_defaults.sslrootcert or "")
         self.source_cert_edit.setPlaceholderText(
             "Путь к корневому сертификату CA (необязательно)"
         )

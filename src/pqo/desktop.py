@@ -102,7 +102,7 @@ from .training import train_xgboost
 from .transaction_desktop import TransactionTabMixin
 from .desktop_session import DesktopSessionMixin
 from .desktop_connections import DesktopConnectionsMixin
-from .desktop_preferences import read_number
+from .desktop_preferences import open_preferences, read_number
 from .sql_diff_view import SQLDiffView
 
 
@@ -110,7 +110,7 @@ PROJECT_ROOT = resource_root()
 WRITABLE_ROOT = writable_root()
 ARTIFACT_ROOT = WRITABLE_ROOT / "artifacts"
 APP_ICON = PROJECT_ROOT / "assets" / "pqo.ico"
-DEFAULT_XGB_MODEL = PROJECT_ROOT / "models" / "xgboost" / "xgboost_query_time.joblib"
+DEFAULT_XGB_MODEL = PROJECT_ROOT / "models" / "xgboost" / "trial" / "xgboost_query_time.joblib"
 DEFAULT_DQN_MODEL = PROJECT_ROOT / "models" / "dqn" / "dqn_index_advisor.pt"
 DEFAULT_SEQUENTIAL_DQN_MODEL = (
     PROJECT_ROOT / "models" / "sequential_dqn" / "sequential_dqn_index_advisor.pt"
@@ -429,7 +429,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
     def __init__(self) -> None:
         super().__init__()
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
-        self.preferences = QSettings("PQO", "PredictiveQueryOptimization")
+        self.preferences = open_preferences(QSettings)
         self._active_workers: set[Worker] = set()
         self.history_records = []
         self._rewrite_choice_plan: SQLRewritePlan | None = None
@@ -1184,6 +1184,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
             current = Path(self.xgb_model_edit.text()).resolve()
             state = trial_state(self.preferences)
             selected = bool(state and current == Path(state["trial_path"]).resolve())
+            bundled = current == (PROJECT_ROOT / "models/xgboost/trial/xgboost_query_time.joblib").resolve()
         except (ValueError, TypeError, KeyError, OSError) as exc:
             self.activate_trial_button.setEnabled(False)
             self.restore_model_button.setEnabled(False)
@@ -1192,12 +1193,15 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
             )
             return
         available = (PROJECT_ROOT / "models/xgboost/trial/xgboost_query_time.joblib").is_file()
-        self.activate_trial_button.setEnabled(not busy and available and not selected)
+        self.activate_trial_button.setEnabled(not busy and available and not selected and not bundled)
         self.restore_model_button.setEnabled(not busy and selected)
         self.trial_model_status.setText(
             "XGBoost plan-v1 активна. Прежние веса сохранены для отката. "
             "Контроль: aviation/retail; точность на других БД не гарантирована."
-            if selected else f"Выбрана XGBoost: {current.name}. Смена модели доступна в расширенном режиме."
+            if selected else
+            "XGBoost plan-v1 из комплекта поставки. Прежняя модель не переключалась; откат не требуется. "
+            "Контроль: aviation/retail; точность на других БД не гарантирована."
+            if bundled else f"Выбрана XGBoost: {current.name}. Смена модели доступна в расширенном режиме."
         )
 
     def _switch_model_trial(self, restore=False):
@@ -3504,6 +3508,9 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
 
 
 def main() -> int:
+    clean_profile_smoke_test = "--clean-profile-smoke-test" in sys.argv
+    if clean_profile_smoke_test:
+        sys.argv.remove("--clean-profile-smoke-test")
     transaction_replay_smoke_test = "--transaction-replay-smoke-test" in sys.argv
     if transaction_replay_smoke_test:
         sys.argv.remove("--transaction-replay-smoke-test")
@@ -3553,6 +3560,9 @@ def main() -> int:
     application = QApplication(sys.argv)
     application.setApplicationName("Predictive Query Optimization")
     application.setOrganizationName("PQO")
+    if clean_profile_smoke_test:
+        from .clean_profile_smoke import run_clean_profile_smoke
+        return run_clean_profile_smoke(application, MainWindow, PROJECT_ROOT, ARTIFACT_ROOT)
     if transaction_replay_smoke_test:
         from .transaction_replay_smoke import run_replay_smoke
         return run_replay_smoke(application, MainWindow, PROJECT_ROOT, ARTIFACT_ROOT)
