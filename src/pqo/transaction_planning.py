@@ -11,6 +11,7 @@ from sqlglot.optimizer.scope import Scope, traverse_scope
 from .analysis_control import AnalysisControl
 from .config import DatabaseSettings
 from .transaction_inspection import TransactionInspection, TransactionStatement, inspect_transaction
+from .transaction_context import CONTROL_KINDS
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,8 @@ class TransactionPlanReport:
 
 def planning_restriction(statement: TransactionStatement, settings: DatabaseSettings) -> str | None:
     """Conservative preflight, not a security sandbox for a hostile database."""
+    if statement.kind in CONTROL_KINDS:
+        return 'Управление транзакцией: отдельного плана нет; при получении планов команда не выполняется.'
     node = parse_one(statement.sql, read="postgres")
     if not statement.supported_structure:
         return "Этот тип команды пока не поддерживается для получения плана."
@@ -86,7 +89,7 @@ def collect_transaction_plans(
     restrictions = [planning_restriction(item, settings) for item in inspection.statements]
     if all(restrictions):
         return TransactionPlanReport(inspection, settings.dbname, tuple(
-            StatementPlan(item.number, "blocked", reason)
+            StatementPlan(item.number, "control" if item.kind in CONTROL_KINDS else "blocked", reason)
             for item, reason in zip(inspection.statements, restrictions)
         ))
     results = []
@@ -100,7 +103,7 @@ def collect_transaction_plans(
             for item, reason in zip(inspection.statements, restrictions):
                 control.check()
                 if reason:
-                    results.append(StatementPlan(item.number, "blocked", reason))
+                    results.append(StatementPlan(item.number, "control" if item.kind in CONTROL_KINDS else "blocked", reason))
                     continue
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:

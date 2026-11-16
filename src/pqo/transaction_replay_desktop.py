@@ -73,9 +73,17 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
         self.transaction_replay_confirm = QCheckBox('Разрешаю CREATE/DROP одноразовых копий лабораторного эталона')
         self.transaction_replay_confirm.setToolTip('Подтверждаю лабораторный сервер/эталон; разрешаю создание и удаление только одноразовых pqo_replay_* текущей пробы, не исходной БД.')
         layout.addWidget(self.transaction_replay_confirm)
-        limits = ('Первый режим: BEGIN … COMMIT, 2–20 простых команд; одна таблица на команду, '
-            'без JOIN/CTE/функций/неявных текущих дат; INSERT VALUES с явными столбцами, UPDATE/DELETE с WHERE. '
-            'До 8 обычных таблиц с PK, без DEFAULT/identity/генерации/RLS/пользовательских триггеров/каскадов/расширений. '
+        limits = ('BEGIN/START TRANSACTION … COMMIT/ROLLBACK, до 20 команд; четыре уровня изоляции, '
+            'READ ONLY/READ WRITE, DEFERRABLE, начальный SET TRANSACTION, SAVEPOINT/ROLLBACK TO/RELEASE. '
+            'SELECT поддерживает INNER/LEFT JOIN до 8 источников '
+            'по равенству столбцов в ON (составные ключи через AND). Цель записи — одна таблица. '
+            'Без CTE/LATERAL/произвольных подзапросов/функций/неявных текущих дат; '
+            'INSERT VALUES/DEFAULT VALUES/SELECT; источник SELECT — прямые таблицы и INNER/LEFT JOIN, без CTE/UNION. '
+            'ON CONFLICT DO NOTHING/DO UPDATE с простым SET и WHERE; '
+            'UPDATE/DELETE с WHERE. Цель конфликта — немедленный полный UNIQUE/PK. '
+            'До 8 обычных таблиц с PK; константные DEFAULT и собственные serial/identity (CACHE 1, NO CYCLE). '
+            'Состояние последовательностей сверяется отдельно: ROLLBACK не возвращает выданные номера. '
+            'Без генерации столбцов/RLS/пользовательских триггеров/каскадов/расширений. '
             'БД до 256 МиБ; до 10000 строк результата/изменения на команду. Отметьте 1–2 индексных кандидата. '
             'Вывод относится только к отмеченному набору и этой нагрузке, без автоматического применения.')
         layout.addWidget(collapsible_notice('Ограничения и правила итогового вывода', policy_note+'\n\n'+limits))
@@ -86,7 +94,7 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
         self.transaction_replay_status.setWordWrap(True)
         layout.addWidget(self.transaction_replay_status)
         self.transaction_replay_table = QTableWidget(0,6)
-        self.transaction_replay_table.setHorizontalHeaderLabels(['Серия / фаза','Клиент BEGIN–COMMIT, мс','SELECT, мс','DML, мс','Новые индексы, МиБ','Построение, мс'])
+        self.transaction_replay_table.setHorizontalHeaderLabels(['Серия / фаза','Клиент транзакции, мс','SELECT, мс','DML, мс','Новые индексы, МиБ','Построение, мс'])
         self.transaction_replay_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.transaction_replay_table.setMinimumHeight(120)
         self.transaction_replay_effect_table = QTableWidget(0,4)
@@ -160,7 +168,7 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
             f'Лабораторный эталон: {reference}\nБудет создано до {1+3*series} одноразовых БД. '
             f'Общий выигрыш ≥ {policy.minimum_gain_ms:g} мс И {policy.minimum_gain_ratio*100:g}%; '
             f'бюджет индексов {policy.maximum_index_bytes/1024**2:g} МиБ. '
-            'DML будет реально выполнен с COMMIT только в новых копиях. Их удаление проверяется по имени и OID; '
+            'SQL будет реально выполнен только в новых копиях с выбранными в тексте режимами и COMMIT/ROLLBACK. Их удаление проверяется по имени и OID; '
             'FORCE и завершение чужих подключений не используются. Бюджет 300 с, CREATE может задержать отмену до 30 с. '
             'На production-сервере не запускать. Продолжить?',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
@@ -246,19 +254,23 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
     def _show_transaction_replay(self):
         report = self.transaction_replay_report
         if report is None:
-            self.transaction_details.setPlainText('Выполнение на новых копиях: результат пока не получен. Поддерживается только узкий контракт простых COMMIT-транзакций.')
+            self.transaction_details.setPlainText('Выполнение на новых копиях: результат пока не получен. Режимы изоляции и завершение сохраняются из текста SQL.')
             return
         from .desktop import _format_index_action
         evidence = ['ИТОГ ДЛЯ ИЗМЕРЕННОЙ СМЕШАННОЙ НАГРУЗКИ — НЕ РАЗРЕШЕНИЕ НА PRODUCTION',
             'Эталон: '+report.reference_database,
             'Журнал владения копиями (без SQL/данных): '+str(report.recovery_manifest),
             f'Исходные состояния равны: {report.initial_states_equal}; результаты команд равны: {report.results_equal}; итоговые данные равны: {report.final_states_equal}.',
+            'Сверка включает строки и собственные последовательности. После отката строки восстанавливаются; выданные номера не сбрасываются.',
             f'Удаление копий подтверждено: {report.cleanup_verified}. Остались/не проверены: {report.leftover_databases}.',
-            'Клиентское время включает BEGIN/COMMIT, передачу/получение результата, его контрольный хеш и служебную настройку тайм-аутов. '
+            'Клиентское время включает BEGIN и COMMIT/ROLLBACK, передачу/получение результата, его контрольный хеш, проверку режимов и настройку тайм-аутов. '
             'Клонирование, построение индексов и полные снимки таблиц исключены. SELECT/DML — отдельные execute+fetch, поэтому их сумма не равна общему времени.',
             'UTC, ISO, jit=off, parallel=0; полное чтение состояния прогревает страницы. Это не оценка холодного кэша или production-конкуренции.',
             'Никакой SQL/данные автоматически не сохранялись.']
         lines = [*evidence[:2],'Выбранный набор (не применять автоматически):',*map(_format_index_action,report.actions)]
+        if report.samples and report.samples[0].transaction_options is not None:
+            lines.extend([report.samples[0].transaction_options.description,
+                'Завершение: '+report.samples[0].ending.upper()+'. Конкурентные пользовательские сессии в этой пробе не воспроизводятся.'])
         recommendation = report.recommendation
         if recommendation:
             policy = recommendation.policy

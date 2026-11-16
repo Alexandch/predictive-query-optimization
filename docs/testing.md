@@ -44,7 +44,7 @@ docker compose up -d --wait
 | `PQO_TRANSACTION_TRIAL_TESTS` | реальные пробы SELECT на отдельной копии |
 | `PQO_DISPOSABLE_REPLAY_TESTS` | последовательное выполнение и очистка собственных копий |
 | `PQO_STATUS_INTEGRATION_TESTS` | процедура статусов, аудит и конкуренция |
-| `PQO_CONNECTION_INTEGRATION_TESTS` | раздельные источники и служебная история |
+| `PQO_CONNECTION_INTEGRATION_TESTS` | раздельные подключения, история и подготовка копий через pg_dump/pg_restore |
 
 Полный прогон после подготовки стенда:
 
@@ -99,3 +99,73 @@ read-only роль, переписывание и сохранность раб�
 Для нативной Windows-проверки используйте `QT_QPA_PLATFORM=windows`:
 offscreen не воспроизводит все события оконной системы. Порядок проверки
 установщика приведён в [windows-packaging.md](windows-packaging.md).
+
+`--workflow-smoke-test` проверяет маршрут «Начало» → подключение → создание
+эталона и рабочей БД → отдельное сравнение SELECT → возврат замены → полный
+прогон транзакции. Нужны подготовленный `pqo_insert_source` (команда
+`python -m pqo.unseen_database create-insert-select`), схема `retail`,
+клиентские утилиты PostgreSQL, новый `PQO_SETTINGS_FILE`, отдельный
+`PQO_APP_DATA_ROOT` и явный `PQO_WORKFLOW_COPY_CONFIRMED=1`.
+Сценарий принимает только эту известную синтетическую БД. Он оставляет две
+подготовленные БД `pqo_wflow_*` для независимой сверки; имена, OID и владельцы
+сохраняются в журнале. Семь одноразовых БД полного прогона удаляются исполнителем.
+Рабочие настройки пользователя для этой проверки использовать нельзя.
+
+На известных синтетических `pqo_university_unseen`/`pqo_university_index_lab`
+GUI-проверки `--transaction-replay-smoke-test` и
+`--transaction-select-rewrite-smoke-test` также принимают
+`PQO_SMOKE_JOIN_REPLAY=1`: выбирается комплектный `university-join-replay.sql`.
+Нужны отдельный `PQO_SETTINGS_FILE`, каталог `PQO_APP_DATA_ROOT` и соответствующие
+подтверждения `PQO_REPLAY_COPY_CONFIRMED=1`, `PQO_REPLAY_REFERENCE=pqo_university_index_lab`
+либо `PQO_SELECT_REWRITE_COPY_CONFIRMED=1`,
+`PQO_SELECT_REWRITE_REFERENCE=pqo_university_index_lab`. Источник профиля должен
+быть `pqo_university_unseen`, разрешённая схема — только `university`.
+Проверки исполняют реальные DML на своих копиях; рабочий профиль использовать нельзя.
+`PQO_SMOKE_ISOLATION_REPLAY=1` вместо JOIN-флага выбирает
+`university-isolation-savepoints.sql`: нативные проверки дополнительно сверяют
+фактический REPEATABLE READ и сохранение ROLLBACK TO при индексной пробе и замене SELECT.
+
+`tests/test_transaction_replay.py` также проверяет видимость между двумя
+подключениями для четырёх уровней изоляции, отсутствие преждевременного снимка
+из служебной настройки тайм-аута, наследование режимов эталона, READ ONLY DEFERRABLE,
+вложенные/повторные SAVEPOINT, полный ROLLBACK и реальный отказ 40001 с очисткой.
+Все записи этих тестов направляются в собственные временные лабораторные БД.
+
+`tests/test_transaction_defaults.py` использует тот же явный флаг
+`PQO_DISPOSABLE_REPLAY_TESTS=1`. Проверяются serial, обе формы identity,
+константные/неиспользуемые/запрещённые вызываемые DEFAULT, неявные столбцы,
+SAVEPOINT и полный ROLLBACK, несовпадение SELECT, отмена после выдачи номера,
+отрицательный шаг последовательности и сохранность номеров эталона.
+Для нативных GUI-проверок этого сценария сначала создайте отдельный стенд
+`python -m pqo.unseen_database create-defaults`, затем задайте
+`PQO_SMOKE_DEFAULTS_REPLAY=1`, источник `pqo_defaults_source`, схему `retail`
+и соответствующий `PQO_REPLAY_REFERENCE`/`PQO_SELECT_REWRITE_REFERENCE` равным
+`pqo_defaults_index_lab`. Подтверждения и изолированный профиль обязательны,
+как в описанных выше проверках. Строки, выданные ID и состояния последовательностей
+сверяются во всех шести фазах; рабочие БД и настройки не меняются.
+
+UPSERT проверяется в `tests/test_transaction_upsert.py` с тем же флагом
+`PQO_DISPOSABLE_REPLAY_TESTS=1`: DO NOTHING/UPDATE/WHERE/RETURNING, EXCLUDED и псевдонимы,
+составные и nullable ключи, NULLS NOT DISTINCT, DEFAULT обеих ветвей, четыре уровня
+изоляции, COMMIT/ROLLBACK/SAVEPOINT, ошибка 21000, отмена и замена SELECT.
+Проверяется порядок DEFAULT VALUES и ON CONFLICT после разбора, подстановки параметров
+и формирования замены: генератор SQL не должен переставлять эти части команды.
+
+Для нативного сценария создайте стенд `python -m pqo.unseen_database create-upsert`.
+Задайте `PQO_SMOKE_UPSERT_REPLAY=1`, источник `pqo_upsert_source`, схему `retail`,
+эталон `pqo_upsert_index_lab` в соответствующем подтверждённом режиме GUI-проверки.
+Остальные флаги сценария JOIN/isolation/defaults отключите. Рабочий профиль не используется.
+
+`tests/test_transaction_insert_select.py` добавляет проверки прямого SELECT/JOIN,
+агрегатов, раскрытия звёздочек по каталогам, неявных столбцов, самовставки,
+пустого источника, явного NULL, предыдущих UPDATE, UPSERT и SAVEPOINT.
+Проверяются четыре уровня изоляции, замена отдельного SELECT, отмена и превышение
+лимита строк. В отдельной пробе новый индекс меняет порядок источника:
+бизнес-проекции совпадают, но автоматические ID связываются с другими строками.
+Такая проба обязана отклонить рекомендацию по итоговым данным.
+
+Нативный сценарий: `python -m pqo.unseen_database create-insert-select`,
+`PQO_SMOKE_INSERT_SELECT_REPLAY=1`, источник `pqo_insert_source`, схема `retail`,
+эталон `pqo_insert_index_lab`; остальные флаги выбора сценария отключены.
+Оба GUI-режима проверяют шесть новых копий с одинаковым закрытым снимком:
+индекс на источнике и замену самостоятельного SELECT при неизменном INSERT SELECT.

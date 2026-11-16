@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QToolButton,
 )
 from .config import DatabaseSettings
 from .connections import (
@@ -175,7 +176,14 @@ class DesktopConnectionsMixin:
             self.service_status.setText(
                 "Сохранённое служебное подключение повреждено. Показаны параметры по умолчанию; проверьте их перед сохранением."
             )
-        layout.addWidget(service)
+        service_toggle=QToolButton()
+        service_toggle.setText('История: отдельная служебная БД')
+        service_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        service_toggle.setCheckable(True);service_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        service.setVisible(False)
+        service_toggle.toggled.connect(service.setVisible)
+        service_toggle.toggled.connect(lambda shown:service_toggle.setArrowType(Qt.ArrowType.DownArrow if shown else Qt.ArrowType.RightArrow))
+        layout.addWidget(service_toggle);layout.addWidget(service)
         try:
             legacy = self._database_settings()
         except (ValueError, TypeError):
@@ -435,6 +443,10 @@ class DesktopConnectionsMixin:
     def _source_connection_edited(self, *_):
         if getattr(self, "_switching_profile", False):
             return
+        if hasattr(self,'_workflow_connected'):
+            self._workflow_last_error=None
+            try:self._workflow_connected.discard(endpoint(self._source_catalog_settings()))
+            except ValueError:pass
         self.last_query_run_id = None
         self.last_analyzed_sql = None
         self.last_sequential_plan = None
@@ -497,11 +509,7 @@ class DesktopConnectionsMixin:
         worker.signals.succeeded.connect(
             lambda result: self._source_schemas_loaded(settings, result)
         )
-        worker.signals.failed.connect(
-            lambda message: self.source_connection_status.setText(
-                "Схемы не загружены: " + message
-            )
-        )
+        worker.signals.failed.connect(self._source_schemas_failed)
         self._start_worker(worker)
 
     def _source_schemas_loaded(self, settings, result):
@@ -513,20 +521,33 @@ class DesktopConnectionsMixin:
         self.source_schema_list.blockSignals(True)
         self.source_schema_list.clear()
         database, rows = result
+        available={name for name,_ in rows}
+        selected=set(settings.allowed_schemas)&available or available
         for name, count in rows:
             item = QListWidgetItem(f"{name} — таблиц и представлений: {count}")
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked
-                if name in settings.allowed_schemas
+                if name in selected
                 else Qt.CheckState.Unchecked
             )
             self.source_schema_list.addItem(item)
         self.source_schema_list.blockSignals(False)
+        self._schema_checks_changed()
+        if hasattr(self,'_workflow_connected'):
+            self._workflow_last_error=None
+            self._workflow_connected.add(endpoint(self._source_catalog_settings()))
+            self._refresh_workflow()
         self.source_connection_status.setText(
             f"Подключено: {settings.host}:{settings.port}/{database}. Доступно схем: {len(rows)}. Выберите нужные и сохраните настройки."
         )
+
+    def _source_schemas_failed(self,message):
+        self.source_connection_status.setText('Схемы не загружены: '+message)
+        if hasattr(self,'workflow_status'):
+            self._workflow_last_error='Не удалось проверить подключение: '+message
+            self._refresh_workflow()
 
     def _set_all_schemas(self, checked):
         self.source_schema_list.blockSignals(True)

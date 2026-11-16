@@ -72,6 +72,30 @@ class TransactionSelectRewriteDesktopTests(TestCase):
             self.assertTrue(window.transaction_select_rewrite_diff.variant_marks)
         finally: window.close()
 
+    def test_isolation_savepoints_inventory_and_rewrite_preview_keep_context(self):
+        from pqo.transaction_inspection import inspect_transaction
+        window=MainWindow()
+        text=(Path(__file__).resolve().parents[1]/'examples/transactions/university-isolation-savepoints.sql').read_text(encoding='utf-8')
+        try:
+            with patch('pqo.transaction_replay.psycopg.connect') as connect:
+                window.transaction_editor.setPlainText(text)
+                window._transaction_inspected((text,inspect_transaction(text)))
+                self.assertIn('REPEATABLE READ',window.transaction_status.text())
+                window._start_transaction_select_rewrites(); self.drain(window)
+                option=next(o for o in window._transaction_select_rewrite_options if o.rule_id=='or-equality-to-in')
+                self.assertEqual(option.number,7)
+                window.transaction_select_rewrite_choice.setCurrentIndex(window._transaction_select_rewrite_options.index(option))
+                window._show_transaction_select_rewrite_preview()
+            connect.assert_not_called()
+            preview=window.transaction_details.toPlainText()
+            self.assertIn('BEGIN ISOLATION LEVEL REPEATABLE READ, READ WRITE',preview)
+            self.assertIn('ROLLBACK TO SAVEPOINT before_trial',preview)
+            self.assertIn('SET TRANSACTION NOT DEFERRABLE',preview)
+            self.assertEqual(window.transaction_editor.toPlainText(),text)
+            window.transaction_editor.setPlainText(text.replace('REPEATABLE READ','SERIALIZABLE'))
+            self.assertFalse(window._transaction_select_rewrite_options)
+        finally:window.close()
+
     def test_real_queued_trial_locks_other_actions_and_preserves_source(self):
         window=MainWindow()
         try:

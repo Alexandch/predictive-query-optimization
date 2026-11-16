@@ -8,6 +8,7 @@ from .analysis_control import AnalysisControl
 from .index_actions import IndexActionKind
 from .transaction_indexes import _writes
 from .transaction_inspection import inspect_transaction
+from .transaction_context import CONTROL_KINDS
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,7 @@ def assess_write_pressure(sql_text, plans, index_report, actions, *, assumptions
     selected = {}
     for action in actions:
         selected.setdefault((action.schema_name, action.table_name), []).append(action)
-    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements}
+    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements if item.kind not in CONTROL_KINDS}
     writes = _writes(trees)
     plans_by_number = {plan.number: plan for plan in plans.statements}
     rows, unknown, notes = [], [], []
@@ -175,7 +176,7 @@ def assess_write_pressure(sql_text, plans, index_report, actions, *, assumptions
     known = sum(row.exposure for row in rows if row.exposure is not None)
     state = "not_set" if budget is None else "exceeded" if known > budget else "unknown" if unknown or not complete else "within_scenario"
     if read_trial is not None:
-        read_numbers = {item.number for item in inspection.statements if not item.changes_data}
+        read_numbers = {item.number for item in inspection.statements if item.kind=='select' and not item.changes_data}
         if (read_trial.actions != actions or read_trial.status != "measured" or not read_trial.rollback_verified
                 or {reading.number for reading in read_trial.readings} != read_numbers):
             raise ValueError("Замер чтений относится к другому набору индексов/SELECT или не завершён с подтверждённым откатом.")

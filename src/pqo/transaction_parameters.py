@@ -13,7 +13,8 @@ from uuid import UUID
 
 from sqlglot import exp, parse_one
 
-from .transaction_inspection import TransactionInspection, inspect_transaction
+from .transaction_inspection import TransactionInspection, inspect_transaction, render_transaction_statement
+from .transaction_context import CONTROL_KINDS
 
 
 PARAMETER_TYPES = {
@@ -60,6 +61,8 @@ def discover_transaction_parameters(sql_text):
     inspection = inspect_transaction(sql_text)
     slots = []
     for item in inspection.statements:
+        if item.kind in CONTROL_KINDS:
+            continue
         tree = parse_one(item.sql, read="postgres")
         if tree.find(exp.Placeholder) is not None:
             raise ValueError("Пока поддерживаются только параметры $1, $2, …; :name и ? не поддерживаются.")
@@ -160,14 +163,17 @@ def bind_transaction_parameters(sql_text, parameters):
     inspection = inspect_transaction(sql_text)
     statements = []
     for item in inspection.statements:
+        if item.kind in CONTROL_KINDS:
+            statements.append(item.sql)
+            continue
         tree = parse_one(item.sql, read="postgres")
         for node in list(tree.find_all(exp.Parameter)):
             node.replace(values[item.number, _position(node)].copy())
-        statements.append(tree.sql(dialect="postgres", pretty=True))
-    bound = "BEGIN;\n\n" + ";\n\n".join(statements) + ";\n\n" + inspection.ending.upper() + ";"
+        statements.append(render_transaction_statement(tree,pretty=True))
+    bound = inspection.options.begin_sql+";\n\n" + ";\n\n".join(statements) + ";\n\n" + inspection.ending.upper() + ";"
     rebound = inspect_transaction(bound)
     signature = lambda report: tuple((item.kind, item.changes_data, item.supported_structure, item.relation_names) for item in report.statements)
-    if signature(inspection) != signature(rebound) or discover_transaction_parameters(bound):
+    if signature(inspection) != signature(rebound) or inspection.options != rebound.options or discover_transaction_parameters(bound):
         raise ValueError("Параметры не могут менять структуру команд или имена таблиц; SQL не запускался.")
     return BoundTransaction(sql_text, bound, tuple(sorted(parameters, key=lambda item: (item.statement_number, item.position))), rebound)
 

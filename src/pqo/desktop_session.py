@@ -50,6 +50,7 @@ class DesktopSessionMixin:
         if persist:
             self.preferences.setValue("advanced_mode", selected)
             self.preferences.sync()
+        if hasattr(self,'workflow_status'):self._refresh_workflow()
 
     def _sync_application_availability(self):
         """Lock inputs while any worker owns the session; leave cancellation usable."""
@@ -60,6 +61,7 @@ class DesktopSessionMixin:
         self.structural_management_group.setEnabled(not busy)
         self.advanced_mode_check.setEnabled(not busy)
         self.active_database_combo.setEnabled(not busy)
+        if hasattr(self,'workflow_status'):self._refresh_workflow()
 
     def _user_action_ready(self, *, database=True):
         if self._active_workers or self._query_operation_active:

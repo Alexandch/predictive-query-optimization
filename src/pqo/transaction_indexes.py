@@ -11,6 +11,7 @@ from .analysis_control import AnalysisControl
 from .config import DatabaseSettings
 from .index_actions import IndexAction
 from .transaction_inspection import TransactionInspection, inspect_transaction
+from .transaction_context import CONTROL_KINDS
 from .transaction_planning import TransactionPlanReport, planning_restriction
 from .transaction_parameters import is_typed_constant
 
@@ -237,7 +238,7 @@ def read_statements_for_index(inspection, action, metadata):
     """
     numbers = []
     for item in inspection.statements:
-        if item.changes_data:
+        if item.changes_data or item.kind in CONTROL_KINDS:
             continue
         tree = parse_one(item.sql, read="postgres")
         if isinstance(tree, (exp.Select, exp.Union, exp.Intersect, exp.Except)) and any(
@@ -267,6 +268,13 @@ def _writes(trees):
                     else:
                         columns.update(item.name for item in targets)
             result.append((number, type(node).__name__.lower(), relation, None if unknown else columns))
+            if isinstance(node,exp.Insert) and node.args.get('conflict') is not None:
+                conflict=node.args['conflict']
+                if conflict.expressions:
+                    assignments=conflict.expressions
+                    columns={item.this.name for item in assignments if isinstance(item,exp.EQ) and isinstance(item.this,exp.Column)}
+                    unknown=len(columns)!=len(assignments)
+                    result.append((number,'update',relation,None if unknown else columns))
     return result
 
 
@@ -293,7 +301,7 @@ def _scan_nodes(plan, relation, relations):
 def build_transaction_index_report(inspection: TransactionInspection, plans, metadata, *, eligible=None, extra_notes=()):
     """Pure structural assessment; the sort order is not a learned benefit score."""
     eligible = set(eligible if eligible is not None else (p.number for p in plans.statements if p.status == "planned"))
-    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements}
+    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements if item.kind not in CONTROL_KINDS}
     notes = set(extra_notes)
     accesses = [access for number, tree in trees.items() if number in eligible
                 for access in _accesses(tree, number, metadata, notes)]
@@ -347,6 +355,8 @@ def build_transaction_index_report(inspection: TransactionInspection, plans, met
             if kind == "update" and columns is not None:
                 message = (f"UPDATE меняет столбцы ключа/INCLUDE: {', '.join(overlap)}; риск дополнительного обслуживания и потери HOT."
                     if overlap else "UPDATE не меняет ключ/INCLUDE этого кандидата; нулевые издержки не гарантированы (HOT зависит и от других условий).")
+                if isinstance(trees[number],exp.Insert):
+                    message='Возможная ветвь ON CONFLICT DO UPDATE: '+message
             elif kind == "delete":
                 message = "DELETE создаёт мёртвые версии; дополнительный индекс увеличивает последующее обслуживание/очистку."
             else:
@@ -359,7 +369,7 @@ def build_transaction_index_report(inspection: TransactionInspection, plans, met
         -len(item.uses), sum(bool(write.changed_index_columns) for write in item.writes),
         len(item.action.include_columns), len(item.action.key_columns),
         item.action.schema_name, item.action.table_name, item.action.key_columns, item.action.include_columns))
-    if len(eligible) != len(inspection.statements):
+    if len(eligible) != sum(item.kind not in CONTROL_KINDS for item in inspection.statements):
         notes.add("Не все команды имеют допустимые планы; список кандидатов и оценка влияния могут быть неполными.")
     notes.add("Это структурные кандидаты, не доказанное ускорение. Направления сортировки/NULLS и селективность требуют проверки планом с индексом.")
     notes.add("Издержки записи качественные: частоты, изменённые строки, генерируемые столбцы, триггеры, каскады и конкурентная нагрузка не воспроизводились.")
@@ -421,6 +431,8 @@ def collect_transaction_index_candidates(sql_text, settings: DatabaseSettings, *
                 and planning_restriction(item, settings) is None}
     relations = set()
     for statement in inspection.statements:
+        if statement.kind in CONTROL_KINDS:
+            continue
         tree = parse_one(statement.sql, read="postgres")
         relations.update(relation for table in tree.find_all(exp.Table)
             if (relation := _relation(table)) and relation[0] in settings.allowed_schemas)

@@ -21,6 +21,7 @@ from .config import DatabaseSettings
 from .index_actions import IndexAction, IndexActionKind
 from .transaction_replay_guard import NAME, prepare_replay, replay_catalog
 from .transaction_mixed_recommendation import MixedReplayPolicy, MixedRecommendation, assess_mixed_replay, replay_request_digest
+from .transaction_context import CONTROL_KINDS, TransactionOptions, read_transaction_options
 
 
 PREFIX = 'pqo_replay_'
@@ -33,6 +34,13 @@ MAX_STATE_ROWS = 2_000_000
 class StateDigest:
     table: str
     rows: int
+    sha256: str
+    sequences: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SequenceStateDigest:
+    sequence: str
     sha256: str
 
 
@@ -58,6 +66,10 @@ class ReplaySample:
     index_size_bytes: int
     index_build_ms: float
     index_final_size_bytes: int = 0
+    transaction_options: TransactionOptions | None = None
+    ending: str = 'commit'
+    initial_sequences: tuple[SequenceStateDigest, ...] = ()
+    final_sequences: tuple[SequenceStateDigest, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,8 +103,8 @@ def _timeout(connection, deadline, settings):
     remaining = int((deadline - time.monotonic()) * 1000)
     if remaining <= 0:
         raise TimeoutError('Общий бюджет выполнения на одноразовых копиях исчерпан.')
-    connection.execute("SELECT set_config('statement_timeout',%s,false)",
-        (str(min(30_000, max(1, settings.statement_timeout_ms), remaining)),))
+    connection.execute(sql.SQL('SET statement_timeout = {}').format(
+        sql.Literal(min(30_000, max(1, settings.statement_timeout_ms), remaining))))
 
 
 class ScratchDatabases:
@@ -206,7 +218,8 @@ def state_digest(connection, tables, settings, deadline, control):
             control.check()
             _timeout(connection, deadline, settings)
             digest = hashlib.sha256()
-            digest.update(json.dumps((table.columns, table.primary_key)).encode())
+            sequence_metadata = tuple((s.schema,s.name,s.column,s.dependency,s.configuration) for s in table.sequences)
+            digest.update(json.dumps((table.columns,table.primary_key,table.default_signatures,sequence_metadata)).encode())
             count = 0
             statement = sql.SQL('SELECT pg_catalog.row_to_json(t)::text FROM {}.{} t ORDER BY {}').format(
                 sql.Identifier(table.schema), sql.Identifier(table.name),
@@ -226,8 +239,28 @@ def state_digest(connection, tables, settings, deadline, control):
                     digest.update(data)
                     if count % 2048 == 0:
                         _timeout(connection, deadline, settings)
-            states.append(StateDigest(f'{table.schema}.{table.name}', count, digest.hexdigest()))
+            states.append(StateDigest(f'{table.schema}.{table.name}',count,digest.hexdigest(),
+                tuple(f'{s.schema}.{s.name}' for s in table.sequences)))
     return tuple(states)
+
+
+def sequence_digest(connection,tables,settings,deadline,control):
+    """Read, never advance/reset, owned CACHE 1 sequences; hashes omit raw IDs.
+
+    Sequences are non-MVCC state. Capture outside the user transaction, including
+    after ROLLBACK: only row restoration is expected, not sequence restoration.
+    """
+    states=[]
+    for table in tables:
+        for sequence in table.sequences:
+            control.check()
+            _timeout(connection,deadline,settings)
+            value=connection.execute(sql.SQL('SELECT last_value,is_called FROM {}.{}').format(
+                sql.Identifier(sequence.schema),sql.Identifier(sequence.name))).fetchone()
+            metadata=(sequence.schema,sequence.name,sequence.column,sequence.dependency,sequence.configuration,tuple(value))
+            states.append(SequenceStateDigest(f'{sequence.schema}.{sequence.name}',
+                hashlib.sha256(json.dumps(metadata).encode()).hexdigest()))
+    return tuple(sorted(states,key=lambda state:state.sequence))
 
 
 def _value(value):
@@ -255,13 +288,19 @@ def result_digest(rows, ordered):
 
 def _execute_program(connection, program, settings, deadline, control):
     readings = []
+    observed = None
     started = time.perf_counter()
-    connection.execute('BEGIN')
+    connection.execute(program.options.begin_sql)
     try:
         for command in program.commands:
             control.report(f'Последовательное выполнение: {command.number} {command.kind.upper()}; только одноразовая БД…')
             control.check()
             _timeout(connection, deadline, settings)
+            if observed is None and command.kind != 'set_transaction':
+                observed = read_transaction_options(connection)
+                expected = program.effective_options
+                if any(value is not None and value != getattr(observed,key) for key,value in vars(expected).items()):
+                    raise RuntimeError('Режимы транзакции PostgreSQL не соответствуют заявленным; прогон остановлен.')
             before = time.perf_counter()
             cursor = connection.execute(command.sql)
             columns = tuple((column.name, column.type_code) for column in cursor.description) if cursor.description else ()
@@ -269,15 +308,16 @@ def _execute_program(connection, program, settings, deadline, control):
             elapsed = (time.perf_counter() - before) * 1000
             if cursor.rowcount > 10000 or rows is not None and len(rows) > 10000:
                 raise ValueError('Команда превысила лимит 10000 возвращённых/затронутых строк.')
-            readings.append(CommandReplay(command.number, command.kind, elapsed, cursor.rowcount, columns,
+            count = 0 if command.kind in CONTROL_KINDS else cursor.rowcount
+            readings.append(CommandReplay(command.number, command.kind, elapsed, count, columns,
                 result_digest(rows, command.ordered) if rows is not None else None))
             control.check()
         _timeout(connection, deadline, settings)
-        connection.execute('COMMIT')
+        connection.execute(program.ending.upper())
     except BaseException:
         connection.execute('ROLLBACK')
         raise
-    return tuple(readings), (time.perf_counter() - started) * 1000
+    return tuple(readings), (time.perf_counter() - started) * 1000, observed
 
 
 def _sample(settings, database, program, actions, series, phase, deadline, control):
@@ -293,6 +333,7 @@ def _sample(settings, database, program, actions, series, phase, deadline, contr
                 raise ValueError('Столбцы индекса отсутствуют в проверенной копии.')
         control.report(f'{phase}: снимок исходного состояния одноразовой БД…')
         initial = state_digest(connection, tables, settings, deadline, control)
+        initial_sequences = sequence_digest(connection,tables,settings,deadline,control)
         build_ms, size, created_indexes = 0., 0, []
         if phase == 'B':
             for action in actions:
@@ -312,23 +353,34 @@ def _sample(settings, database, program, actions, series, phase, deadline, contr
                     (action.schema_name, index_name)).fetchone()[0]
                 if size > 64 * 1024 * 1024:
                     raise ValueError('Пробные индексы превысили лимит 64 МиБ после построения.')
-        commands, elapsed = _execute_program(connection, program, settings, deadline, control)
-        control.report(f'{phase}: проверка итоговых данных после COMMIT…')
+        commands, elapsed, observed = _execute_program(connection, program, settings, deadline, control)
+        control.report(f'{phase}: проверка итоговых данных после {program.ending.upper()}…')
         final = state_digest(connection, tables, settings, deadline, control)
+        final_sequences = sequence_digest(connection,tables,settings,deadline,control)
         final_size = 0
         for schema,name in created_indexes:
             control.check()
             _timeout(connection,deadline,settings)
             final_size += connection.execute('SELECT pg_catalog.pg_relation_size(c.oid) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s', (schema,name)).fetchone()[0]
-    return ReplaySample(series, phase, database, commands, elapsed, initial, final, size, build_ms, final_size)
+    return ReplaySample(series,phase,database,commands,elapsed,initial,final,size,build_ms,final_size,observed,
+        program.ending,initial_sequences,final_sequences)
 
 
 def assess_correctness(samples, series):
     if len(samples) != 3 * series or [(item.series, item.phase) for item in samples] != [
             (number, phase) for number in range(1, series + 1) for phase in ('A1', 'B', 'A2')]:
         return False, False, False
-    initial = all(item.initial_state == samples[0].initial_state for item in samples)
-    final = all(item.final_state == samples[0].final_state for item in samples)
+    if len({(item.transaction_options,item.ending) for item in samples}) != 1:
+        return False, False, False
+    for sample in samples:
+        for rows,states in ((sample.initial_state,sample.initial_sequences),(sample.final_state,sample.final_sequences)):
+            expected=[name for table in rows for name in table.sequences]
+            actual=[state.sequence for state in states]
+            if len(set(expected))!=len(expected) or len(set(actual))!=len(actual) or set(expected)!=set(actual):
+                return False,False,False
+    initial = all((item.initial_state,item.initial_sequences) == (samples[0].initial_state,samples[0].initial_sequences) for item in samples)
+    final = all((item.final_state,item.final_sequences) == (samples[0].final_state,samples[0].final_sequences) for item in samples)
+    final = final and all(item.ending != 'rollback' or item.final_state == item.initial_state for item in samples)
     def outputs(sample):
         return tuple((item.number, item.kind, item.row_count, item.result_columns, item.result_sha256) for item in sample.commands)
     results = all(outputs(item) == outputs(samples[0]) for item in samples)
@@ -391,6 +443,12 @@ def _run_disposable_programs(program, source_settings, reference_database, actio
                 if reference.execute('SELECT pg_catalog.pg_database_size(current_database())').fetchone()[0] > MAX_DATABASE_BYTES:
                     raise ValueError('Лабораторная БД больше 256 МиБ; первый режим отказывается от клонирования.')
                 replay_catalog(reference, source_settings, program)
+                if candidate_program is not None:
+                    replay_catalog(reference,source_settings,candidate_program)
+                defaults = read_transaction_options(reference,defaults=True)
+        program = replace(program,options=program.options.resolve(defaults))
+        if candidate_program is not None:
+            candidate_program = replace(candidate_program,options=candidate_program.options.resolve(defaults))
         control.report('Создание закрытого эталонного снимка; CREATE может занимать до 30 с…')
         seed = scratch.create(reference_database, enabled=False, deadline=deadline, control=control)
         for number in range(1, series + 1):
@@ -409,8 +467,11 @@ def _run_disposable_programs(program, source_settings, reference_database, actio
     except Exception as exc:
         status = 'declined' if isinstance(exc, ValueError) else 'error'
         # No statement text/literals or psycopg detail (which can contain row data).
-        reasons.append(str(exc) if isinstance(exc, (ValueError, RuntimeError, TimeoutError)) else
-            f'{type(exc).__name__}, SQLSTATE={getattr(exc, "sqlstate", None)}; выполнение остановлено.')
+        if getattr(exc,'sqlstate',None) in {'40001','40P01'}:
+            reasons.append(f'Конфликт транзакций, SQLSTATE={exc.sqlstate}; прогон остановлен без автоматического повтора. Эффект оптимизации не подтверждён.')
+        else:
+            reasons.append(str(exc) if isinstance(exc, (ValueError, RuntimeError, TimeoutError)) else
+                f'{type(exc).__name__}, SQLSTATE={getattr(exc, "sqlstate", None)}; выполнение остановлено.')
     finally:
         cleanup, leftovers = scratch.finish()
     initial, results, final = assess_correctness(samples, series)

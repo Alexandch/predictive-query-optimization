@@ -6,8 +6,10 @@ import argparse
 import json
 from pathlib import Path
 
-from sqlglot import exp, parse
+from sqlglot import exp, parse_one
 from sqlglot.errors import ParseError
+
+from .transaction_context import (TransactionOptions, parse_transaction_control, split_transaction_sql)
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,8 @@ class TransactionStatement:
     changes_data: bool
     supported_structure: bool
     warnings: tuple[str, ...]
+    options: TransactionOptions | None = None
+    savepoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -28,37 +32,68 @@ class TransactionInspection:
     requires_test_copy: bool
     unsupported_commands: tuple[int, ...]
     execution_permitted: bool = False
+    options: TransactionOptions = TransactionOptions()
+
+    @property
+    def effective_options(self):
+        options = self.options
+        for statement in self.statements:
+            if statement.kind == 'set_transaction':
+                options = options.overlay(statement.options)
+        return options
+
+
+def render_transaction_statement(node, *, pretty=False):
+    """Preserve PostgreSQL's DEFAULT VALUES before ON CONFLICT/RETURNING.
+
+    SQLGlot's Insert generator puts the conflict before DEFAULT VALUES. Render
+    those AST clauses separately; never search/replace user text or literals.
+    """
+    if isinstance(node,exp.Insert) and node.args.get('default') and node.args.get('conflict'):
+        head=node.copy()
+        for key in ('default','conflict','returning'):head.set(key,None)
+        parts=[head.sql(dialect='postgres',pretty=pretty),'DEFAULT VALUES',
+            node.args['conflict'].sql(dialect='postgres',pretty=pretty)]
+        if node.args.get('returning'):parts.append(node.args['returning'].sql(dialect='postgres',pretty=pretty))
+        return ('\n' if pretty else ' ').join(parts)
+    return node.sql(dialect='postgres',pretty=pretty)
 
 
 def inspect_transaction(sql_text: str) -> TransactionInspection:
-    """Understand one bare BEGIN ... COMMIT/ROLLBACK, without authorizing replay.
-
-    Isolation clauses, savepoints, prepared transactions and session commands
-    deliberately remain outside this first inventory stage.
-    """
+    """Inventory transaction modes and controls without authorizing execution."""
     if not sql_text.strip() or len(sql_text) > 500_000:
         raise ValueError("Transaction text must contain 1 to 500000 characters")
     try:
-        # SQLGlot can represent comment-only trivia between commands as a
-        # Semicolon node. It has no executable content and is not a command.
-        nodes = [node for node in parse(sql_text, read="postgres")
-                 if node is not None and not isinstance(node, exp.Semicolon)]
+        fragments = split_transaction_sql(sql_text)
+        begin = parse_transaction_control(fragments[0]) if fragments else None
+        ending = parse_transaction_control(fragments[-1]) if fragments else None
     except ParseError as exc:
         raise ValueError("Cannot parse transaction; no SQL was executed") from exc
-    if len(nodes) < 3 or not isinstance(nodes[0], exp.Transaction):
+    if len(fragments) < 3 or begin is None or begin.kind != 'begin':
         raise ValueError("Expected BEGIN, one or more commands, and COMMIT or ROLLBACK")
-    if (nodes[0].args.get("modes") or nodes[0].args.get("this")
-            or not isinstance(nodes[-1], (exp.Commit, exp.Rollback))
-            or any(value is not None for value in nodes[-1].args.values())):
-        raise ValueError("Only bare BEGIN and final COMMIT/ROLLBACK are supported at this stage")
-    body = nodes[1:-1]
+    if ending is None or ending.kind not in {'commit','rollback'}:
+        raise ValueError('Нужен завершающий COMMIT или ROLLBACK без CHAIN.')
+    body = fragments[1:-1]
     if len(body) > 100:
         raise ValueError("At most 100 transaction commands can be inspected")
-    if any(isinstance(node, (exp.Transaction, exp.Commit, exp.Rollback)) for node in body):
-        raise ValueError("Only one complete transaction can be inspected")
     statements = []
     requires_copy = False
-    for number, node in enumerate(body, 1):
+    context_open = True
+    for number, fragment in enumerate(body, 1):
+        command = parse_transaction_control(fragment)
+        if command is not None:
+            if command.kind in {'begin','commit','rollback'}:
+                raise ValueError('Можно разобрать только одну полную транзакцию.')
+            if command.kind == 'set_transaction' and not context_open:
+                raise ValueError('SET TRANSACTION поддерживается только в начале, до запросов и SAVEPOINT.')
+            context_open = context_open and command.kind == 'set_transaction'
+            statements.append(TransactionStatement(number,command.kind,command.sql,(),False,True,(),command.options,command.savepoint))
+            continue
+        context_open = False
+        try:
+            node = parse_one(fragment,read='postgres')
+        except ParseError:
+            raise ValueError('Cannot parse transaction; no SQL was executed') from None
         writes = any(isinstance(item, (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Into))
                      for item in node.walk())
         locks = node.find(exp.Lock) is not None
@@ -88,10 +123,10 @@ def inspect_transaction(sql_text: str) -> TransactionInspection:
             relation_names.add(relation.sql(dialect="postgres"))
         relations = tuple(sorted(relation_names))
         statements.append(TransactionStatement(number, type(node).__name__.lower(),
-            node.sql(dialect="postgres", pretty=True), relations, writes, supported, tuple(warnings)))
+            render_transaction_statement(node,pretty=True), relations, writes, supported, tuple(warnings)))
         requires_copy |= writes or locks or unknown_function or not supported
-    return TransactionInspection(tuple(statements), type(nodes[-1]).__name__.lower(),
-        requires_copy, tuple(item.number for item in statements if not item.supported_structure))
+    return TransactionInspection(tuple(statements), ending.kind,
+        requires_copy, tuple(item.number for item in statements if not item.supported_structure),options=begin.options)
 
 
 def main():

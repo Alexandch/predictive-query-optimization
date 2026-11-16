@@ -131,6 +131,8 @@ def _read_slice(sql_text, settings, action):
     queries, writes = [], []
     target_read = False
     for item in inspection.statements:
+        if item.kind in {'set_transaction','savepoint','rollback_to','release'}:
+            continue  # This mode measures standalone SELECT, never transaction context.
         tree = parse_one(item.sql, read="postgres")
         if item.changes_data:
             writes.append(item.number)

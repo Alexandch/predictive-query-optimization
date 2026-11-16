@@ -44,6 +44,34 @@ def provision(settings):
     return target
 
 
+def provision_defaults(settings, *, upsert=False):
+    return provision_transaction_lab(settings,'upsert' if upsert else 'defaults')
+
+
+def provision_transaction_lab(settings,kind):
+    """Create two new synthetic labs; existing databases are never overwritten."""
+    import psycopg
+    from psycopg import sql
+    source,reference,filename={
+        'defaults':('pqo_defaults_source','pqo_defaults_index_lab','defaults.sql'),
+        'upsert':('pqo_upsert_source','pqo_upsert_index_lab','upsert.sql'),
+        'insert-select':('pqo_insert_source','pqo_insert_index_lab','insert_select.sql'),
+    }[kind]
+    admin=replace(settings,dbname='postgres')
+    with psycopg.connect(**admin.connection_kwargs(),autocommit=True) as connection:
+        if connection.execute('SELECT datname FROM pg_catalog.pg_database WHERE datname=ANY(%s)',([source,reference],)).fetchall():
+            raise FileExistsError('Transaction demo databases already exist; nothing overwritten')
+        connection.execute(sql.SQL('CREATE DATABASE {} TEMPLATE template0').format(sql.Identifier(source)))
+    target=replace(settings,dbname=source,allowed_schemas=frozenset({'retail'}))
+    with psycopg.connect(**target.connection_kwargs()) as connection:
+        connection.execute((ROOT/'database/unseen'/filename).read_text(encoding='utf-8'))
+    # Close initialization before cloning. Failure leaves new labs for inspection;
+    # there is no automatic DROP, overwrite, FORCE or session termination.
+    with psycopg.connect(**admin.connection_kwargs(),autocommit=True) as connection:
+        connection.execute(sql.SQL('CREATE DATABASE {} TEMPLATE {}').format(sql.Identifier(reference),sql.Identifier(source)))
+    return target
+
+
 def check(settings, model, output):
     import psycopg
     from .optimization_control import index_inventory
@@ -107,13 +135,19 @@ def check(settings, model, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("create", "check"))
+    parser.add_argument("action", choices=("create", "create-defaults", "create-upsert", "create-insert-select", "check"))
     parser.add_argument("--model", type=Path, default=ROOT / "models/xgboost/xgboost_query_time.joblib")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/university-unseen-20261030")
     args = parser.parse_args()
     settings = DatabaseSettings.from_env()
     if args.action == "create":
         print("Created", provision(settings).dbname)
+    elif args.action == 'create-defaults':
+        print('Created',provision_defaults(settings).dbname,'and pqo_defaults_index_lab')
+    elif args.action == 'create-upsert':
+        print('Created',provision_defaults(settings,upsert=True).dbname,'and pqo_upsert_index_lab')
+    elif args.action == 'create-insert-select':
+        print('Created',provision_transaction_lab(settings,'insert-select').dbname,'and pqo_insert_index_lab')
     else:
         print(check(settings, args.model, args.output)["status"])
 

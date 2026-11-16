@@ -261,7 +261,7 @@ class TransactionWorkspaceMixin:
         report_only = self.transaction_workspace_mode.currentData() == "report"
         self.transaction_index_tools.setVisible(not report_only and index in {0, 1})
         self.transaction_trial_tools.setVisible(
-            not report_only and index in {1, 2, 3, 4}
+            not report_only and index in {1, 2, 3, 4} and getattr(self,'_advanced_mode',True)
         )
 
     def _transaction_workspace_section_changed(self, index):

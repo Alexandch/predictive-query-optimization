@@ -102,6 +102,7 @@ from .training import train_xgboost
 from .transaction_desktop import TransactionTabMixin
 from .desktop_session import DesktopSessionMixin
 from .desktop_connections import DesktopConnectionsMixin
+from .desktop_workflow import DesktopWorkflowMixin
 from .desktop_preferences import open_preferences, read_number
 from .sql_diff_view import SQLDiffView
 
@@ -425,7 +426,7 @@ def _format_verified_index_summary(
     return "\n".join(lines)
 
 
-class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMixin, QMainWindow):
+class MainWindow(DesktopWorkflowMixin, DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -469,6 +470,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self._build_training_tab()
         self._build_transaction_tab()
         self._build_session_controls()
+        self._build_workflow()
         self._refresh_calibration_status()
         self._refresh_managed_index_state()
         self._apply_style()
@@ -1133,6 +1135,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         form.addRow("Смена модели", trial_actions)
         self.trial_model_status = QLabel()
         self.trial_model_status.setWordWrap(True)
+        self._advanced_settings_rows.append(form.rowCount())
         form.addRow("Активная модель", self.trial_model_status)
         self.xgb_model_edit.textChanged.connect(self._refresh_trial_controls)
         self._refresh_trial_controls()
@@ -1599,6 +1602,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self._task_failed(message)
 
     def _start_analysis(self) -> None:
+        self._workflow_open_tab(0)
         if not self._user_action_ready():
             return
         sql_text = self.sql_editor.toPlainText().strip()
@@ -2133,6 +2137,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self._task_failed(message)
 
     def _start_sequential_analysis(self) -> None:
+        self._workflow_open_tab(0)
         if not self._user_action_ready():
             return
         sql_text = self.sql_editor.toPlainText().strip()
@@ -2563,6 +2568,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
         self._task_failed(message)
 
     def _start_rewrite_analysis(self) -> None:
+        self._workflow_open_tab(0)
         if not self._user_action_ready():
             return
         sql_text = self.sql_editor.toPlainText().strip()
@@ -3499,6 +3505,7 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
             QPushButton:disabled { color: #64748b; }
             QPushButton#primaryButton { background: #2563eb; color: white; font-weight: 600; }
             QPushButton#primaryButton:hover { background: #1d4ed8; }
+            QPushButton#primaryButton:disabled { background: #334155; color: #64748b; }
             QLabel#pageTitle { font-size: 22px; font-weight: 700; color: white; }
             QLabel#metricValue { font-size: 18px; font-weight: 700; color: #60a5fa; }
             QLabel#mutedLabel { color: #94a3b8; }
@@ -3508,6 +3515,8 @@ class MainWindow(DesktopConnectionsMixin, DesktopSessionMixin, TransactionTabMix
 
 
 def main() -> int:
+    workflow_smoke_test='--workflow-smoke-test' in sys.argv
+    if workflow_smoke_test:sys.argv.remove('--workflow-smoke-test')
     clean_profile_smoke_test = "--clean-profile-smoke-test" in sys.argv
     if clean_profile_smoke_test:
         sys.argv.remove("--clean-profile-smoke-test")
@@ -3560,6 +3569,9 @@ def main() -> int:
     application = QApplication(sys.argv)
     application.setApplicationName("Predictive Query Optimization")
     application.setOrganizationName("PQO")
+    if workflow_smoke_test:
+        from .workflow_smoke import run_workflow_smoke
+        return run_workflow_smoke(application,MainWindow,PROJECT_ROOT,ARTIFACT_ROOT)
     if clean_profile_smoke_test:
         from .clean_profile_smoke import run_clean_profile_smoke
         return run_clean_profile_smoke(application, MainWindow, PROJECT_ROOT, ARTIFACT_ROOT)

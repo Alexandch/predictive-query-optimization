@@ -5,6 +5,7 @@ from unittest.mock import MagicMock,patch
 from pqo.analysis_control import AnalysisControl
 from pqo.config import DatabaseSettings
 from pqo.transaction_replay_guard import prepare_replay
+from pqo.transaction_context import TransactionOptions
 from pqo.transaction_select_rewrite import (generate_transaction_select_rewrites,prepare_select_replacement,
     run_transaction_select_rewrite,select_rewrite_request_digest)
 from pqo.transaction_mixed_recommendation import MixedReplayPolicy,assess_mixed_replay
@@ -42,6 +43,26 @@ class TransactionSelectRewriteTests(TestCase):
     def test_existing_index_replay_contract_is_not_silently_widened(self):
         with self.assertRaises(ValueError): prepare_replay(TEXT,self.settings)
         self.assertEqual(len(prepare_replay(TEXT,self.settings,allow_select_wrapper=True).commands),3)
+
+    def test_join_replacement_keeps_sources_even_when_other_commands_use_them(self):
+        text = '''BEGIN;
+UPDATE university.items SET value=7 WHERE id=1;
+UPDATE university.other SET value=8 WHERE id=1;
+SELECT a.id FROM university.items a LEFT JOIN university.other b ON b.id=a.id
+WHERE a.value=1 OR a.value=2 ORDER BY a.id;
+COMMIT;'''
+        option = next(o for o in generate_transaction_select_rewrites(text,self.settings) if o.rule_id=='or-equality-to-in')
+        prepared = prepare_select_replacement(text,self.settings,3,option.variant_sql)
+        self.assertEqual(prepared.original.commands[:2],prepared.variant.commands[:2])
+        self.assertIn('LEFT JOIN',prepared.variant_sql)
+        with self.assertRaises(ValueError):
+            prepare_select_replacement(text,self.settings,3,
+                'SELECT a.id FROM university.items a WHERE a.value IN (1,2) ORDER BY a.id')
+        # The union still contains "items" after removing a self-join occurrence.
+        self_join = text.replace('university.other','university.items')
+        with self.assertRaises(ValueError):
+            prepare_select_replacement(self_join,self.settings,3,
+                'SELECT a.id FROM university.items a WHERE a.value IN (1,2) ORDER BY a.id')
 
     def test_only_single_aggregate_from_wrapper_is_allowed(self):
         for select in (
@@ -129,7 +150,8 @@ class TransactionSelectRewriteTests(TestCase):
             programs.append((program,actions,phase))
             return replace(original.sample(phase),database=database)
         with patch('pqo.transaction_replay.ScratchDatabases',return_value=scratch),patch('pqo.transaction_replay.psycopg.connect',return_value=connection), \
-                patch('pqo.transaction_replay.replay_catalog'),patch('pqo.transaction_replay._sample',side_effect=sample):
+                patch('pqo.transaction_replay.replay_catalog'),patch('pqo.transaction_replay.read_transaction_options',return_value=TransactionOptions('READ COMMITTED',False,False)), \
+                patch('pqo.transaction_replay._sample',side_effect=sample):
             result=run_transaction_select_rewrite(TEXT,self.settings,'lab',2,self.option().variant_sql,series=1,
                 test_copy_confirmed=True,disposable_databases_confirmed=True)
         self.assertEqual(programs[0][0],programs[2][0]); self.assertNotEqual(programs[0][0],programs[1][0])

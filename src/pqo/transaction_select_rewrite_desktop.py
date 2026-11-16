@@ -27,9 +27,9 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         self.transaction_select_rewrite_page.setWidget(content)
         layout = QVBoxLayout(content)
         full_note = ('Замена одного SELECT без изменения остальных команд и их порядка. '
-            'Подготовка вариантов локальная. Фактическая проверка выполняет всю BEGIN … COMMIT транзакцию '
+            'Подготовка вариантов локальная. Фактическая проверка выполняет всю транзакцию с её изоляцией и COMMIT/ROLLBACK '
             'на свежих одноразовых БД A1/B/A2; выбранный SELECT в B видит предыдущие записи. Новые индексы не создаются.')
-        note = self.transaction_select_rewrite_note = QLabel('Замена одного SELECT; порядок остальных команд сохраняется. Реальные DML/COMMIT — только на одноразовых копиях.')
+        note = self.transaction_select_rewrite_note = QLabel('Замена одного SELECT; порядок команд и режимы транзакции сохраняются. Выполнение — на одноразовых копиях.')
         note.setToolTip(full_note)
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -90,13 +90,18 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         options.addWidget(self.transaction_select_rewrite_gain_percent)
         settings_layout.addLayout(options)
         limits = ('Только доверенный тестовый сервер и отдельный эталон; нужны CREATEDB и владение эталоном. '
-            'Сохраняется узкий контракт простых SELECT/DML. Дополнительно: одна FROM-подвыборка под внешним агрегатом. '
-            'JOIN, CTE, функции вне разрешённых агрегатов, триггеры, DEFAULT/identity, каскады и RLS исключены. '
+            'SELECT поддерживает INNER/LEFT JOIN до 8 источников по равенству столбцов в ON. '
+            'Дополнительно: одна FROM-подвыборка под внешним агрегатом, отдельно от JOIN. '
+            'Константные DEFAULT и собственные serial/identity поддерживаются при CACHE 1, NO CYCLE; '
+            'ON CONFLICT DO NOTHING/DO UPDATE сохраняется при замене SELECT. '
+            'INSERT SELECT с прямыми источниками/JOIN также сохраняется; заменяется самостоятельный SELECT. '
+            'строки и последовательности сверяются отдельно. '
+            'CTE/LATERAL, произвольные функции, триггеры, каскады и RLS исключены. '
             'Внешние ORDER BY/LIMIT замены неизменны. Совпадение данных не означает ускорение; '
             'рекомендация требует двух полных устойчивых серий. Регрессия любой команды > 2 мс И > 10% блокирует рекомендацию; '
             'дрейф > 2 мс И > 20% означает недостаточно данных. Пороги фиксируются до запуска.')
         settings_layout.addWidget(collapsible_notice('Ограничения и правила проверки',limits))
-        self.transaction_select_rewrite_confirm = QCheckBox('Разрешаю реальный DML/COMMIT и CREATE/DROP новых одноразовых лабораторных копий')
+        self.transaction_select_rewrite_confirm = QCheckBox('Разрешаю выполнение SQL и CREATE/DROP новых одноразовых лабораторных копий')
         settings_layout.addWidget(self.transaction_select_rewrite_confirm)
         self.transaction_select_rewrite_button = QPushButton('Проверить замену в контексте всей транзакции на копиях')
         buttons = QHBoxLayout()
@@ -234,7 +239,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         try:
             _,prepared = self._select_rewrite_prepared()
             self.transaction_details.setPlainText(f'ЛОКАЛЬНЫЙ ПРОСМОТР — НЕ ЗАПУСК\nМеняется только SELECT № {prepared.number}. '
-                'Все остальные команды и их порядок неизменны.\n\nТранзакция с заменой (нормализованный SQL):\n'+_render(prepared.variant.commands))
+                'Все остальные команды, режимы и их порядок неизменны.\n\nТранзакция с заменой (нормализованный SQL):\n'+_render(prepared.variant))
             if self.transaction_workspace_mode.currentData() != 'report':
                 self._transaction_open_protocol()
         except ValueError as exc:
@@ -258,7 +263,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             self.transaction_select_rewrite_status.setText(str(exc)); return
         answer = QMessageBox.question(self,'Замена SELECT в транзакции — только лабораторные копии',
             f'Сервер: {snapshot[2].host}:{snapshot[2].port}\nИсходная БД (не выполняется): {snapshot[2].dbname}\nЭталон: {reference}\n'
-            f'Меняется только SELECT № {prepared.number}. До {1+3*series} новых БД; вся транзакция с DML/COMMIT в каждой копии. '
+            f'Меняется только SELECT № {prepared.number}. До {1+3*series} новых БД; режимы и COMMIT/ROLLBACK сохраняются в каждой копии. '
             f'В B используется замена, новые индексы не создаются. Пороги общего выигрыша: {policy.minimum_gain_ms:g} мс И {policy.minimum_gain_ratio*100:g}%. '
             'Каталоги/исходные состояния/все результаты/итоговые данные и удаление копий проверяются. '
             'Только доверенный тестовый сервер, не production. Бюджет 300 с; CREATE может задержать отмену до 30 с. Продолжить?',
@@ -297,7 +302,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             status = {'recommended':'Замена рекомендована для измеренной транзакции',
                 'not_recommended':'Замена не дала надёжного общего выигрыша',
                 'inconclusive':'Недостаточно надёжных данных для рекомендации'}[report.recommendation.status]
-            status += f'. Результаты/данные: {"совпали" if report.correctness_verified else "НЕ подтверждены"}; удаление копий: {report.cleanup_verified}.'
+            status += f'. Результаты/данные: {"совпали" if report.correctness_verified else "НЕ подтверждены"}; удаление копий {"подтверждено" if report.cleanup_verified else "НЕ подтверждено"}.'
             self.transaction_select_rewrite_status.setText(status)
             self.transaction_status.setText(status)
             self.transaction_views.setCurrentIndex(9)
@@ -323,13 +328,16 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             f'Эталон: {report.reference_database}; решение: {decision.status}.',
             f'Исходные состояния: {report.initial_states_equal}; все результаты/RETURNING: {report.results_equal}; '
             f'итоговые данные: {report.final_states_equal}; удаление копий: {report.cleanup_verified}.',
+            'Состояния собственных последовательностей входят в сверку. ROLLBACK/ROLLBACK TO не возвращает выданные ими номера.',
             f'Не удалены/не проверены: {report.leftover_databases}.',
             'A1/A2 — исходная транзакция; B — только один SELECT заменён. Порядок DML и остальных SELECT неизменен; новых индексов нет.',
             'Сравниваются результаты каждой команды в её контексте, не отдельный SELECT до транзакции. '
             'ORDER BY — последовательность, иначе мультимножество с NULL/дубликатами; сравниваются имена/типы столбцов и затронутые строки.',
-            'Общее время — клиент BEGIN–COMMIT, включая результат/его хеш/служебные тайм-ауты; '
+            'Общее время — клиент от BEGIN до COMMIT/ROLLBACK, включая результат/его хеш/проверку режимов/тайм-ауты; '
             'команды — execute+fetch. Клонирование и полные снимки исключены; UTC/ISO/jit=off/parallel=0, кэш прогрет снимками.',
             *decision.reasons,'','Медианы серий (+ ускорение / − замедление; решение проверяет каждую серию):']
+        if report.samples and report.samples[0].transaction_options is not None:
+            lines.insert(2,report.samples[0].transaction_options.description+' Завершение: '+report.samples[0].ending.upper()+'. Конкурентные сессии не воспроизводились.')
         lines.extend(f'{m.label}: {m.baseline_ms:.3f} → {m.indexed_ms:.3f} мс; {m.gain_ms:+.3f} мс / {m.gain_ratio*100:+.1f}%.' for m in decision.summary)
         for sample in report.samples:
             lines.append(f'Серия {sample.series} {sample.phase}: BEGIN–COMMIT {sample.transaction_client_ms:.3f} мс.')

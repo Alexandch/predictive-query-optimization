@@ -258,15 +258,15 @@ def run_acceptance(output, settings, *, laboratory_confirmed=False, progress=pri
                         report['cases'].append({'domain': domain.schema, 'case': 'unsupported-function', 'status': 'passed'})
                     else:
                         report['cases'].append({'domain': domain.schema, 'case': 'unsupported-function', 'status': 'failed'})
-                    # A table DEFAULT is a catalog refusal, not an optimization failure.
+                    # Unsupported CHECK must be refused before any clone executes.
                     with _connect(source, fixture.name) as connection:
-                        connection.execute(sql.SQL('ALTER TABLE {}.{} ALTER COLUMN status SET DEFAULT {}').format(
-                            sql.Identifier(domain.schema), sql.Identifier(domain.table), sql.Literal('open')))
+                        connection.execute(sql.SQL('ALTER TABLE {}.{} ADD CONSTRAINT pqo_acceptance_check CHECK (status IS NOT NULL)').format(
+                            sql.Identifier(domain.schema), sql.Identifier(domain.table)))
                     try:
                         measure(fixture, 'unsupported-catalog', lambda: index_run(domain.index_sql(), (domain.action,)), 'declined')
                     finally:
                         with _connect(source, fixture.name) as connection:
-                            connection.execute(sql.SQL('ALTER TABLE {}.{} ALTER COLUMN status DROP DEFAULT').format(
+                            connection.execute(sql.SQL('ALTER TABLE {}.{} DROP CONSTRAINT pqo_acceptance_check').format(
                                 sql.Identifier(domain.schema), sql.Identifier(domain.table)))
                 db_item['after'] = fixture.fingerprint()
                 db_item['unchanged'] = db_item['after'] == before

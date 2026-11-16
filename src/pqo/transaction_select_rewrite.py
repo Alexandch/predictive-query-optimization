@@ -46,8 +46,8 @@ class TransactionSelectRewrite:
     measurement: TransactionReplay  # no SQL/rows retained in this report
 
 
-def _render(commands):
-    return 'BEGIN;\n' + ';\n'.join(command.sql for command in commands) + ';\nCOMMIT;'
+def _render(program):
+    return program.options.begin_sql+';\n'+';\n'.join(command.sql for command in program.commands)+';\n'+program.ending.upper()+';'
 
 
 def _prepare_program(text,settings):
@@ -82,13 +82,15 @@ def prepare_select_replacement(text, settings, number, variant_sql):
         raise ValueError('Внешние ORDER BY и LIMIT должны остаться неизменными, включая направление/NULLS.')
     commands = list(original.commands)
     commands[number-1] = replace(commands[number-1],sql=tree.sql(dialect='postgres'))
-    variant = _prepare_program(_render(commands),settings)
+    variant = _prepare_program(_render(replace(original,commands=tuple(commands))),settings)
     if variant.tables != original.tables:
         raise ValueError('Замена должна обращаться к тем же физическим таблицам.')
-    # Also compare the target table, not only the transaction-wide union.
+    # Preserve every SELECT source, including repeated self-join occurrences,
+    # not only the transaction-wide union of tables. Result checks still have
+    # to detect changes to ON predicates, join types, projections and filters.
     tables = lambda node: sorted((t.db,t.name) for t in node.find_all(exp.Table))
     if tables(tree) != tables(current):
-        raise ValueError('Физическая таблица выбранного SELECT не должна меняться.')
+        raise ValueError('Физические таблицы выбранного SELECT и число их вхождений не должны меняться.')
     if any(a != b for i,(a,b) in enumerate(zip(original.commands,variant.commands),1) if i != number):
         raise ValueError('Изменены команды вне выбранного SELECT.')
     return SelectReplacement(number,original,variant)

@@ -15,6 +15,7 @@ from pqo.analysis_control import AnalysisCancelled, AnalysisControl
 from pqo.config import DatabaseSettings
 from pqo.index_actions import IndexAction
 from pqo.transaction_replay_guard import prepare_replay, replay_catalog
+from pqo.transaction_context import TransactionOptions
 from pqo.transaction_replay import (CommandReplay, ReplaySample, StateDigest, ScratchDatabases,
     assess_correctness, result_digest, run_transaction_replay, _execute_program)
 
@@ -34,6 +35,9 @@ class TransactionReplayTests(TestCase):
         self.assertTrue(program.commands[0].ordered)
         example = prepare_replay((ROOT / 'examples/transactions/university-disposable-replay.sql').read_text(encoding='utf-8'), self.settings)
         self.assertEqual(len(example.commands), 6)
+        joined = prepare_replay((ROOT / 'examples/transactions/university-join-replay.sql').read_text(encoding='utf-8'), self.settings)
+        self.assertEqual(len(joined.commands), 3)
+        self.assertEqual(len(joined.tables), 5)
 
     def test_unsupported_sql_is_rejected_offline_before_any_connection(self):
         for body in (
@@ -41,11 +45,11 @@ class TransactionReplayTests(TestCase):
             "SELECT now() FROM university.items", "SELECT random() FROM university.items",
             "SELECT * FROM university.items FOR UPDATE", "SELECT * FROM university.items WHERE id=$1",
             "SELECT * FROM items", "SELECT * FROM other.items", "SELECT * INTO newtable FROM university.items",
-            "SELECT * FROM university.items LIMIT 1", "SELECT * FROM university.items a JOIN university.items b ON a.id=b.id",
+            "SELECT * FROM university.items LIMIT 1", "SELECT * FROM university.items a JOIN university.items b ON true",
             "WITH x AS (DELETE FROM university.items RETURNING *) SELECT * FROM x",
             "UPDATE university.items SET value=3", "DELETE FROM university.items",
-            "INSERT INTO university.items VALUES(1,2)", "INSERT INTO university.items(id,value) SELECT id,value FROM university.items",
-            "INSERT INTO university.items(id,value) VALUES(1,2) ON CONFLICT(id) DO UPDATE SET value=3",
+            "UPDATE university.items SET (value,label)=(2,'a') WHERE id=1", "INSERT INTO university.items(id,value) SELECT id,value FROM university.items UNION ALL SELECT id,value FROM university.items",
+            "INSERT INTO university.items(id,value) VALUES(1,2) ON CONFLICT((id+1)) DO UPDATE SET value=3",
             "SELECT CAST('now' AS timestamp) FROM university.items", "SET work_mem='1MB'",
             "UPDATE university.items SET label='today' WHERE id=1", "SELECT xmin FROM university.items",
         ):
@@ -53,9 +57,70 @@ class TransactionReplayTests(TestCase):
             with self.subTest(body=body), patch('pqo.transaction_replay.psycopg.connect') as connect, self.assertRaises(ValueError):
                 run_transaction_replay(text, self.settings, 'lab', (self.action,), test_copy_confirmed=True, disposable_databases_confirmed=True)
             connect.assert_not_called()
-        for text in (TEXT.replace('COMMIT','ROLLBACK'), TEXT.replace('BEGIN;', 'BEGIN ISOLATION LEVEL SERIALIZABLE;'), 'BEGIN; SELECT id FROM university.items; COMMIT;'):
+        for text in (TEXT.replace('BEGIN;', 'BEGIN ISOLATION LEVEL UNKNOWN;'), 'BEGIN; SELECT id FROM university.items; COMMIT;'):
             with self.assertRaises(ValueError):
                 prepare_replay(text, self.settings)
+
+    def test_flat_inner_left_and_self_joins_preserve_all_sources_and_keys(self):
+        selects = (
+            'SELECT a.id,b.value FROM university.items a INNER JOIN university.other b ON a.id=b.id',
+            'SELECT a.id,b.value FROM university.items a LEFT OUTER JOIN university.other b ON (a.id=b.id AND b.value=a.value)',
+            'SELECT a.id,b.id FROM university.items a JOIN university.items b ON a.value=b.value',
+            'SELECT items.id,other.value FROM university.items JOIN university.other ON items.id=other.id',
+            'SELECT a.id,c.value FROM university.items a JOIN university.other b ON a.id=b.id LEFT JOIN university.third c ON c.id=b.id AND c.value=a.value',
+            'SELECT "A".id,b.value FROM university.items AS "A" JOIN university.other b ON "A".id=b.id',
+            'SELECT A.id,B.value FROM university.items A JOIN university.other B ON a.id=b.id',
+        )
+        for select in selects:
+            with self.subTest(select=select), patch('pqo.transaction_replay.psycopg.connect') as connect:
+                program = prepare_replay('BEGIN; UPDATE university.items SET value=7 WHERE id=1; '+select+'; COMMIT;', self.settings)
+            connect.assert_not_called()
+            self.assertEqual(program.commands[1].kind, 'select')
+            expected = {('university', 'items')}
+            for table in ('other', 'third'):
+                if 'university.'+table in select:
+                    expected.add(('university', table))
+            self.assertEqual(set(program.tables), expected)
+        composite = prepare_replay('BEGIN; UPDATE university.items SET value=7 WHERE id=1; '+selects[1]+'; COMMIT;', self.settings)
+        self.assertIn('b.value = a.value', composite.commands[1].sql)
+
+    def test_unsupported_join_forms_and_every_source_schema_are_rejected_offline(self):
+        selects = (
+            'SELECT * FROM university.items a CROSS JOIN university.other b',
+            'SELECT * FROM university.items a, university.other b',
+            'SELECT * FROM university.items a RIGHT JOIN university.other b ON a.id=b.id',
+            'SELECT * FROM university.items a FULL JOIN university.other b ON a.id=b.id',
+            'SELECT * FROM university.items a NATURAL JOIN university.other b',
+            'SELECT * FROM university.items a JOIN university.other b USING(id)',
+            'SELECT * FROM university.items a JOIN university.other b ON a.id=b.id OR true',
+            'SELECT * FROM university.items a JOIN university.other b ON a.id>b.id',
+            'SELECT * FROM university.items a JOIN university.other b ON b.id=b.value',
+            'SELECT * FROM university.items a JOIN university.other b ON a.id=unknown.id',
+            'SELECT * FROM university.items a JOIN university.other b ON a.id=c.id JOIN university.third c ON b.id=c.id',
+            'SELECT * FROM university.items a JOIN university.other a ON a.id=a.id',
+            'SELECT * FROM university.items A JOIN university.other a ON A.id=a.id',
+            'SELECT * FROM university.items "A" JOIN university.other b ON a.id=b.id',
+            'SELECT * FROM university.items a JOIN university.other b(x,y) ON a.id=b.x',
+            'SELECT * FROM university.items a JOIN other_schema.items b ON a.id=b.id',
+            'SELECT * FROM university.items a JOIN items b ON a.id=b.id',
+            'SELECT * FROM university.items a JOIN (SELECT id FROM university.other) b ON a.id=b.id',
+            'SELECT * FROM university.items a JOIN LATERAL (SELECT id FROM university.other) b ON a.id=b.id',
+            'UPDATE university.items a SET value=b.value FROM university.other b WHERE a.id=b.id',
+            'DELETE FROM university.items a USING university.other b WHERE a.id=b.id',
+        )
+        for select in selects:
+            text = 'BEGIN; UPDATE university.items SET value=7 WHERE id=1; '+select+'; COMMIT;'
+            with self.subTest(select=select), patch('pqo.transaction_replay.psycopg.connect') as connect, self.assertRaises(ValueError):
+                run_transaction_replay(text, self.settings, 'lab', (self.action,),
+                    test_copy_confirmed=True, disposable_databases_confirmed=True)
+            connect.assert_not_called()
+        for count in (8, 9):
+            joins = ' '.join(f'JOIN university.t{i} t{i} ON a.id=t{i}.id' for i in range(1, count))
+            text = f'BEGIN; UPDATE university.items SET value=7 WHERE id=1; SELECT a.id FROM university.items a {joins}; COMMIT;'
+            if count == 8:
+                self.assertEqual(len(prepare_replay(text,self.settings).tables), 8)
+            else:
+                with self.assertRaises(ValueError): prepare_replay(text,self.settings)
 
     def test_reference_and_permission_guards_never_connect(self):
         for reference, confirmed, disposable in (('source', True,True), ('SOURCE',True,True), ('postgres',True,True),
@@ -100,7 +165,8 @@ class TransactionReplayTests(TestCase):
         def sample(settings,database,program,actions,series,phase,deadline,control):
             return replace(self.sample(phase),database=database)
         with patch('pqo.transaction_replay.ScratchDatabases',return_value=scratch), patch('pqo.transaction_replay.psycopg.connect',return_value=connection) as connect, \
-                patch('pqo.transaction_replay.replay_catalog'), patch('pqo.transaction_replay._sample',side_effect=sample):
+                patch('pqo.transaction_replay.replay_catalog'), patch('pqo.transaction_replay.read_transaction_options',return_value=TransactionOptions('READ COMMITTED',False,False)), \
+                patch('pqo.transaction_replay._sample',side_effect=sample):
             report = run_transaction_replay(TEXT,self.settings,'lab',(self.action,),test_copy_confirmed=True,disposable_databases_confirmed=True)
         self.assertTrue(report.correctness_verified)
         self.assertTrue(report.cleanup_verified)
@@ -120,7 +186,8 @@ class TransactionReplayTests(TestCase):
             connection = MagicMock(); connection.__enter__.return_value=connection
             connection.execute.return_value.fetchone.return_value=(1024,)
             with patch('pqo.transaction_replay.ScratchDatabases',return_value=scratch), patch('pqo.transaction_replay.psycopg.connect',return_value=connection), \
-                    patch('pqo.transaction_replay.replay_catalog'), patch('pqo.transaction_replay._sample',side_effect=outcome,return_value=self.sample()):
+                    patch('pqo.transaction_replay.replay_catalog'), patch('pqo.transaction_replay.read_transaction_options',return_value=TransactionOptions('READ COMMITTED',False,False)), \
+                    patch('pqo.transaction_replay._sample',side_effect=outcome,return_value=self.sample()):
                 report = run_transaction_replay(TEXT,self.settings,'lab',(self.action,),test_copy_confirmed=True,disposable_databases_confirmed=True)
             self.assertFalse(report.correctness_verified)
             self.assertEqual(report.cleanup_verified,cleanup)
@@ -144,8 +211,8 @@ class TransactionReplayTests(TestCase):
         connection = MagicMock()
         connection.execute.return_value.description = None
         connection.execute.return_value.rowcount = 1
-        with patch('pqo.transaction_replay._timeout'):
-            readings, duration = _execute_program(connection,program,self.settings,999999999,AnalysisControl())
+        with patch('pqo.transaction_replay._timeout'),patch('pqo.transaction_replay.read_transaction_options',return_value=TransactionOptions('READ COMMITTED',False,False)):
+            readings, duration, observed = _execute_program(connection,program,self.settings,999999999,AnalysisControl())
         commands = [call.args[0] for call in connection.execute.call_args_list]
         self.assertEqual(commands, ['BEGIN',*(item.sql for item in program.commands),'COMMIT'])
         self.assertEqual(len(readings),3)
@@ -157,6 +224,22 @@ class TransactionReplayTests(TestCase):
         with patch('pqo.transaction_replay._timeout'), self.assertRaises(RuntimeError):
             _execute_program(connection, prepare_replay(TEXT,self.settings), self.settings,99999999,AnalysisControl())
         self.assertEqual(connection.execute.call_args.args[0], 'ROLLBACK')
+
+    def test_mismatching_server_isolation_aborts_before_any_user_command(self):
+        program=prepare_replay(TEXT.replace('BEGIN;','BEGIN ISOLATION LEVEL SERIALIZABLE;'),self.settings)
+        connection=MagicMock()
+        with patch('pqo.transaction_replay._timeout'), \
+                patch('pqo.transaction_replay.read_transaction_options',return_value=TransactionOptions('READ COMMITTED',False,False)),self.assertRaises(RuntimeError):
+            _execute_program(connection,program,self.settings,999999999,AnalysisControl())
+        self.assertEqual([call.args[0] for call in connection.execute.call_args_list],
+            ['BEGIN ISOLATION LEVEL SERIALIZABLE','ROLLBACK'])
+
+    def test_different_runtime_contexts_or_committed_data_after_rollback_are_not_equivalent(self):
+        samples=(self.sample(),self.sample('B'),self.sample('A2'))
+        self.assertEqual(assess_correctness((samples[0],replace(samples[1],transaction_options=TransactionOptions('SERIALIZABLE')),samples[2]),1),
+            (False,False,False))
+        rolled=tuple(replace(sample,ending='rollback') for sample in samples)
+        self.assertFalse(assess_correctness(rolled,1)[2])
 
     def test_cleanup_never_drops_unknown_reused_or_ambiguous_database(self):
         scratch = ScratchDatabases(self.settings)
@@ -203,6 +286,179 @@ class DisposableReplayPostgresTests(TestCase):
             identity = connection.execute('SELECT oid,datdba FROM pg_catalog.pg_database WHERE datname=%s',(self.reference,)).fetchone()
             if identity == self.owner:
                 connection.execute(sql.SQL('DROP DATABASE {}').format(sql.Identifier(self.reference)))
+
+    def test_real_isolation_visibility_and_timeouts_do_not_take_an_early_snapshot(self):
+        from pqo.transaction_replay import _timeout
+        # This database belongs to this test; neither connection targets a user DB.
+        for level in ('READ UNCOMMITTED','READ COMMITTED','REPEATABLE READ','SERIALIZABLE'):
+            with self.subTest(level=level):
+                target=replace(self.settings,dbname=self.reference)
+                with psycopg.connect(**target.connection_kwargs(),autocommit=True) as reader, \
+                        psycopg.connect(**target.connection_kwargs(),autocommit=True) as writer:
+                    writer.execute('UPDATE university.items SET value=1 WHERE id=1')
+                    text=f'BEGIN ISOLATION LEVEL {level}, READ ONLY; SELECT value FROM university.items WHERE id=1; SELECT value FROM university.items WHERE id=1; COMMIT;'
+                    program=prepare_replay(text,self.settings)
+                    stage={'number':0,'written':set()}
+                    def progress(message):
+                        stage['number']=int(message.split(': ')[1].split()[0])
+                    def timeout(connection,deadline,settings):
+                        _timeout(connection,deadline,settings)
+                        number=stage['number']
+                        if number not in stage['written']:
+                            # If timeout used SELECT set_config here, the first
+                            # repeatable-read snapshot would precede this write.
+                            writer.execute('UPDATE university.items SET value=%s WHERE id=1',(17 if number==1 else 23,))
+                            stage['written'].add(number)
+                    with patch('pqo.transaction_replay._timeout',side_effect=timeout):
+                        commands,_,observed=_execute_program(reader,program,self.settings,
+                            __import__('time').monotonic()+30,AnalysisControl(progress=progress))
+                    self.assertEqual(observed,TransactionOptions(level,True,False))
+                    self.assertEqual(commands[0].result_sha256,result_digest([(17,)],False))
+                    expected=23 if level in {'READ COMMITTED','READ UNCOMMITTED'} else 17
+                    self.assertEqual(commands[1].result_sha256,result_digest([(expected,)],False))
+
+    def test_savepoint_stack_and_final_rollback_preserve_every_observed_result(self):
+        body='''SET TRANSACTION NOT DEFERRABLE;
+UPDATE university.items SET value=100 WHERE id=1;
+SAVEPOINT s;
+UPDATE university.items SET value=200 WHERE id=1;
+SELECT value FROM university.items WHERE id=1;
+SAVEPOINT s;
+UPDATE university.items SET value=300 WHERE id=1;
+ROLLBACK TO s;
+SELECT value FROM university.items WHERE id=1;
+RELEASE s;
+ROLLBACK TO s;
+SELECT value FROM university.items WHERE id=1;
+RELEASE s;
+INSERT INTO university.items(id,value) VALUES(5001,10);
+DELETE FROM university.items WHERE id=2;
+SELECT COUNT(*) FROM university.items;'''
+        for ending in ('COMMIT','ROLLBACK'):
+            with self.subTest(ending=ending):
+                text='BEGIN ISOLATION LEVEL SERIALIZABLE, READ WRITE; '+body+ending+';'
+                report=run_transaction_replay(text,self.settings,self.reference,
+                    (IndexAction.create('university','items',('value',)),),series=1,
+                    test_copy_confirmed=True,disposable_databases_confirmed=True)
+                self.assertTrue(report.correctness_verified,report.reasons)
+                self.assertTrue(report.cleanup_verified)
+                for sample in report.samples:
+                    self.assertEqual(sample.transaction_options,TransactionOptions('SERIALIZABLE',False,False))
+                    self.assertEqual(sample.ending,ending.lower())
+                    for number,value in ((5,200),(9,200),(12,100),(16,5000)):
+                        self.assertEqual(sample.commands[number-1].result_sha256,result_digest([(value,)],False))
+                    if ending=='ROLLBACK':self.assertEqual(sample.initial_state,sample.final_state)
+                    else:self.assertNotEqual(sample.initial_state,sample.final_state)
+                with psycopg.connect(**replace(self.settings,dbname=self.reference).connection_kwargs()) as c:
+                    self.assertEqual(c.execute('SELECT value FROM university.items WHERE id=1').fetchone()[0],1)
+
+    def test_readonly_serializable_deferrable_rewrite_keeps_context(self):
+        from pqo.transaction_select_rewrite import generate_transaction_select_rewrites,run_transaction_select_rewrite
+        text='BEGIN READ ONLY; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, DEFERRABLE; SELECT id,value FROM university.items WHERE value=1 OR value=2 ORDER BY id; ROLLBACK;'
+        option=next(o for o in generate_transaction_select_rewrites(text,self.settings) if o.rule_id=='or-equality-to-in')
+        report=run_transaction_select_rewrite(text,self.settings,self.reference,2,option.variant_sql,series=1,
+            test_copy_confirmed=True,disposable_databases_confirmed=True).measurement
+        self.assertTrue(report.correctness_verified,report.reasons)
+        self.assertTrue(report.cleanup_verified)
+        self.assertNotIn('Нет полного смешанного',str(report.recommendation.reasons))
+        for sample in report.samples:
+            self.assertEqual(sample.transaction_options,TransactionOptions('SERIALIZABLE',True,True))
+            self.assertEqual(sample.initial_state,sample.final_state)
+            self.assertEqual(sample.commands[0].kind,'set_transaction')
+
+    def test_reference_isolation_defaults_are_explicitly_applied_to_every_clone(self):
+        with psycopg.connect(**replace(self.settings,dbname='postgres').connection_kwargs(),autocommit=True) as c:
+            c.execute(sql.SQL("ALTER DATABASE {} SET default_transaction_isolation='repeatable read'").format(sql.Identifier(self.reference)))
+        report=run_transaction_replay(TEXT,self.settings,self.reference,(IndexAction.create('university','items',('value',)),),
+            test_copy_confirmed=True,disposable_databases_confirmed=True)
+        self.assertTrue(report.correctness_verified,report.reasons)
+        self.assertTrue(report.cleanup_verified)
+        self.assertTrue(all(sample.transaction_options.isolation_level=='REPEATABLE READ' for sample in report.samples))
+
+    def test_real_serialization_failure_is_not_retried_or_recommended_and_cleans_clones(self):
+        from pqo.transaction_replay import _execute_program as execute
+        text=TEXT.replace('BEGIN;','BEGIN ISOLATION LEVEL REPEATABLE READ;')
+        def conflicting_run(connection,program,settings,deadline,control):
+            def progress(message):
+                control.report(message)
+                if message.startswith('Последовательное выполнение: 2 '):
+                    self.assertTrue(connection.info.dbname.startswith('pqo_replay_'))
+                    with psycopg.connect(**replace(settings,dbname=connection.info.dbname).connection_kwargs(),autocommit=True) as writer:
+                        writer.execute('UPDATE university.items SET value=999 WHERE id=1')
+            return execute(connection,program,settings,deadline,AnalysisControl(progress=progress))
+        with patch('pqo.transaction_replay._execute_program',side_effect=conflicting_run) as run:
+            report=run_transaction_replay(text,self.settings,self.reference,(IndexAction.create('university','items',('value',)),),
+                test_copy_confirmed=True,disposable_databases_confirmed=True)
+        run.assert_called_once()
+        self.assertEqual(report.status,'error',report.reasons)
+        self.assertTrue(any('40001' in reason for reason in report.reasons))
+        self.assertFalse(report.correctness_verified)
+        self.assertFalse(report.recommendation.recommended)
+        self.assertTrue(report.cleanup_verified)
+
+    def join_fixture(self):
+        with psycopg.connect(**replace(self.settings,dbname=self.reference).connection_kwargs()) as connection:
+            connection.execute('CREATE TABLE university.labels(id integer PRIMARY KEY,label text)')
+            connection.execute('CREATE TABLE university.links(id integer PRIMARY KEY,item_id integer REFERENCES university.items(id),label_id integer REFERENCES university.labels(id))')
+            connection.execute("INSERT INTO university.labels VALUES(1,'alpha'),(2,NULL)")
+            connection.execute('INSERT INTO university.links VALUES(1,1,1),(2,1,1),(3,2,NULL),(4,3,2)')
+        return '''BEGIN;
+UPDATE university.items SET value=700 WHERE id=1 RETURNING id,value;
+SELECT i.id,i.value,g.label FROM university.items i
+JOIN university.links l ON l.item_id=i.id
+LEFT JOIN university.labels g ON g.id=l.label_id
+WHERE i.id=1 OR i.id=2 OR i.id=3 OR i.id=4 ORDER BY i.id,l.id;
+INSERT INTO university.links(id,item_id,label_id) VALUES(5,4,NULL);
+DELETE FROM university.links WHERE id=4;
+SELECT i.id,i.value,g.label FROM university.items i
+JOIN university.links l ON l.item_id=i.id
+LEFT JOIN university.labels g ON g.id=l.label_id
+WHERE i.id<=4 ORDER BY i.id,l.id;
+COMMIT;'''
+
+    def assert_join_results(self, report):
+        self.assertEqual(report.status,'completed',report.reasons)
+        self.assertTrue(report.correctness_verified,report.reasons)
+        self.assertTrue(report.cleanup_verified,report.reasons)
+        for sample in report.samples:
+            self.assertEqual(len(sample.initial_state),3)
+            self.assertNotEqual(sample.initial_state,sample.final_state)
+            self.assertEqual(sample.commands[1].row_count,4)
+            self.assertEqual(sample.commands[1].result_sha256,
+                result_digest([(1,700,'alpha'),(1,700,'alpha'),(2,2,None),(3,3,None)],True))
+            self.assertEqual(sample.commands[4].result_sha256,
+                result_digest([(1,700,'alpha'),(1,700,'alpha'),(2,2,None),(4,4,None)],True))
+        with psycopg.connect(**replace(self.settings,dbname=self.reference).connection_kwargs()) as connection:
+            self.assertEqual(connection.execute('SELECT value FROM university.items WHERE id=1').fetchone()[0],1)
+            self.assertEqual(connection.execute('SELECT id FROM university.links ORDER BY id').fetchall(),[(1,),(2,),(3,),(4,)])
+
+    def test_join_replay_checks_duplicates_nulls_prior_writes_and_all_tables(self):
+        text = self.join_fixture()
+        report = run_transaction_replay(text,self.settings,self.reference,
+            (IndexAction.create('university','links',('item_id',)),),series=2,
+            test_copy_confirmed=True,disposable_databases_confirmed=True)
+        self.assert_join_results(report)
+        self.assertEqual(len(report.samples),6)
+        self.assertEqual(len(report.created_databases),7)
+
+    def test_join_select_rewrite_matches_context_and_rejects_changed_null_semantics(self):
+        from pqo.transaction_select_rewrite import generate_transaction_select_rewrites,run_transaction_select_rewrite
+        text = self.join_fixture()
+        option = next(o for o in generate_transaction_select_rewrites(text,self.settings) if o.rule_id=='or-equality-to-in')
+        self.assertEqual(option.number,2)
+        result = run_transaction_select_rewrite(text,self.settings,self.reference,2,option.variant_sql,
+            test_copy_confirmed=True,disposable_databases_confirmed=True)
+        self.assert_join_results(result.measurement)
+        self.assertFalse(result.measurement.actions)
+        wrong = option.variant_sql.replace('LEFT JOIN','INNER JOIN')
+        report = run_transaction_select_rewrite(text,self.settings,self.reference,2,wrong,series=1,
+            test_copy_confirmed=True,disposable_databases_confirmed=True).measurement
+        self.assertTrue(report.initial_states_equal)
+        self.assertTrue(report.final_states_equal)
+        self.assertFalse(report.results_equal)
+        self.assertFalse(report.correctness_verified)
+        self.assertFalse(report.recommendation.recommended)
+        self.assertTrue(report.cleanup_verified)
 
     def test_real_sequential_replay_uses_same_state_and_removes_copies(self):
         action = IndexAction.create('university','items',('value',))
@@ -288,8 +544,10 @@ class DisposableReplayPostgresTests(TestCase):
         self.assertTrue(report.cleanup_verified)
         self.assertEqual(report.recommendation.status,'inconclusive')
         with psycopg.connect(**replace(self.settings,dbname=self.reference).connection_kwargs()) as connection:
-            connection.execute('ALTER TABLE university.items ALTER COLUMN value SET DEFAULT 7')
-        declined = run_transaction_replay(TEXT,self.settings,self.reference,(action,),test_copy_confirmed=True,disposable_databases_confirmed=True)
+            connection.execute('ALTER TABLE university.items ALTER COLUMN value SET DEFAULT (random()*100)::integer')
+        active = TEXT.replace('UPDATE university.items SET value=2 WHERE id=1 RETURNING id,value',
+            'INSERT INTO university.items(id) VALUES(5001)')
+        declined = run_transaction_replay(active,self.settings,self.reference,(action,),test_copy_confirmed=True,disposable_databases_confirmed=True)
         self.assertEqual(declined.status,'declined',declined.reasons)
         self.assertFalse(declined.created_databases)
         self.assertTrue(declined.cleanup_verified)
@@ -350,7 +608,6 @@ class DisposableReplayPostgresTests(TestCase):
     def test_catalog_features_are_refused_before_creating_any_scratch_database(self):
         cases=(
             ('ALTER TABLE university.items ENABLE ROW LEVEL SECURITY','ALTER TABLE university.items DISABLE ROW LEVEL SECURITY'),
-            ('ALTER TABLE university.items ALTER COLUMN value SET DEFAULT 9','ALTER TABLE university.items ALTER COLUMN value DROP DEFAULT'),
             ('CREATE SEQUENCE university.unsupported_sequence','DROP SEQUENCE university.unsupported_sequence'),
             ('CREATE INDEX unsupported_partial ON university.items(value) WHERE value>1','DROP INDEX university.unsupported_partial'),
             ('ALTER TABLE university.items ADD CONSTRAINT unsupported_check CHECK(value>=0)','ALTER TABLE university.items DROP CONSTRAINT unsupported_check'),

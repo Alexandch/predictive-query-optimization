@@ -33,7 +33,7 @@ _WARNINGS = {
     "Unresolved parameters require explicit values before planning":
         "Перед получением плана подставьте конкретные значения параметров.",
 }
-_STATUSES = {"planned": "план получен", "blocked": "не поддерживается",
+_STATUSES = {"planned": "план получен", "blocked": "не поддерживается", "control": "управление",
              "error": "ошибка плана", "budget_exhausted": "лимит времени"}
 _INDEX_STATUSES = {"candidate": "к проверке", "covered": "уже покрыт",
                    "covering_review": "только INCLUDE — спорно"}
@@ -65,7 +65,7 @@ class TransactionTabMixin(TransactionWorkspaceMixin, TransactionTrialTabMixin):
         self.transaction_editor.setPlainText("BEGIN;\nSELECT 1;\nCOMMIT;")
         actions = QHBoxLayout()
         self.transaction_load_button = QPushButton("Открыть SQL-файл")
-        self.transaction_inspect_button = QPushButton("Разобрать без подключения к БД")
+        self.transaction_inspect_button = QPushButton("Разобрать транзакцию")
         self.transaction_inspect_button.setObjectName("primaryButton")
         self.transaction_plan_button = QPushButton("Получить оценочные планы")
         self.transaction_cancel_button = QPushButton("Отменить анализ транзакции")
@@ -173,6 +173,7 @@ class TransactionTabMixin(TransactionWorkspaceMixin, TransactionTrialTabMixin):
         self._sync_transaction_parameter_controls()
         self._sync_transaction_replay_controls()
         self._sync_transaction_select_rewrite_controls()
+        if hasattr(self,'workflow_status'):self._refresh_workflow()
 
     def _invalidate_transaction(self):
         self.transaction_inspection = None
@@ -234,7 +235,7 @@ class TransactionTabMixin(TransactionWorkspaceMixin, TransactionTrialTabMixin):
             writes = sum(item.changes_data for item in inspection.statements)
             self.transaction_status.setText(
                 f"Разобрано команд: {len(inspection.statements)}; с записью: {writes}; "
-                f"завершение: {inspection.ending.upper()}. Ничего не выполнялось. "
+                f"завершение: {inspection.ending.upper()}. {inspection.effective_options.description} Ничего не выполнялось. "
                 + (self._transaction_parameter_problem if self._transaction_parameter_problem else
                     "Заполните и примените типы/значения во вкладке «Параметры SQL»." if self._transaction_parameter_slots
                     else "Теперь можно отдельно получить оценочные планы.")
@@ -362,7 +363,7 @@ class TransactionTabMixin(TransactionWorkspaceMixin, TransactionTrialTabMixin):
         if inspection is None or not 0 <= row < len(inspection.statements):
             return
         item = inspection.statements[row]
-        lines = [f"Команда {item.number}: {item.kind.upper()}", item.sql, "", "Замечания:"]
+        lines = [f"Команда {item.number}: {item.kind.upper()}", inspection.effective_options.description, item.sql, "", "Замечания:"]
         lines.extend("Параметры этой команды применены явно; план относится к указанным значениям."
             if warning == "Unresolved parameters require explicit values before planning" and self._transaction_binding is not None
             else _WARNINGS.get(warning, warning) for warning in item.warnings)
