@@ -302,11 +302,16 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             status = {'recommended':'Замена рекомендована для измеренной транзакции',
                 'not_recommended':'Замена не дала надёжного общего выигрыша',
                 'inconclusive':'Недостаточно надёжных данных для рекомендации'}[report.recommendation.status]
+            if report.status == 'completed' and not report.results_equal:
+                status = 'Замена отклонена: результаты команд в транзакции различаются'
+            elif report.status == 'completed' and not report.final_states_equal:
+                status = 'Замена отклонена: итоговые данные различаются'
             status += f'. Результаты/данные: {"совпали" if report.correctness_verified else "НЕ подтверждены"}; удаление копий {"подтверждено" if report.cleanup_verified else "НЕ подтверждено"}.'
             self.transaction_select_rewrite_status.setText(status)
             self.transaction_status.setText(status)
             self.transaction_views.setCurrentIndex(9)
             self._show_transaction_select_rewrite()
+        self.statusBar().showMessage(self.transaction_status.text())
         self._set_query_actions_enabled(True)
 
     def _transaction_select_rewrite_failed(self,message):
@@ -315,6 +320,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         message = ('Локальная подготовка не завершена; БД не подключалась. ' if phase=='generate' else
             'Проверка не завершена; удаление одноразовых БД НЕ считается подтверждённым. ') + message
         self.transaction_select_rewrite_status.setText(message); self.transaction_status.setText(message)
+        self.statusBar().showMessage(message)
         self._set_query_actions_enabled(True)
 
     def _show_transaction_select_rewrite(self):

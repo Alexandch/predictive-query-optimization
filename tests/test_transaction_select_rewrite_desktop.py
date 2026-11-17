@@ -118,6 +118,23 @@ class TransactionSelectRewriteDesktopTests(TestCase):
             self.assertTrue(window.analyze_button.isEnabled())
         finally: window.close()
 
+    def test_transaction_result_replaces_the_individual_select_success_message(self):
+        window=MainWindow()
+        try:
+            self.prepare(window)
+            snapshot,prepared,result=self.result(window)
+            window.statusBar().showMessage('Найдено и измерено безопасное переписывание SQL')
+            report=replace(result.measurement,results_equal=False,correctness_verified=False)
+            report=replace(report,recommendation=assess_mixed_replay(report,report.policy,
+                expected_request_digest=report.request_digest,mode='rewrite'))
+            result=replace(result,measurement=report)
+            window._transaction_select_rewrite_ready((snapshot,'lab',2,window._select_rewrite_policy(),prepared,result))
+            self.assertIn('отклонена',window.transaction_select_rewrite_status.text())
+            self.assertIn('различаются',window.transaction_select_rewrite_status.text())
+            self.assertEqual(window.statusBar().currentMessage(),window.transaction_select_rewrite_status.text())
+            self.assertEqual(window.transaction_editor.toPlainText(),TEXT)
+        finally:window.close()
+
     def test_source_settings_parameters_variant_and_thresholds_invalidate_results(self):
         for change in ('source','host','parameter','variant','reference','series','gain','percent'):
             window=MainWindow()

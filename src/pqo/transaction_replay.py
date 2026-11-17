@@ -169,7 +169,11 @@ class ScratchDatabases:
             return True
         try:
             with psycopg.connect(**_kwargs(self.settings, 'postgres'), autocommit=True) as connection:
-                connection.execute("SET statement_timeout='3s'")
+                # DROP can wait for a checkpoint even after our last session
+                # has closed. Give cleanup the same bounded DDL budget as
+                # CREATE; a short query/measurement timeout must not strand
+                # our own database. Identity checks and no-FORCE still apply.
+                connection.execute("SET statement_timeout='30s'")
                 identity = connection.execute('SELECT oid,datdba FROM pg_catalog.pg_database WHERE datname=%s', (name,)).fetchone()
                 if identity is None:
                     self.removed.add(name)

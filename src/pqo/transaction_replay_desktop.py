@@ -242,6 +242,7 @@ class TransactionReplayTabMixin(TransactionSelectRewriteTabMixin):
             self.transaction_status.setText(status)
             self.transaction_views.setCurrentIndex(8)
             self._show_transaction_replay()
+        self.statusBar().showMessage(self.transaction_status.text())
         self._set_query_actions_enabled(True)
 
     def _transaction_replay_failed(self,message):

@@ -287,6 +287,39 @@ class DisposableReplayPostgresTests(TestCase):
             if identity == self.owner:
                 connection.execute(sql.SQL('DROP DATABASE {}').format(sql.Identifier(self.reference)))
 
+    def test_cleanup_waits_for_server_beyond_the_old_three_second_limit(self):
+        scratch = ScratchDatabases(self.settings)
+        self.addCleanup(scratch.finish)
+        name = scratch.create(self.reference, enabled=True,
+            deadline=__import__('time').monotonic()+30, control=AnalysisControl())
+        scratch.settings = replace(self.settings, statement_timeout_ms=200)
+        connect = psycopg.connect
+
+        class DelayedCleanupConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return self.connection.__exit__(*args)
+
+            def execute(self, query, *args, **kwargs):
+                rendered = query.as_string(self.connection) if isinstance(query, sql.Composable) else query
+                if rendered.startswith('DROP DATABASE '):
+                    # Deterministic server wait on the actual cleanup session.
+                    # The old 3 s budget cancels this; no query timeout from the
+                    # measured workload may strand the owned scratch database.
+                    self.connection.execute('SELECT pg_catalog.pg_sleep(3.2)')
+                return self.connection.execute(query, *args, **kwargs)
+
+        with patch('pqo.transaction_replay.psycopg.connect',
+                side_effect=lambda **kwargs: DelayedCleanupConnection(connect(**kwargs))):
+            self.assertTrue(scratch.remove(name))
+        with connect(**replace(self.settings, dbname='postgres').connection_kwargs()) as connection:
+            self.assertFalse(connection.execute('SELECT 1 FROM pg_database WHERE datname=%s', (name,)).fetchone())
+
     def test_real_isolation_visibility_and_timeouts_do_not_take_an_early_snapshot(self):
         from pqo.transaction_replay import _timeout
         # This database belongs to this test; neither connection targets a user DB.
