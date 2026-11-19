@@ -108,7 +108,7 @@ def _evidence_problem(report, mode):
         return 'Полное выполнение, равенство результатов/данных и удаление копий не подтверждены.'
     samples = report.samples
     if (not samples or type(report.requested_series) is not int or not 1 <= report.requested_series <= 3
-            or mode == 'indexes' and not 1 <= len(report.actions) <= 2
+            or mode in {'indexes','combined'} and not 1 <= len(report.actions) <= 2
             or mode == 'rewrite' and bool(report.actions)
             or len(set(report.actions)) != len(report.actions)
             or any(not isinstance(action,IndexAction) or action.kind is not IndexActionKind.CREATE for action in report.actions)
@@ -128,7 +128,7 @@ def _evidence_problem(report, mode):
                 or not _finite(sample.index_build_ms) or sample.index_build_ms < 0
                 or type(sample.index_size_bytes) is not int or sample.index_size_bytes < 0
                 or type(sample.index_final_size_bytes) is not int or sample.index_final_size_bytes < 0
-                or mode == 'indexes' and sample.phase == 'B' and (sample.index_size_bytes <= 0 or sample.index_final_size_bytes <= 0)
+                or mode in {'indexes','combined'} and sample.phase == 'B' and (sample.index_size_bytes <= 0 or sample.index_final_size_bytes <= 0)
                 or mode == 'rewrite' and any((sample.index_size_bytes,sample.index_final_size_bytes,sample.index_build_ms))
                 or sample.phase != 'B' and any((sample.index_size_bytes, sample.index_final_size_bytes, sample.index_build_ms))):
             return 'Невалидные времена/размеры индексов; пропуски не заменяются нулями.'
@@ -164,7 +164,7 @@ def assess_mixed_replay(report, policy, *, expected_request_digest, mode='indexe
     empty = lambda reason: MixedRecommendation('inconclusive', policy, report.request_digest, (), (), None, None, (reason,))
     if not isinstance(policy, MixedReplayPolicy):
         raise ValueError('Нужна политика, зафиксированная до выполнения.')
-    if mode not in {'indexes','rewrite'}:
+    if mode not in {'indexes','rewrite','combined'}:
         raise ValueError('Неизвестный режим измеренной нагрузки.')
     if not _digest(report.request_digest) or report.request_digest != expected_request_digest or report.policy != policy:
         return empty('Замеры не связаны с текущими SQL/подключением/эталоном/индексами/политикой. Нужен новый прогон.')

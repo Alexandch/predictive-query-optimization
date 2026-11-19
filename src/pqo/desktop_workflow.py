@@ -252,7 +252,11 @@ class DesktopWorkflowMixin:
     def _workflow_open_result(self):
         self._workflow_open_tab(1)
         self.transaction_views.setCurrentIndex(
-            9 if self.transaction_select_rewrite_report else 8
+            10
+            if self.transaction_optimization_report
+            else 9
+            if self.transaction_select_rewrite_report
+            else 8
         )
         self._transaction_reveal_analysis()
 
@@ -359,7 +363,9 @@ class DesktopWorkflowMixin:
         self.workflow_result_button.setEnabled(
             not busy
             and bool(
-                self.transaction_replay_report or self.transaction_select_rewrite_report
+                self.transaction_optimization_report
+                or self.transaction_replay_report
+                or self.transaction_select_rewrite_report
             )
         )
         if lab:
@@ -510,10 +516,12 @@ class DesktopWorkflowMixin:
         self.transaction_replay_reference.setText(reference)
         self.transaction_select_rewrite_reference.setText(reference)
         self.transaction_copy_edit.setText(reference)
+        self.transaction_optimization_reference.setText(reference)
         # Real replay remains an explicit action with its normal confirmation.
         self.transaction_replay_confirm.setChecked(False)
         self.transaction_select_rewrite_confirm.setChecked(False)
         self.transaction_copy_check.setChecked(False)
+        self.transaction_optimization_confirm.setChecked(False)
 
     def _workflow_use_profile(self, profile_id):
         profile = next(

@@ -134,11 +134,83 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     )
                     state["phase"] = "transaction"
                     return
-                result = window.transaction_select_rewrite_report
-                assert result is not None, (
-                    window.transaction_select_rewrite_status.text()
-                )
-                report = result.measurement
+                if phase == "optimization-plans":
+                    assert window.transaction_plan_report is not None
+                    window.transaction_index_button.click()
+                    state["phase"] = "optimization-indexes"
+                    return
+                if phase == "optimization-indexes":
+                    assert window.transaction_index_report is not None
+                    from PyQt6.QtCore import Qt
+
+                    row = next(
+                        i
+                        for i, x in enumerate(
+                            window.transaction_index_report.candidates
+                        )
+                        if x.status != "covered"
+                        and x.action.table_name == "incoming"
+                        and x.action.key_columns == ("warehouse_id",)
+                        and "quantity" in x.action.include_columns
+                    )
+                    window.transaction_index_table.item(row, 0).setCheckState(
+                        Qt.CheckState.Checked
+                    )
+                    window.transaction_select_rewrite_generate.click()
+                    state["phase"] = "optimization-options"
+                    return
+                if phase == "optimization-options":
+                    row = next(
+                        i
+                        for i, x in enumerate(
+                            window._transaction_select_rewrite_options
+                        )
+                        if x.number == 7 and x.rule_id == "manual"
+                    )
+                    window.transaction_select_rewrite_choice.setCurrentIndex(row)
+                    window.transaction_select_rewrite_variant.setPlainText(
+                        state["variant"]
+                    )
+                    window.transaction_optimization_confirm.setChecked(True)
+                    window.transaction_views.setCurrentIndex(10)
+                    window.transaction_optimization_button.click()
+                    assert window._transaction_optimization_active, (
+                        window.transaction_optimization_status.text()
+                    )
+                    state["phase"] = "optimization-run"
+                    return
+                if phase == "optimization-run":
+                    optimization = window.transaction_optimization_report
+                    assert optimization is not None, (
+                        window.transaction_optimization_status.text()
+                    )
+                    assert (
+                        optimization.comparable
+                        and optimization.cleanup_verified
+                        and len(optimization.observations) == 14
+                    )
+                    assert len(optimization.created_databases) == 15 and all(
+                        v.measurement.correctness_verified
+                        for v in optimization.variants
+                    )
+                    report = state["rewrite_measurement"]
+                    expected = report.samples[0]
+                    for observation in optimization.observations:
+                        sample = observation.sample
+                        assert (
+                            sample.final_state == expected.final_state
+                            and sample.final_sequences == expected.final_sequences
+                        )
+                        assert [x.result_sha256 for x in sample.commands] == [
+                            x.result_sha256 for x in expected.commands
+                        ]
+                    state["optimization"] = asdict(optimization)
+                else:
+                    result = window.transaction_select_rewrite_report
+                    assert result is not None, (
+                        window.transaction_select_rewrite_status.text()
+                    )
+                    report = result.measurement
                 assert report.correctness_verified and report.cleanup_verified
                 assert len(report.samples) == 6 and len(report.created_databases) == 7
                 assert report.reference_database == name + "_base"
@@ -147,6 +219,17 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     window._service_database_settings() == service
                     and window.xgb_model_edit.text() == model
                 )
+                if (
+                    os.getenv("PQO_SMOKE_OPTIMIZATION") == "1"
+                    and phase == "transaction"
+                ):
+                    state["rewrite_measurement"] = report
+                    state["variant"] = (
+                        window.transaction_select_rewrite_variant.toPlainText()
+                    )
+                    window.transaction_plan_button.click()
+                    state["phase"] = "optimization-plans"
+                    return
                 application.processEvents()
                 window.grab().save(str(artifacts / "workflow-transaction-result.png"))
                 window._workflow_show_home()
@@ -158,6 +241,8 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     "measurement": asdict(report),
                     "source_unchanged_by_workflow": True,
                 }
+                if "optimization" in state:
+                    payload["optimization"] = state["optimization"]
                 finish(
                     0,
                     "OK: real copy from source, baseline + working DB, individual SELECT comparison, "
@@ -178,7 +263,7 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
         timer.start(100)
         # Cooperative cancellation; never hard-exit while a DB worker runs.
         QTimer.singleShot(
-            310000,
+            910000 if os.getenv("PQO_SMOKE_OPTIMIZATION") == "1" else 310000,
             lambda: (
                 window._workflow_copy_control.cancel()
                 if window._workflow_copy_control

@@ -140,6 +140,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             return False
 
     def _clear_transaction_select_rewrite_result(self,*_):
+        if hasattr(self,'transaction_optimization_table'):self._clear_transaction_optimization()
         if not hasattr(self,'transaction_select_rewrite_page'): return
         had_result = self.transaction_select_rewrite_report is not None
         self.transaction_select_rewrite_report = None

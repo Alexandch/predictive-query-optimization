@@ -116,7 +116,7 @@ def expected_results(domain, kind):
     }
 
 
-def gui_worker(output, schema, manifest):
+def gui_worker(output, schema, manifest, matrix=False):
     # Environment/profile are isolated by the parent before importing the GUI.
     from PyQt6.QtCore import Qt, QObject, pyqtSignal
     from PyQt6.QtGui import QFont, QFontDatabase
@@ -289,6 +289,92 @@ def gui_worker(output, schema, manifest):
         assert inventory(working) == before
         snapshot("individual-index")
         index_text = d.index_sql()
+        if matrix:
+            rewrite_commands = inspect_transaction(d.rewrite_sql()).statements
+            number = len(inspect_transaction(index_text).statements) + 1
+            hybrid = index_text.replace(
+                "COMMIT;",
+                rewrite_commands[1].sql
+                + ";\n"
+                + rewrite_commands[2].sql
+                + ";\nCOMMIT;",
+            )
+            (output / "combined-transaction.sql").write_text(hybrid, encoding="utf-8")
+            prepare_index(hybrid)
+            click(
+                w.transaction_select_rewrite_generate,
+                "prepare SELECT for four-way comparison",
+            )
+            choice = next(
+                i
+                for i, x in enumerate(w._transaction_select_rewrite_options)
+                if x.number == number and x.rule_id == "subquery-order-without-limit"
+            )
+            w.transaction_select_rewrite_choice.setCurrentIndex(choice)
+            w.transaction_optimization_confirm.setChecked(True)
+            w.transaction_views.setCurrentIndex(10)
+            click(
+                w.transaction_optimization_button, "four-way transaction optimization"
+            )
+            report = w.transaction_optimization_report
+            assert report is not None, w.transaction_optimization_status.text()
+            save(output / "matrix.json", asdict(report))
+            assert (
+                report.status == "completed"
+                and report.comparable
+                and report.cleanup_verified
+            )
+            assert (
+                len(report.observations) == 14 and len(report.created_databases) == 15
+            )
+            assert all(v.measurement.correctness_verified for v in report.variants)
+            expected = {
+                **expected_results(d, "index"),
+                number: expected_results(d, "rewrite")[2],
+                number + 1: expected_results(d, "rewrite")[3],
+            }
+            for observation in report.observations:
+                assert {
+                    s.table: s.sha256 for s in observation.sample.final_state
+                } == expected_state
+                for command, digest in expected.items():
+                    assert (
+                        observation.sample.commands[command - 1].result_sha256 == digest
+                    )
+            with psycopg.connect(
+                **replace(source, dbname="postgres").connection_kwargs()
+            ) as c:
+                assert not c.execute(
+                    "SELECT datname FROM pg_database WHERE datname=ANY(%s)",
+                    (list(report.created_databases),),
+                ).fetchall()
+            assert w.transaction_editor.toPlainText() == hybrid
+            assert (
+                inventory(source)
+                == inventory(working)
+                == inventory(reference)
+                == before
+            )
+            assert (
+                w._service_database_settings() == service
+                and w.xgb_model_edit.text() == model
+            )
+            assert w.transaction_optimization_table.rowCount() == 4
+            snapshot("four-way-result")
+            w.resize(980, 720)
+            application.processEvents()
+            snapshot("four-way-small")
+            save(
+                output / "worker-result.json",
+                {
+                    "status": "passed",
+                    "mode": "four-way",
+                    "decision": report.decision,
+                    "best_variant": report.best_variant,
+                    "stand_unchanged": True,
+                },
+            )
+            return 0
         (output / "index-transaction.sql").write_text(index_text, encoding="utf-8")
         prepare_index(index_text)
         click(w.transaction_replay_button, "whole transaction with index")
@@ -437,6 +523,11 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--confirm-local-laboratory", action="store_true")
     parser.add_argument(
+        "--matrix",
+        action="store_true",
+        help="Check four variants against one frozen snapshot",
+    )
+    parser.add_argument(
         "--domain",
         choices=tuple(DOMAINS_BY_SCHEMA),
         action="append",
@@ -450,7 +541,9 @@ def main():
     if args.worker:
         if not args.confirm_local_laboratory or not args.manifest:
             parser.error("Worker needs owned fixture confirmation")
-        return gui_worker(args.output.resolve(), args.worker, args.manifest)
+        return gui_worker(
+            args.output.resolve(), args.worker, args.manifest, args.matrix
+        )
     if not args.confirm_local_laboratory:
         parser.error("Explicit local laboratory confirmation required")
     settings = DatabaseSettings.from_env()
@@ -495,7 +588,8 @@ def main():
                             "--manifest",
                             str(fixture.manifest),
                             "--confirm-local-laboratory",
-                        ],
+                        ]
+                        + (["--matrix"] if args.matrix else []),
                         cwd=ROOT,
                         env=env,
                         stdout=log,
