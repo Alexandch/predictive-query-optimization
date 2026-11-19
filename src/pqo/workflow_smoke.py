@@ -35,6 +35,8 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
             )
         service = window._service_database_settings()
         model = window.xgb_model_edit.text()
+        joined_dml = os.getenv('PQO_SMOKE_JOINED_DML') == '1'
+        select_number = 8 if joined_dml else 7
         window.resize(1180, 760)
         window.show()
         application.processEvents()
@@ -90,7 +92,8 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     window.workflow_transaction_button.click()
                     text = (
                         resources
-                        / "examples/transactions/retail-insert-select-savepoints.sql"
+                        / ('examples/transactions/retail-joined-dml-savepoints.sql' if joined_dml
+                            else 'examples/transactions/retail-insert-select-savepoints.sql')
                     ).read_text(encoding="utf-8-sig")
                     state["text"] = text
                     window.transaction_editor.setPlainText(text)
@@ -101,9 +104,9 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     assert window.transaction_inspection is not None, (
                         window.transaction_status.text()
                     )
-                    window.transaction_table.setCurrentCell(6, 0)
+                    window.transaction_table.setCurrentCell(select_number - 1, 0)
                     window.workflow_send_select_button.click()
-                    assert window._workflow_select_link[3] == 7
+                    assert window._workflow_select_link[3] == select_number
                     candidate = next(
                         x
                         for x in generate_sql_rewrites(window.sql_editor.toPlainText())
@@ -165,7 +168,7 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                         for i, x in enumerate(
                             window._transaction_select_rewrite_options
                         )
-                        if x.number == 7 and x.rule_id == "manual"
+                        if x.number == select_number and x.rule_id == "manual"
                     )
                     window.transaction_select_rewrite_choice.setCurrentIndex(row)
                     window.transaction_select_rewrite_variant.setPlainText(
@@ -240,6 +243,7 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     "stand": state["stand"],
                     "measurement": asdict(report),
                     "source_unchanged_by_workflow": True,
+                    "joined_dml": joined_dml,
                 }
                 if "optimization" in state:
                     payload["optimization"] = state["optimization"]

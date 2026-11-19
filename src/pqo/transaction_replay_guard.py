@@ -9,6 +9,7 @@ from .transaction_inspection import inspect_transaction, render_transaction_stat
 from .transaction_context import CONTROL_KINDS, TransactionOptions, parse_transaction_control
 from .transaction_defaults import ColumnDefault, ReplaySequence, is_default, load_sequences, validate_defaults
 from .transaction_upsert import validate_upsert, validate_arbiters, conflict_assignments
+from .transaction_joined_dml import joined_dml_sources, validate_joined_dml_catalog
 
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -150,6 +151,7 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
         if type(tree) not in (exp.Select, exp.Insert, exp.Update, exp.Delete):
             raise ValueError(f'Команда {item.number}: неподдерживаемый корень SQL.')
         conflict_action=validate_upsert(tree)
+        joined_write = joined_dml_sources(tree)
         insert_select=tree.expression if isinstance(tree,exp.Insert) and type(tree.expression) is exp.Select else None
         if insert_select is not None:
             source=insert_select.args.get('from_')
@@ -231,9 +233,9 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
                 except ValueError as exc:
                     raise ValueError('Дата/время должны быть явным ISO-литералом.') from exc
         found = list(tree.find_all(exp.Table))
-        maximum=9 if insert_select is not None else 8 if isinstance(tree,exp.Select) else 1
+        maximum=9 if insert_select is not None else 8 if isinstance(tree,exp.Select) or joined_write else 1
         if not 1 <= len(found) <= maximum:
-            raise ValueError('SELECT: до 8 источников; INSERT SELECT: одна цель и до 8 источников; другая запись — одна таблица.')
+            raise ValueError('SELECT: до 8 источников; INSERT SELECT: цель и до 8 источников; UPDATE FROM/DELETE USING: цель и до 7 источников.')
         for table in found:
             if table.catalog or table.db not in settings.allowed_schemas or not isinstance(table.this, exp.Identifier):
                 raise ValueError('Каждая таблица должна иметь явную разрешённую схему.')
@@ -253,8 +255,8 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
             raise ValueError('SELECT с LIMIT требует явного ORDER BY; несовпадения при равных ключах тоже отклоняются.')
         # Unknown truthy root options must never slip through the node allowlist.
         allowed = (selects if isinstance(tree, exp.Select)
-            else {'this', 'expressions', 'where', 'returning'} if isinstance(tree, exp.Update)
-            else {'this', 'where', 'returning'} if isinstance(tree, exp.Delete)
+            else {'this', 'expressions', 'where', 'returning', 'from_'} if isinstance(tree, exp.Update)
+            else {'this', 'where', 'returning', 'using'} if isinstance(tree, exp.Delete)
             else {'this', 'expression', 'returning', 'default', 'conflict'})
         if any(value and key not in allowed for key, value in tree.args.items()):
             raise ValueError(f'Команда {item.number}: дополнительные параметры пока не поддерживаются.')
@@ -341,4 +343,5 @@ def replay_catalog(connection, settings, program):
             raise ValueError(f'{schema}.{name}: нужен PRIMARY KEY для однозначного снимка состояния.')
         validate_arbiters(connection,oid,schema,name,tuple(col[0] for col in columns),program)
         tables.append(ReplayTable(schema,name,tuple((col[0],col[1]) for col in columns),tuple(row[0] for row in key),sequences[oid],defaults))
+    validate_joined_dml_catalog(connection, program, tables)
     return tuple(tables)

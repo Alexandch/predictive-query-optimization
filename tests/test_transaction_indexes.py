@@ -80,6 +80,20 @@ class TransactionIndexTests(TestCase):
         read = IndexAction.create("university", "enrollments", ("student_id", "registered_at"))
         self.assertEqual(read_statements_for_index(inspection, read, self.metadata), (1, 2))
 
+    def test_joined_dml_source_lookup_is_not_recorded_as_a_source_write(self):
+        report = self.report('''UPDATE university.enrollments e SET status=s.full_name
+            FROM university.students s WHERE e.student_id=s.student_id AND s.campus_id=2;
+            DELETE FROM university.enrollments e USING university.students s
+            WHERE e.student_id=s.student_id AND s.campus_id=2''')
+        source = next(c for c in report.candidates if c.action.table_name == 'students'
+            and c.action.key_columns == ('campus_id',) and not c.action.include_columns)
+        self.assertFalse(source.writes)
+        self.assertFalse(source.read_uses)
+        self.assertEqual([use.statement_number for use in source.write_lookup_uses], [1, 2])
+        target = next(c for c in report.candidates if c.action.table_name == 'enrollments'
+            and c.action.key_columns == ('student_id',) and not c.action.include_columns)
+        self.assertEqual([(w.statement_number, w.kind) for w in target.writes], [(1, 'update'), (2, 'delete')])
+
     def test_read_relevance_excludes_writing_ctes_projection_or_and_ambiguous_binding(self):
         action = IndexAction.create("university", "students", ("campus_id",))
         for body in (

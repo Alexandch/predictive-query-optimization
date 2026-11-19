@@ -95,6 +95,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             'Константные DEFAULT и собственные serial/identity поддерживаются при CACHE 1, NO CYCLE; '
             'ON CONFLICT DO NOTHING/DO UPDATE сохраняется при замене SELECT. '
             'INSERT SELECT с прямыми источниками/JOIN также сохраняется; заменяется самостоятельный SELECT. '
+            'UPDATE FROM/DELETE USING сохраняются при однозначных источниках; '
             'строки и последовательности сверяются отдельно. '
             'CTE/LATERAL, произвольные функции, триггеры, каскады и RLS исключены. '
             'Внешние ORDER BY/LIMIT замены неизменны. Совпадение данных не означает ускорение; '

@@ -120,6 +120,7 @@ def inspect_transaction(sql_text: str) -> TransactionInspection:
         for table in tables:
             relation = table.copy()
             relation.set("alias", None)
+            relation.set("joins", None)
             relation_names.add(relation.sql(dialect="postgres"))
         relations = tuple(sorted(relation_names))
         statements.append(TransactionStatement(number, type(node).__name__.lower(),
