@@ -1,0 +1,26 @@
+{
+  "lock": {
+    "description": "B ждёт строку, изменённую A. WAIT B LOCK подтверждается данными PostgreSQL.",
+    "sql_a": "BEGIN ISOLATION LEVEL READ COMMITTED, READ WRITE;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=1;\nCOMMIT;",
+    "sql_b": "BEGIN ISOLATION LEVEL READ COMMITTED, READ WRITE;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=1;\nCOMMIT;",
+    "schedule": "A 1\nB 1\nA 2\nB 2 &\nWAIT B LOCK\nA END\nWAIT B\nB END"
+  },
+  "deadlock": {
+    "description": "A и B меняют строки в разном порядке. Одна сессия должна получить 40P01; повторов нет.",
+    "sql_a": "BEGIN ISOLATION LEVEL READ COMMITTED, READ WRITE;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=1;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=2;\nCOMMIT;",
+    "sql_b": "BEGIN ISOLATION LEVEL READ COMMITTED, READ WRITE;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=2;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=1;\nCOMMIT;",
+    "schedule": "A 1\nB 1\nA 2\nB 2\nA 3 &\nWAIT A LOCK\nB 3 &\nWAIT A\nWAIT B\nA END\nB END"
+  },
+  "snapshot": {
+    "description": "A читает повторно после COMMIT B. Сравните хеши A/1 и A/2. Затем можно вручную заменить REPEATABLE READ на READ COMMITTED в A и повторить опыт.",
+    "sql_a": "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nCOMMIT;",
+    "sql_b": "BEGIN ISOLATION LEVEL READ COMMITTED, READ WRITE;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=1;\nCOMMIT;",
+    "schedule": "A 1\nB 1\nB 2\nB END\nA 2\nA END"
+  },
+  "serialization": {
+    "description": "Две SERIALIZABLE сессии читают обе строки и изменяют разные. Ожидается 40001; изоляция не понижается.",
+    "sql_a": "BEGIN ISOLATION LEVEL SERIALIZABLE, READ WRITE;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=1;\nCOMMIT;",
+    "sql_b": "BEGIN ISOLATION LEVEL SERIALIZABLE, READ WRITE;\nSELECT student_id,campus_id FROM university.students WHERE student_id IN (1,2) ORDER BY student_id;\nUPDATE university.students SET campus_id=campus_id+1 WHERE student_id=2;\nCOMMIT;",
+    "schedule": "A 1\nB 1\nA 2\nB 2\nA END\nB END"
+  }
+}

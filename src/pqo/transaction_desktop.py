@@ -19,6 +19,7 @@ from .transaction_trial_desktop import TransactionTrialTabMixin
 from .transaction_workspace import TransactionWorkspaceMixin
 from .transaction_optimization_desktop import TransactionOptimizationTabMixin
 from .connections import password_failure
+from .transaction_concurrency_desktop import TransactionConcurrencyMixin
 
 
 _WARNINGS = {
@@ -41,7 +42,7 @@ _INDEX_STATUSES = {"candidate": "к проверке", "covered": "уже пок
                    "covering_review": "только INCLUDE — спорно"}
 
 
-class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceMixin, TransactionTrialTabMixin):
+class TransactionTabMixin(TransactionConcurrencyMixin, TransactionOptimizationTabMixin, TransactionWorkspaceMixin, TransactionTrialTabMixin):
     def _build_transaction_tab(self):
         self.transaction_inspection = None
         self.transaction_plan_report = None
@@ -122,6 +123,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self._build_transaction_replay_controls()
         self._build_transaction_select_rewrite_controls()
         self._build_transaction_optimization_controls()
+        self._build_concurrency_controls()
         self.transaction_views = QTabWidget()
         self.transaction_views.addTab(self.transaction_table, "Команды и планы")
         self.transaction_views.addTab(self.transaction_index_table, "Индексные кандидаты")
@@ -134,6 +136,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self.transaction_views.addTab(self.transaction_replay_page, "Выполнение на копиях")
         self.transaction_views.addTab(self.transaction_select_rewrite_page, "Переписывание SELECT")
         self.transaction_views.addTab(self.transaction_optimization_page, "Итоговая оптимизация")
+        self.transaction_views.addTab(self.transaction_concurrency_page, "Параллельные сессии")
         layout.addLayout(actions)
         self._build_transaction_workspace(layout, index_actions, trial_actions, comparison_actions)
         layout.addWidget(self.transaction_status)
@@ -186,6 +189,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self._sync_transaction_replay_controls()
         self._sync_transaction_select_rewrite_controls()
         self._sync_transaction_optimization_controls()
+        self._sync_concurrency_controls()
         if hasattr(self,'workflow_status'):self._refresh_workflow()
 
     def _invalidate_transaction(self):
@@ -201,6 +205,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self._sync_transaction_controls()
 
     def _invalidate_transaction_plans(self):
+        self._clear_concurrency()
         self._clear_transaction_auth()
         if self.transaction_plan_report is not None:
             self.transaction_plan_report = None
@@ -486,6 +491,8 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
             self._show_transaction_select_rewrite()
         elif index == 10:
             self._show_transaction_optimization()
+        elif index == 11:
+            self._show_concurrency()
 
     def _start_transaction_indexes(self):
         if self._query_operation_active or self._active_workers or self.transaction_plan_report is None:
