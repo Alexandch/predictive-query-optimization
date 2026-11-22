@@ -518,6 +518,8 @@ class DesktopWorkflowMixin:
         self.transaction_copy_edit.setText(reference)
         self.transaction_optimization_reference.setText(reference)
         self.concurrency_reference.setText(reference)
+        self.resource_reference.setText(reference)
+        self.resource_confirm.setChecked(False)
         self.concurrency_confirm.setChecked(False)
         # Real replay remains an explicit action with its normal confirmation.
         self.transaction_replay_confirm.setChecked(False)

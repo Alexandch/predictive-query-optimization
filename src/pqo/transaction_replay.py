@@ -324,11 +324,37 @@ def _execute_program(connection, program, settings, deadline, control):
     return tuple(readings), (time.perf_counter() - started) * 1000, observed
 
 
-def _sample(settings, database, program, actions, series, phase, deadline, control):
+def _build_trial_indexes(connection, actions, settings, deadline, control):
+    build_ms, size, created_indexes = 0., 0, []
+    for action in actions:
+        control.check()
+        _timeout(connection, deadline, settings)
+        index_name = PREFIX + 'idx_' + uuid4().hex
+        ddl = sql.SQL('CREATE INDEX {} ON {}.{} ({})').format(sql.Identifier(index_name),
+            sql.Identifier(action.schema_name), sql.Identifier(action.table_name),
+            sql.SQL(',').join(sql.Identifier(key) for key in action.key_columns))
+        if action.include_columns:
+            ddl += sql.SQL(' INCLUDE ({})').format(sql.SQL(',').join(sql.Identifier(key) for key in action.include_columns))
+        before = time.perf_counter()
+        connection.execute(ddl)
+        build_ms += (time.perf_counter() - before) * 1000
+        created_indexes.append((action.schema_name, index_name))
+        size += connection.execute('SELECT pg_catalog.pg_relation_size(c.oid) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s',
+            (action.schema_name, index_name)).fetchone()[0]
+        if size > 64 * 1024 * 1024:
+            raise ValueError('Пробные индексы превысили лимит 64 МиБ после построения.')
+    return build_ms, size, created_indexes
+
+
+def _sample(settings, database, program, actions, series, phase, deadline, control, *, work_mem_kb=None):
     with psycopg.connect(**_kwargs(settings, database), autocommit=True) as connection, control.monitor(connection):
         for command in ("SET timezone='UTC'", "SET datestyle='ISO, YMD'", "SET standard_conforming_strings=on",
                         "SET jit=off", "SET max_parallel_workers_per_gather=0"):
             connection.execute(command)
+        if work_mem_kb is not None:
+            if type(work_mem_kb) is not int or not 64 <= work_mem_kb <= 65536:
+                raise ValueError('work_mem для диагностики: от 64 до 65536 КиБ.')
+            connection.execute(sql.SQL('SET work_mem={}').format(sql.Literal(f'{work_mem_kb}kB')))
         _timeout(connection, deadline, settings)
         tables = replay_catalog(connection, settings, program)
         metadata = {(table.schema, table.name): {name for name, _ in table.columns} for table in tables}
@@ -340,23 +366,7 @@ def _sample(settings, database, program, actions, series, phase, deadline, contr
         initial_sequences = sequence_digest(connection,tables,settings,deadline,control)
         build_ms, size, created_indexes = 0., 0, []
         if phase == 'B':
-            for action in actions:
-                control.check()
-                _timeout(connection, deadline, settings)
-                index_name = PREFIX + 'idx_' + uuid4().hex
-                ddl = sql.SQL('CREATE INDEX {} ON {}.{} ({})').format(sql.Identifier(index_name),
-                    sql.Identifier(action.schema_name), sql.Identifier(action.table_name),
-                    sql.SQL(',').join(sql.Identifier(key) for key in action.key_columns))
-                if action.include_columns:
-                    ddl += sql.SQL(' INCLUDE ({})').format(sql.SQL(',').join(sql.Identifier(key) for key in action.include_columns))
-                before = time.perf_counter()
-                connection.execute(ddl)
-                build_ms += (time.perf_counter() - before) * 1000
-                created_indexes.append((action.schema_name,index_name))
-                size += connection.execute('SELECT pg_catalog.pg_relation_size(c.oid) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s',
-                    (action.schema_name, index_name)).fetchone()[0]
-                if size > 64 * 1024 * 1024:
-                    raise ValueError('Пробные индексы превысили лимит 64 МиБ после построения.')
+            build_ms, size, created_indexes = _build_trial_indexes(connection, actions, settings, deadline, control)
         commands, elapsed, observed = _execute_program(connection, program, settings, deadline, control)
         control.report(f'{phase}: проверка итоговых данных после {program.ending.upper()}…')
         final = state_digest(connection, tables, settings, deadline, control)

@@ -3515,6 +3515,9 @@ class MainWindow(DesktopWorkflowMixin, DesktopConnectionsMixin, DesktopSessionMi
 
 
 def main() -> int:
+    resources_smoke_test = '--resources-smoke-test' in sys.argv
+    if resources_smoke_test:
+        sys.argv.remove('--resources-smoke-test')
     concurrency_smoke_test = '--concurrency-smoke-test' in sys.argv
     if concurrency_smoke_test:
         sys.argv.remove('--concurrency-smoke-test')
@@ -3572,6 +3575,9 @@ def main() -> int:
     application = QApplication(sys.argv)
     application.setApplicationName("Predictive Query Optimization")
     application.setOrganizationName("PQO")
+    if resources_smoke_test:
+        from .resources_smoke import run_resources_smoke
+        return run_resources_smoke(application, MainWindow, PROJECT_ROOT, ARTIFACT_ROOT)
     if concurrency_smoke_test:
         from .concurrency_smoke import run_concurrency_smoke
         return run_concurrency_smoke(application, MainWindow, PROJECT_ROOT, ARTIFACT_ROOT)
