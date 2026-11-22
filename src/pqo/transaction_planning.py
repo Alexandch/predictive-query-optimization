@@ -54,6 +54,9 @@ def planning_restriction(statement: TransactionStatement, settings: DatabaseSett
     # not a global set of aliases (which would hide unrelated unqualified tables).
     cte_references = set()
     try:
+        if isinstance(node, (exp.Update, exp.Delete, exp.Insert)) and node.args.get('with_'):
+            from .transaction_cte import cte_scope
+            cte_references.update(cte_scope(node).references)
         for scope in traverse_scope(node) or ():
             for source_node, source in scope.selected_sources.values():
                 if isinstance(source_node, exp.Table) and isinstance(source, Scope):

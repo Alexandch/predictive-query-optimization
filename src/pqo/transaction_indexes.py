@@ -133,38 +133,67 @@ def _terms(expression):
 def _accesses(tree, number, metadata, notes):
     """Bind only direct base-table columns in their own SQL scope.
 
-    No CTE/subquery lineage inference or predicate movement. Unknown derived
-    sources prevent resolving unqualified columns. Never merge nested aliases.
+    CTE lineage is limited to exact foldable single-source projections; no
+    subquery inference or SQL predicate movement. Unknown derived sources
+    prevent resolving unqualified columns. Never merge nested aliases.
     """
+    from .transaction_cte import cte_catalog, relation_key
+    from .transaction_defaults import identifier_key
+    catalog = {}
+    if tree.args.get('with_'):
+        try:
+            catalog = cte_catalog(tree, {key: relation.columns for key, relation in metadata.items()})
+        except ValueError:
+            notes.add(f'Команда {number}: происхождение CTE не доказано; внешние условия не переносились на физические таблицы.')
     result = []
     for context in tree.walk():
         if not isinstance(context, (exp.Select, exp.Update, exp.Delete)):
             continue
         tables = [table for table in context.find_all(exp.Table) if _owner(table) is context]
-        bindings = {table.alias_or_name: _relation(table) for table in tables}
-        unknown_source = any(relation not in metadata for relation in bindings.values())
+        bindings, mappings, virtual_aliases = {}, {}, set()
+        unknown_source = False
+        for table in tables:
+            alias_node = table.args.get('alias')
+            alias = identifier_key(alias_node.this if alias_node is not None else table.this) if isinstance(table.this, exp.Identifier) else table.alias_or_name
+            relation = _relation(table)
+            if relation in metadata:
+                mapping = {column: column for column in metadata[relation].columns}
+            else:
+                info = catalog.get(relation_key(table)) if isinstance(table.this, exp.Identifier) else None
+                relation = info.origin if info and info.pushdown else None
+                mapping = ({column: origin[2] for column, origin in info.lineage.items()
+                    if origin is not None and origin[:2] == relation} if relation in metadata else {})
+                virtual_aliases.add(alias)
+                unknown_source |= info is None or len(mapping) != len(info.columns)
+            bindings[alias], mappings[alias] = relation, mapping
+            unknown_source |= relation not in metadata
         unknown_source |= any(_owner(subquery) is context for subquery in context.find_all(exp.Subquery))
         accesses = {alias: _Access(number, relation, [], [], [], [])
                     for alias, relation in bindings.items() if relation in metadata}
-        aliases = {item.alias: item.this for item in context.expressions if isinstance(item, exp.Alias)}
+        aliases = {identifier_key(item.args['alias']): item.this for item in context.expressions if isinstance(item, exp.Alias)}
 
         def resolve(column, order=False):
             if not isinstance(column, exp.Column) or _owner(column) is not context:
                 return None
-            if order and not column.table and column.name in aliases:
-                column = aliases[column.name]
+            name = identifier_key(column.this) if type(column.this) is exp.Identifier else column.name
+            if order and not column.table and name in aliases:
+                column = aliases[name]
                 if not isinstance(column, exp.Column):
                     return None
+                name = identifier_key(column.this) if type(column.this) is exp.Identifier else column.name
             if column.table:
-                access = accesses.get(column.table)
+                alias = identifier_key(column.args['table'])
+                access = accesses.get(alias)
+                if alias in virtual_aliases and column.db:
+                    return None
                 if column.db and (access is None or column.db != access.relation[0]):
                     return None
                 if column.catalog:
                     return None
-                return access if access and column.name in metadata[access.relation].columns else None
+                return (access, mappings[alias][name]) if access and name in mappings[alias] else None
             if unknown_source:
                 return None
-            matches = [item for item in accesses.values() if column.name in metadata[item.relation].columns]
+            matches = [(item, mappings[alias][name]) for alias, item in accesses.items() if name in mappings[alias]]
             if len(matches) != 1:
                 if len(matches) > 1:
                     notes.add(f"Команда {number}: неоднозначный столбец {column.name}; кандидат по нему не строился.")
@@ -172,11 +201,10 @@ def _accesses(tree, number, metadata, notes):
             return matches[0]
 
         def add(column, field, order=False):
-            access = resolve(column, order)
-            if access is None:
+            resolved = resolve(column, order)
+            if resolved is None:
                 return
-            actual = aliases.get(column.name, column) if order and not column.table else column
-            name = actual.name
+            access, name = resolved
             values = getattr(access, field)
             if name not in values:
                 values.append(name)

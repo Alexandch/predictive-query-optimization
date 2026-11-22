@@ -11,9 +11,10 @@ from .transaction_replay_guard import ReplayProgram, prepare_replay
 from .transaction_replay import TransactionReplay, _run_disposable_programs, validate_reference
 from .transaction_mixed_recommendation import MixedReplayPolicy, assess_mixed_replay
 from .sql_rewrite import generate_sql_rewrites
+from .transaction_cte import physical_tables
 
 
-RULES = frozenset({'or-equality-to-in','range-to-between','subquery-order-without-limit','non-aggregate-having-filter'})
+RULES = frozenset({'or-equality-to-in','range-to-between','subquery-order-without-limit','non-aggregate-having-filter','inline-reused-cte'})
 
 
 @dataclass(frozen=True)
@@ -88,7 +89,7 @@ def prepare_select_replacement(text, settings, number, variant_sql):
     # Preserve every SELECT source, including repeated self-join occurrences,
     # not only the transaction-wide union of tables. Result checks still have
     # to detect changes to ON predicates, join types, projections and filters.
-    tables = lambda node: sorted((t.db,t.name) for t in node.find_all(exp.Table))
+    tables = lambda node: sorted((t.db,t.name) for t in physical_tables(node))
     if tables(tree) != tables(current):
         raise ValueError('Физические таблицы выбранного SELECT и число их вхождений не должны меняться.')
     if any(a != b for i,(a,b) in enumerate(zip(original.commands,variant.commands),1) if i != number):
@@ -97,7 +98,7 @@ def prepare_select_replacement(text, settings, number, variant_sql):
 
 
 def generate_transaction_select_rewrites(text, settings, *, control=None):
-    """Local generation only, at most four single rules plus manual option per SELECT."""
+    """Local generation of guarded single rules plus a manual option per SELECT."""
     control = control or AnalysisControl()
     control.check()
     program = _prepare_program(text,settings)
@@ -109,6 +110,10 @@ def generate_transaction_select_rewrites(text, settings, *, control=None):
         for candidate in generate_sql_rewrites(command.sql,max_combined_candidates=0,include_window_materialization=False):
             if candidate.rule_id not in RULES:
                 continue
+            if candidate.rule_id == 'inline-reused-cte':
+                source = parse(command.sql, read='postgres')[0]
+                if any(cte.find(exp.Limit) is not None for cte in source.find_all(exp.CTE)):
+                    continue  # Multiple LIMIT evaluations may pick different tied rows.
             try:
                 prepared = prepare_select_replacement(text,settings,command.number,candidate.sql_text)
             except ValueError:

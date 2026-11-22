@@ -69,7 +69,6 @@ COMMIT;'''
             'SELECT * FROM (SELECT id FROM university.items) q',
             'SELECT (SELECT count(*) FROM university.items) FROM university.items',
             'SELECT count(*) FROM (SELECT * FROM (SELECT id FROM university.items) x) q',
-            'WITH q AS (SELECT id FROM university.items) SELECT count(*) FROM q',
             'SELECT count(*) FROM (SELECT id FROM university.items FOR UPDATE) q',
             'SELECT count(*) FROM (SELECT id FROM university.items OFFSET 2) q',
             'SELECT count(*) FROM (SELECT custom_fn(id) FROM university.items) q',

@@ -54,9 +54,10 @@ def select_projection_width(source,source_columns):
         else:
             count+=1
             continue
-        if not tables or source_columns is None or any((t.db,t.name) not in source_columns for t in tables):
+        from .transaction_cte import relation_key
+        if not tables or source_columns is None or any(relation_key(t) not in source_columns for t in tables):
             raise ValueError('INSERT SELECT: для звёздочки нужны известные столбцы прямых источников.')
-        count+=sum(len(source_columns[t.db,t.name]) for t in tables)
+        count+=sum(len(source_columns[relation_key(t)]) for t in tables)
     if count==0:raise ValueError('INSERT SELECT: список выходных столбцов пуст.')
     return count
 
@@ -83,7 +84,12 @@ def used_defaults(program, schema, table, columns, *, source_columns=None):
             active.update(columns)
             continue
         if type(tree.expression) is exp.Select:
-            count=select_projection_width(tree.expression,source_columns)
+            if tree.args.get('with_'):
+                from .transaction_cte import cte_catalog
+                available = {key: info.columns for key, info in cte_catalog(tree, source_columns).items()}
+            else:
+                available = source_columns
+            count=select_projection_width(tree.expression,available)
             rows=()
         else:
             rows=tree.expression.expressions

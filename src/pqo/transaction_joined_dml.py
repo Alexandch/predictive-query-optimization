@@ -7,6 +7,7 @@ is admitted. DELETE may have many matches unless RETURNING reads a source row.
 from sqlglot import exp, parse_one
 
 from .transaction_defaults import identifier_key, is_default
+from .transaction_cte import cte_catalog, relation_key
 
 
 def _terms(node):
@@ -92,10 +93,12 @@ def validate_joined_dml(tree, columns, unique_keys):
     side: a failed LEFT match does not constrain that side. OR facts, computed
     keys, deferred uniqueness and INCLUDE columns are never uniqueness proof.
     """
+    tree = tree.copy()
+    tree.set('with_', None)
     tables = joined_dml_sources(tree)
     if not tables:
         return
-    bindings = {_alias(table): (identifier_key(table.args['db']), identifier_key(table.this)) for table in tables}
+    bindings = {_alias(table): relation_key(table) for table in tables}
     target = _alias(tables[0])
 
     def resolve(column):
@@ -194,7 +197,7 @@ def validate_joined_dml_catalog(connection, program, tables):
     joined = [tree for tree in trees if joined_dml_sources(tree)]
     if not joined:
         return
-    columns = {(table.schema, table.name): {name for name, _ in table.columns} for table in tables}
+    columns = {(table.schema, table.name): tuple(name for name, _ in table.columns) for table in tables}
     rows = connection.execute('''SELECT n.nspname,c.relname,ARRAY(
         SELECT a.attname FROM unnest(i.indkey) WITH ORDINALITY k(attnum,n)
         JOIN pg_catalog.pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum
@@ -209,4 +212,6 @@ def validate_joined_dml_catalog(connection, program, tables):
         if key:
             keys.setdefault((schema, table), []).append(tuple(key))
     for tree in joined:
-        validate_joined_dml(tree, columns, keys)
+        catalog = cte_catalog(tree, columns, keys)
+        validate_joined_dml(tree, {key: info.columns for key, info in catalog.items()},
+            {key: info.keys for key, info in catalog.items()})

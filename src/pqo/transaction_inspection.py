@@ -114,6 +114,12 @@ def inspect_transaction(sql_text: str) -> TransactionInspection:
         aliases = {cte.alias_or_name for cte in node.find_all(exp.CTE)}
         tables = [table for table in node.find_all(exp.Table)
                   if table.db or table.name not in aliases]
+        if node.args.get('with_'):
+            from .transaction_cte import physical_tables
+            try:
+                tables = list(physical_tables(node))
+            except ValueError:
+                warnings.append('CTE execution requires supported SELECT-only scopes')
         if any(not table.db for table in tables):
             warnings.append("Unqualified relation names require search_path resolution against the database")
         relation_names = set()

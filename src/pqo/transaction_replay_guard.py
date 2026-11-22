@@ -10,6 +10,7 @@ from .transaction_context import CONTROL_KINDS, TransactionOptions, parse_transa
 from .transaction_defaults import ColumnDefault, ReplaySequence, is_default, load_sequences, validate_defaults
 from .transaction_upsert import validate_upsert, validate_arbiters, conflict_assignments
 from .transaction_joined_dml import joined_dml_sources, validate_joined_dml_catalog
+from .transaction_cte import cte_scope, physical_tables, validate_program_ctes
 
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -17,7 +18,7 @@ TYPES = frozenset({'int2', 'int4', 'int8', 'numeric', 'text', 'varchar', 'bool',
 NODES = frozenset(getattr(exp, name) for name in (
     'Select From Table Identifier TableAlias Column Star Where EQ NEQ LT LTE GT GTE And Or Not Paren Is In Between '
     'Literal Null Boolean Neg Add Sub Mul Div Mod Cast DataType DataTypeParam Order Ordered Limit Alias Count Sum Avg '
-    'Min Max Distinct Group Having Join Update Delete Insert Values Tuple Schema Returning'.split()))
+    'Min Max Distinct Group Having Join Update Delete Insert Values Tuple Schema Returning With CTE'.split()))
 _CATALOG_TYPES = {'int2':exp.DataType.Type.SMALLINT,'int4':exp.DataType.Type.INT,'int8':exp.DataType.Type.BIGINT,
     'numeric':exp.DataType.Type.DECIMAL,'text':exp.DataType.Type.TEXT,'varchar':exp.DataType.Type.VARCHAR,
     'bool':exp.DataType.Type.BOOLEAN,'date':exp.DataType.Type.DATE,'timestamp':exp.DataType.Type.TIMESTAMP,
@@ -150,6 +151,14 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
                 datatype.set('kind',None)
         if type(tree) not in (exp.Select, exp.Insert, exp.Update, exp.Delete):
             raise ValueError(f'Команда {item.number}: неподдерживаемый корень SQL.')
+        scope = cte_scope(tree)
+        cte_selects = tuple(definition.this for definition in scope.definitions)
+        if scope.definitions:
+            for select in (node for node in tree.walk() if type(node) is exp.Select):
+                source = select.args.get('from_')
+                if (source is not None and type(source.this) is not exp.Table
+                        or len([t for t in select.find_all(exp.Table) if t.find_ancestor(exp.Select) is select]) > 8):
+                    raise ValueError('CTE: каждый SELECT допускает до 8 прямых источников, без FROM-подвыборок.')
         conflict_action=validate_upsert(tree)
         joined_write = joined_dml_sources(tree)
         insert_select=tree.expression if isinstance(tree,exp.Insert) and type(tree.expression) is exp.Select else None
@@ -198,10 +207,10 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
                 raise ValueError('Специальные временные литералы исключены, в том числе при неявном приведении.')
             if isinstance(node, exp.Column) and node.name.casefold() in {'ctid','xmin','xmax','cmin','cmax','tableoid'}:
                 raise ValueError('Системные физические столбцы не являются переносимым результатом между копиями.')
-            if isinstance(node, exp.Select) and node is not tree and node is not insert_select and not (wrapper_ok and node is inner):
-                raise ValueError('Вложенные SELECT/CTE пока не выполняются.')
+            if isinstance(node, exp.Select) and node is not tree and node is not insert_select and all(node is not allowed for allowed in cte_selects) and not (wrapper_ok and node is inner):
+                raise ValueError('Подзапросы вне определений SELECT CTE пока не выполняются.')
             if isinstance(node,exp.Select):
-                if any(value and key not in selects for key,value in node.args.items()):
+                if any(value and key not in selects and not (node is tree and key == 'with_') for key,value in node.args.items()):
                     raise ValueError('Дополнительные параметры SELECT не поддерживаются.')
                 if node.args.get('limit') and not node.args.get('order'):
                     raise ValueError('SELECT с LIMIT требует явного ORDER BY.')
@@ -234,9 +243,11 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
                     raise ValueError('Дата/время должны быть явным ISO-литералом.') from exc
         found = list(tree.find_all(exp.Table))
         maximum=9 if insert_select is not None else 8 if isinstance(tree,exp.Select) or joined_write else 1
-        if not 1 <= len(found) <= maximum:
+        main_tables = [t for t in found if t.find_ancestor(exp.CTE) is None]
+        if (not scope.definitions and not 1 <= len(found) <= maximum
+                or scope.definitions and not 1 <= len(main_tables) <= maximum):
             raise ValueError('SELECT: до 8 источников; INSERT SELECT: цель и до 8 источников; UPDATE FROM/DELETE USING: цель и до 7 источников.')
-        for table in found:
+        for table in physical_tables(tree):
             if table.catalog or table.db not in settings.allowed_schemas or not isinstance(table.this, exp.Identifier):
                 raise ValueError('Каждая таблица должна иметь явную разрешённую схему.')
             tables.add((table.db, table.name))
@@ -258,7 +269,7 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
             else {'this', 'expressions', 'where', 'returning', 'from_'} if isinstance(tree, exp.Update)
             else {'this', 'where', 'returning', 'using'} if isinstance(tree, exp.Delete)
             else {'this', 'expression', 'returning', 'default', 'conflict'})
-        if any(value and key not in allowed for key, value in tree.args.items()):
+        if any(value and key not in allowed and key != 'with_' for key, value in tree.args.items()):
             raise ValueError(f'Команда {item.number}: дополнительные параметры пока не поддерживаются.')
         commands.append(ReplayCommand(item.number,item.kind,render_transaction_statement(tree),bool(tree.args.get('order'))))
     return ReplayProgram(tuple(commands), tuple(sorted(tables)),inspection.options,inspection.ending)
@@ -293,6 +304,7 @@ def replay_catalog(connection, settings, program):
         WHERE attrelid=ANY(%s) AND attnum>0 AND NOT attisdropped ORDER BY attrelid,attnum''',
         (sorted(oids),)).fetchall()
     source_columns={(row[1],row[2]):tuple(name for oid,name in column_rows if oid==row[0]) for row in relations}
+    validate_program_ctes(program, source_columns)
     tables = []
     for oid, schema, name, kind, persistence, rls, force_rls, partition, descendants, rules, method in relations:
         if (kind != 'r' or persistence != 'p' or method != 'heap' or rls or force_rls or partition or descendants or rules):

@@ -141,7 +141,11 @@ class TransactionIndexTests(TestCase):
         self.assertTrue(all(c.action.key_columns == ("offering_id",) for c in report.candidates))
         cte = self.report("""WITH x AS (SELECT campus_id AS student_id FROM university.students)
             SELECT * FROM x WHERE student_id=1""")
-        self.assertFalse(cte.candidates)  # No guessed CTE lineage or pushed predicates.
+        self.assertTrue(cte.candidates)
+        self.assertTrue(all(c.action.key_columns == ('campus_id',) for c in cte.candidates))
+        materialized = self.report('''WITH x AS MATERIALIZED (SELECT campus_id AS student_id FROM university.students)
+            SELECT * FROM x WHERE student_id=1''')
+        self.assertFalse(materialized.candidates)
 
     def test_or_non_sargable_and_ambiguous_columns_not_combined(self):
         report = self.report("SELECT student_id FROM university.students WHERE campus_id=1 OR student_id=2")
