@@ -14,7 +14,8 @@ from .sql_rewrite import generate_sql_rewrites
 from .transaction_cte import physical_tables
 
 
-RULES = frozenset({'or-equality-to-in','range-to-between','subquery-order-without-limit','non-aggregate-having-filter','inline-reused-cte'})
+RULES = frozenset({'or-equality-to-in','range-to-between','subquery-order-without-limit',
+    'non-aggregate-having-filter','inline-reused-cte','distinct-inner-join-to-exists','in-filter-to-exists'})
 
 
 @dataclass(frozen=True)

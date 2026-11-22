@@ -11,6 +11,7 @@ from .transaction_defaults import ColumnDefault, ReplaySequence, is_default, loa
 from .transaction_upsert import validate_upsert, validate_arbiters, conflict_assignments
 from .transaction_joined_dml import joined_dml_sources, validate_joined_dml_catalog
 from .transaction_cte import cte_scope, physical_tables, validate_program_ctes
+from .transaction_predicates import predicate_selects, direct_sources
 
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -18,7 +19,7 @@ TYPES = frozenset({'int2', 'int4', 'int8', 'numeric', 'text', 'varchar', 'bool',
 NODES = frozenset(getattr(exp, name) for name in (
     'Select From Table Identifier TableAlias Column Star Where EQ NEQ LT LTE GT GTE And Or Not Paren Is In Between '
     'Literal Null Boolean Neg Add Sub Mul Div Mod Cast DataType DataTypeParam Order Ordered Limit Alias Count Sum Avg '
-    'Min Max Distinct Group Having Join Update Delete Insert Values Tuple Schema Returning With CTE'.split()))
+    'Min Max Distinct Group Having Join Update Delete Insert Values Tuple Schema Returning With CTE Exists'.split()))
 _CATALOG_TYPES = {'int2':exp.DataType.Type.SMALLINT,'int4':exp.DataType.Type.INT,'int8':exp.DataType.Type.BIGINT,
     'numeric':exp.DataType.Type.DECIMAL,'text':exp.DataType.Type.TEXT,'varchar':exp.DataType.Type.VARCHAR,
     'bool':exp.DataType.Type.BOOLEAN,'date':exp.DataType.Type.DATE,'timestamp':exp.DataType.Type.TIMESTAMP,
@@ -152,6 +153,9 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
         if type(tree) not in (exp.Select, exp.Insert, exp.Update, exp.Delete):
             raise ValueError(f'Команда {item.number}: неподдерживаемый корень SQL.')
         scope = cte_scope(tree)
+        predicates = predicate_selects(tree)
+        predicate_ids = {id(query) for query in predicates}
+        in_wrappers = {id(query.parent) for query in predicates if type(query.parent) is exp.Subquery}
         cte_selects = tuple(definition.this for definition in scope.definitions)
         if scope.definitions:
             for select in (node for node in tree.walk() if type(node) is exp.Select):
@@ -166,7 +170,7 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
             source=insert_select.args.get('from_')
             if source is not None and type(source.this) is not exp.Table:
                 raise ValueError('INSERT SELECT: источник — прямая таблица или INNER/LEFT JOIN, без подвыборок.')
-            if len(list(insert_select.find_all(exp.Table)))>8:
+            if len(direct_sources(insert_select))>8:
                 raise ValueError('INSERT SELECT: не более 8 прямых источников.')
             for table in insert_select.find_all(exp.Table):
                 alias=table.args.get('alias')
@@ -197,7 +201,7 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
                 if not valid:
                     raise ValueError('DEFAULT допускается только отдельным значением INSERT/UPDATE.')
             conflict_node = isinstance(tree,exp.Insert) and node is tree.args.get('conflict')
-            if type(node) not in NODES and not (wrapper_ok and node is wrapper) and not default_value and not conflict_node and node is not conflict_action:
+            if type(node) not in NODES and not (wrapper_ok and node is wrapper) and id(node) not in in_wrappers and not default_value and not conflict_node and node is not conflict_action:
                 raise ValueError(f'Команда {item.number}: конструкция {type(node).__name__} не разрешена для выполнения.')
             if isinstance(node, exp.Identifier) and not NAME.fullmatch(node.name):
                 raise ValueError('Первый режим требует простых идентификаторов до 63 ASCII-символов.')
@@ -207,12 +211,12 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
                 raise ValueError('Специальные временные литералы исключены, в том числе при неявном приведении.')
             if isinstance(node, exp.Column) and node.name.casefold() in {'ctid','xmin','xmax','cmin','cmax','tableoid'}:
                 raise ValueError('Системные физические столбцы не являются переносимым результатом между копиями.')
-            if isinstance(node, exp.Select) and node is not tree and node is not insert_select and all(node is not allowed for allowed in cte_selects) and not (wrapper_ok and node is inner):
-                raise ValueError('Подзапросы вне определений SELECT CTE пока не выполняются.')
+            if isinstance(node, exp.Select) and node is not tree and node is not insert_select and all(node is not allowed for allowed in cte_selects) and id(node) not in predicate_ids and not (wrapper_ok and node is inner):
+                raise ValueError('Разрешены SELECT CTE и предикатные EXISTS/IN в WHERE/HAVING; скалярные подзапросы исключены.')
             if isinstance(node,exp.Select):
                 if any(value and key not in selects and not (node is tree and key == 'with_') for key,value in node.args.items()):
                     raise ValueError('Дополнительные параметры SELECT не поддерживаются.')
-                if node.args.get('limit') and not node.args.get('order'):
+                if node.args.get('limit') and not node.args.get('order') and type(node.parent) is not exp.Exists:
                     raise ValueError('SELECT с LIMIT требует явного ORDER BY.')
                 _validate_select_joins(node)
             if isinstance(node, exp.Distinct) and node.args.get('on'):
@@ -244,8 +248,11 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
         found = list(tree.find_all(exp.Table))
         maximum=9 if insert_select is not None else 8 if isinstance(tree,exp.Select) or joined_write else 1
         main_tables = [t for t in found if t.find_ancestor(exp.CTE) is None]
-        if (not scope.definitions and not 1 <= len(found) <= maximum
-                or scope.definitions and not 1 <= len(main_tables) <= maximum):
+        if predicates:
+            main_tables = [t for t in main_tables if not any(t.find_ancestor(exp.Select) is query for query in predicates)]
+        counted = main_tables if scope.definitions or predicates else found
+        minimum = 0 if predicates and type(tree) is exp.Select and not tree.args.get('from_') else 1
+        if not minimum <= len(counted) <= maximum:
             raise ValueError('SELECT: до 8 источников; INSERT SELECT: цель и до 8 источников; UPDATE FROM/DELETE USING: цель и до 7 источников.')
         for table in physical_tables(tree):
             if table.catalog or table.db not in settings.allowed_schemas or not isinstance(table.this, exp.Identifier):

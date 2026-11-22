@@ -124,6 +124,8 @@ def validate_joined_dml(tree, columns, unique_keys):
 
     assignments = {id(item.this) for item in tree.expressions} if type(tree) is exp.Update else set()
     for column in tree.find_all(exp.Column):
+        if column.find_ancestor(exp.Select) is not None:
+            continue  # Inner/correlated columns are bound by the predicate catalog guard.
         if is_default(column):
             continue  # The replay guard separately restricts DEFAULT to SET RHS.
         if id(column) in assignments:

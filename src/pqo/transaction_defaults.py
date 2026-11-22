@@ -40,7 +40,8 @@ def is_default(node):
 
 def select_projection_width(source,source_columns):
     """Expand only direct * and alias.* using already guarded flat sources."""
-    sources=list(source.find_all(exp.Table))
+    from .transaction_predicates import direct_sources
+    sources=direct_sources(source)
     bindings={identifier_key(table.args['alias'].this if table.args.get('alias') else table.this):table for table in sources}
     count=0
     for expression in source.expressions:

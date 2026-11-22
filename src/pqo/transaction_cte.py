@@ -177,7 +177,7 @@ def cte_catalog(tree, physical_columns, unique_keys=None):
         if not outputs or any(name is None or not _NAME.fullmatch(name) for name in outputs) or len(set(outputs)) != len(outputs):
             raise ValueError('CTE: выходные имена должны быть простыми и различными; вычислениям задайте AS имя.')
         lineage = {name: item[0].lineage[item[1]] if item else None for name, item in zip(outputs, direct)}
-        has_aggregate = select.find(exp.AggFunc) is not None
+        has_aggregate = any(node.find_ancestor(exp.Select) is select for node in select.find_all(exp.AggFunc))
         single = len(bindings) == 1 and not select.args.get('joins') and not select.args.get('group') and not has_aggregate
         keys = []
         if not sources or has_aggregate and not select.args.get('group'):
@@ -201,3 +201,5 @@ def validate_program_ctes(program, physical_columns):
             tree = parse_one(command.sql, read='postgres')
             if tree.args.get('with_'):
                 cte_catalog(tree, physical_columns)
+            from .transaction_predicates import validate_predicate_columns
+            validate_predicate_columns(tree, physical_columns)

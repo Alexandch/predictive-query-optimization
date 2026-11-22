@@ -108,6 +108,11 @@ def sql_rewrite_rules():
             _rewrite_distinct_join,
         ),
         (
+            "in-filter-to-exists",
+            "Проверить EXISTS вместо положительного IN в фильтре",
+            _rewrite_in_filter,
+        ),
+        (
             "shared-scalar-aggregates-to-grouped-join",
             "Объединить коррелированные агрегаты в одну группировку и LEFT JOIN",
             _rewrite_shared_scalar_aggregates,
@@ -808,6 +813,65 @@ def _rewrite_shared_scalar_aggregates(expression):
                     column.replace(exp.column(value_name, table=first.this.alias))
             changed = True
         select.set("joins", retained or None)
+    return expression, changed
+
+
+def _rewrite_in_filter(expression):
+    """Preserve the TRUE row set of a positive WHERE/HAVING IN predicate.
+
+    UNKNOWN and FALSE are interchangeable only in positive AND/OR filter
+    positions. NOT IN, boolean projections and IS NULL tests are excluded.
+    Require qualified columns and non-shadowed aliases before adding the
+    equality inside the original query. No volatile expressions are moved.
+    """
+    from sqlglot import exp
+    from .transaction_defaults import identifier_key
+    changed = False
+    for node in list(expression.find_all(exp.In)):
+        wrapper = node.args.get('query')
+        if type(wrapper) is not exp.Subquery or type(wrapper.this) is not exp.Select:
+            continue
+        parent = node.parent
+        while type(parent) in (exp.And, exp.Or, exp.Paren):
+            parent = parent.parent
+        if type(parent) not in (exp.Where, exp.Having):
+            continue
+        query, outer_column = wrapper.this, node.this
+        if (type(outer_column) is not exp.Column or not outer_column.table
+                or outer_column.db or outer_column.catalog or outer_column.is_star
+                or len(query.expressions) != 1
+                or any(query.args.get(k) for k in ('group', 'having', 'qualify', 'limit', 'offset', 'with_', 'distinct', 'joins'))):
+            continue
+        source = query.args.get('from_')
+        table = source.this if source is not None else None
+        projected = query.expressions[0]
+        projected = projected.this if type(projected) is exp.Alias else projected
+        if type(table) is not exp.Table or type(table.this) is not exp.Identifier or type(projected) is not exp.Column:
+            continue
+        alias = table.args.get('alias')
+        local_alias = alias.this if alias else table.this
+        if (identifier_key(outer_column.args['table']) == identifier_key(local_alias)
+                or not projected.table or projected.db or projected.catalog or projected.is_star
+                or identifier_key(projected.args['table']) != identifier_key(local_alias)
+                or any(v and k not in {'this', 'db', 'catalog', 'alias'} for k, v in table.args.items())
+                or alias is not None and alias.args.get('columns')):
+            continue
+        where = query.args.get('where')
+        if where is not None and not _plain_predicate(where.this, {local_alias.name, outer_column.table}):
+            continue
+        # Extra SELECT options/functions can change evaluation count or meaning.
+        if any(v and k not in {'expressions', 'from_', 'where', 'order'} for k, v in query.args.items()):
+            continue
+        order = query.args.get('order')
+        if order is not None and not all(type(item.this) is exp.Column for item in order.expressions):
+            continue
+        replacement = query.copy()
+        equality = exp.EQ(this=projected.copy(), expression=outer_column.copy())
+        replacement.set('expressions', [exp.Literal.number(1)])
+        replacement.set('order', None)
+        replacement.set('where', exp.Where(this=exp.and_(where.this.copy(), equality) if where else equality))
+        node.replace(exp.Exists(this=replacement))
+        changed = True
     return expression, changed
 
 

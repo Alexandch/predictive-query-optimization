@@ -804,7 +804,7 @@ class DesktopTests(unittest.TestCase):
             text = window.recommendation_text.toPlainText()
             self.assertIn("ФАКТИЧЕСКАЯ ПРОВЕРКА НЕ ЗАПУСКАЛАСЬ", text)
             self.assertIn("PostgreSQL не выполнялся", text)
-            self.assertIn("Проверены 11 правил", text)
+            self.assertIn("Проверены 12 правил", text)
             self.assertIn("вариантов нет", window.rewrite_notice.text())
             self.assertFalse(window.rewrite_notice.isHidden())
             window.sql_editor.setPlainText("SELECT 1")

@@ -37,7 +37,8 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
         model = window.xgb_model_edit.text()
         joined_dml = os.getenv('PQO_SMOKE_JOINED_DML') == '1'
         cte_mode = os.getenv('PQO_SMOKE_CTE') == '1'
-        select_number = 8 if joined_dml or cte_mode else 7
+        predicate_mode = os.getenv('PQO_SMOKE_PREDICATES') == '1'
+        select_number = 8 if joined_dml or cte_mode or predicate_mode else 7
         window.resize(1180, 760)
         window.show()
         application.processEvents()
@@ -93,7 +94,8 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     window.workflow_transaction_button.click()
                     text = (
                         resources
-                        / ('examples/transactions/retail-cte-savepoints.sql' if cte_mode
+                        / ('examples/transactions/retail-predicate-savepoints.sql' if predicate_mode
+                            else 'examples/transactions/retail-cte-savepoints.sql' if cte_mode
                             else 'examples/transactions/retail-joined-dml-savepoints.sql' if joined_dml
                             else 'examples/transactions/retail-insert-select-savepoints.sql')
                     ).read_text(encoding="utf-8-sig")
@@ -145,7 +147,8 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     candidate = next(
                         x
                         for x in generate_sql_rewrites(window.sql_editor.toPlainText())
-                        if x.rule_id == ('inline-reused-cte' if cte_mode else 'or-equality-to-in')
+                        if x.rule_id == ('distinct-inner-join-to-exists' if predicate_mode
+                            else 'inline-reused-cte' if cte_mode else 'or-equality-to-in')
                     )
                     window.rewrite_editor.setPlainText(candidate.sql_text)
                     window.compare_variant_button.click()
@@ -280,6 +283,7 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     "source_unchanged_by_workflow": True,
                     "joined_dml": joined_dml,
                     "cte_mode": cte_mode,
+                    "predicate_mode": predicate_mode,
                 }
                 if "optimization" in state:
                     payload["optimization"] = state["optimization"]

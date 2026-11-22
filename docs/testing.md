@@ -234,3 +234,15 @@ DELETE USING внутри откатываемой точки и замену SE
 `--workflow-smoke-test`. SELECT 8 проходит отдельное сравнение MATERIALIZED /
 NOT MATERIALIZED, затем замена проверяется в полном контексте записи и отката.
 Остальные подтверждения/изоляция профиля и очистка — как в сценарии joined DML.
+
+`tests/test_transaction_predicates.py` проверяет корреляцию EXISTS/NOT EXISTS,
+IN/NOT IN, NULL и дубликаты, затенение псевдонимов, границы CTE, раскрытие
+звёздочек, сохранение команд и отказ скалярным/побочным конструкциям.
+С `PQO_DISPOSABLE_REPLAY_TESTS=1` добавляются прогоны с записью на всех уровнях
+изоляции, SAVEPOINT/ROLLBACK, EXPLAIN и кандидаты, полный контроль четырёх
+вариантов, отмена, ошибки, очистка и отказ неправильной замене NOT IN.
+
+`PQO_SMOKE_PREDICATES=1` выбирает `retail-predicate-savepoints.sql` в нативном
+`--workflow-smoke-test`: SELECT 8 проверяется отдельно, затем замена JOIN на
+EXISTS проходит полный контекст записи, UPSERT, SAVEPOINT и отката. Для общего
+сравнения четырёх вариантов дополнительно задаётся `PQO_SMOKE_OPTIMIZATION=1`.
