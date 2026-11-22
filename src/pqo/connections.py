@@ -9,6 +9,16 @@ PROFILE_KEY = "connection_profiles_v1"
 SERVICE_KEY = "service_connection_v1"
 
 
+def password_failure(message):
+    """Classify only explicit libpq password failures, not network/SSL errors."""
+    text = str(message).casefold()
+    if 'no password supplied' in text:
+        return 'missing'
+    if 'password authentication failed' in text:
+        return 'invalid'
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectionProfile:
     id: str

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QFont, QFontDatabase
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtWidgets import QInputDialog, QMessageBox
 
 from .sql_rewrite import generate_sql_rewrites
 
@@ -104,6 +104,39 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                     assert window.transaction_inspection is not None, (
                         window.transaction_status.text()
                     )
+                    if os.getenv('PQO_SMOKE_AUTH_RECOVERY') == '1':
+                        state['auth_password'] = window.password_edit.text()
+                        window.password_edit.clear()
+                        window.transaction_plan_button.click()
+                        state['phase'] = 'auth-missing'
+                    else:
+                        state['phase'] = 'select-link'
+                    return
+                if phase == 'auth-missing':
+                    state['auth_recovery'] = {
+                        'initial_error': window.transaction_status.text(),
+                        'initial_report_absent': window.transaction_plan_report is None,
+                        'retry_available': not window.transaction_password_button.isHidden(),
+                    }
+                    assert window._transaction_auth_current() and window.transaction_password_button.isEnabled()
+                    window.grab().save(str(artifacts / 'workflow-password-recovery.png'))
+                    old_input = QInputDialog.getText
+                    try:
+                        QInputDialog.getText = lambda *a, **k: (state['auth_password'], True)
+                        window.transaction_password_button.click()
+                    finally:
+                        QInputDialog.getText = old_input
+                        state.pop('auth_password', None)
+                    state['phase'] = 'auth-recovered'
+                    return
+                if phase == 'auth-recovered':
+                    assert window.transaction_plan_report is not None, window.transaction_status.text()
+                    state['auth_recovery']['plans'] = asdict(window.transaction_plan_report)
+                    assert window.transaction_editor.toPlainText() == state['text']
+                    window.grab().save(str(artifacts / 'workflow-plans-recovered.png'))
+                    state['phase'] = 'select-link'
+                    return
+                if phase == 'select-link':
                     window.transaction_table.setCurrentCell(select_number - 1, 0)
                     window.workflow_send_select_button.click()
                     assert window._workflow_select_link[3] == select_number
@@ -247,6 +280,8 @@ def run_workflow_smoke(application, window_type, resources, artifacts):
                 }
                 if "optimization" in state:
                     payload["optimization"] = state["optimization"]
+                if 'auth_recovery' in state:
+                    payload['auth_recovery'] = state['auth_recovery']
                 finish(
                     0,
                     "OK: real copy from source, baseline + working DB, individual SELECT comparison, "

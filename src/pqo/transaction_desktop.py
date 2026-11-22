@@ -6,7 +6,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMessageBox, QPlainTextEdit, QPushButton, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -18,6 +18,7 @@ from .transaction_indexes import collect_transaction_index_candidates
 from .transaction_trial_desktop import TransactionTrialTabMixin
 from .transaction_workspace import TransactionWorkspaceMixin
 from .transaction_optimization_desktop import TransactionOptimizationTabMixin
+from .connections import password_failure
 
 
 _WARNINGS = {
@@ -46,6 +47,10 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self.transaction_plan_report = None
         self.transaction_index_report = None
         self._transaction_control = None
+        self._transaction_auth_retry = None
+        self.transaction_password_button = QPushButton('Ввести пароль и повторить получение планов')
+        self.transaction_password_button.clicked.connect(self._retry_transaction_planning_password)
+        self.transaction_password_button.hide()
         page = QWidget()
         layout = QVBoxLayout(page)
         title = QLabel("Транзакции: индексы и переписывание SELECT на копиях")
@@ -132,6 +137,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         layout.addLayout(actions)
         self._build_transaction_workspace(layout, index_actions, trial_actions, comparison_actions)
         layout.addWidget(self.transaction_status)
+        layout.addWidget(self.transaction_password_button)
         full_limits = (
             "Планы относятся к исходному состоянию БД: последующие команды не видят изменений предыдущих. "
             "Стоимость PostgreSQL — не время в миллисекундах. Обычные индексные SELECT-пробы не выполняют DML. "
@@ -167,6 +173,9 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self.transaction_load_button.setEnabled(idle)
         self.transaction_inspect_button.setEnabled(idle and bool(self.transaction_editor.toPlainText().strip()))
         self.transaction_plan_button.setEnabled(idle and self.transaction_inspection is not None)
+        auth_current = self._transaction_auth_current()
+        self.transaction_password_button.setVisible(auth_current)
+        self.transaction_password_button.setEnabled(idle and auth_current)
         self.transaction_index_button.setEnabled(idle and self.transaction_plan_report is not None
             and any(plan.status == "planned" for plan in self.transaction_plan_report.statements))
         self.transaction_cancel_button.setEnabled(
@@ -180,6 +189,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         if hasattr(self,'workflow_status'):self._refresh_workflow()
 
     def _invalidate_transaction(self):
+        self._clear_transaction_auth()
         self.transaction_inspection = None
         self.transaction_plan_report = None
         self._clear_transaction_indexes()
@@ -191,6 +201,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self._sync_transaction_controls()
 
     def _invalidate_transaction_plans(self):
+        self._clear_transaction_auth()
         if self.transaction_plan_report is not None:
             self.transaction_plan_report = None
             self._clear_transaction_indexes()
@@ -264,8 +275,11 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._launch_transaction_planning(self.transaction_editor.toPlainText(), settings, effective)
+
+    def _launch_transaction_planning(self, text, settings, effective):
         from .desktop import Worker
-        text = self.transaction_editor.toPlainText()
+        self._clear_transaction_auth()
         self.transaction_plan_report = None
         self._clear_transaction_indexes()
         self._render_transaction_inventory()
@@ -275,10 +289,56 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
         self._transaction_control = control
         worker.signals.progress.connect(self.transaction_status.setText)
         worker.signals.succeeded.connect(self._transaction_planned)
-        worker.signals.failed.connect(self._transaction_failed)
+        worker.signals.failed.connect(lambda message: self._transaction_planning_failed(message, text, settings, effective))
         self._set_query_actions_enabled(False)
         self.transaction_status.setText("Подключение для оценочных планов; транзакция не запускается…")
         self._start_worker(worker)
+
+    def _clear_transaction_auth(self):
+        self._transaction_auth_retry = None
+        if hasattr(self, 'transaction_password_button'):
+            self.transaction_password_button.hide()
+
+    def _transaction_auth_current(self):
+        if not self._transaction_auth_retry:
+            return False
+        text, settings, effective = self._transaction_auth_retry
+        try:
+            return (settings == self._database_settings()
+                and self._transaction_snapshot_current(text, effective))
+        except (ValueError, TypeError):
+            return False
+
+    def _transaction_planning_failed(self, message, text, settings, effective):
+        cancelled = self._transaction_control is not None and self._transaction_control.cancelled.is_set()
+        kind = None if cancelled else password_failure(message)
+        try:
+            current = settings == self._database_settings() and self._transaction_snapshot_current(text, effective)
+        except (ValueError, TypeError):
+            current = False
+        if kind and current:
+            reason = 'Пароль не введён.' if kind == 'missing' else 'Сервер отклонил пароль.'
+            message = (f'{reason} Подключение: {settings.user}@{settings.host}:{settings.port}/{settings.dbname}. '
+                'Пароли не сохраняются между запусками приложения. Нажмите «Ввести пароль и повторить получение планов».')
+        self._transaction_failed(message)
+        if kind and current:
+            self._transaction_auth_retry = (text, settings, effective)
+            self._sync_transaction_controls()
+        self.statusBar().showMessage(self.transaction_status.text())
+
+    def _retry_transaction_planning_password(self):
+        if self._query_operation_active or self._active_workers or not self._transaction_auth_current():
+            return
+        text, settings, effective = self._transaction_auth_retry
+        secret, accepted = QInputDialog.getText(self, 'Пароль подключения',
+            f'{settings.user}@{settings.host}:{settings.port}/{settings.dbname}\n'
+            'Пароль используется только в текущем сеансе. После ввода будут повторно получены только оценочные планы.',
+            QLineEdit.EchoMode.Password)
+        if not accepted or not secret or not self._transaction_auth_current():
+            return
+        self.password_edit.setText(secret)
+        self._remember_profile()
+        self._launch_transaction_planning(text, self._database_settings(), effective)
 
     def _transaction_planned(self, payload):
         if len(payload) == 3:
@@ -303,6 +363,8 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
                 "Остальные причины указаны по командам. Транзакция не запускалась, данные не изменялись."
             )
         self._set_query_actions_enabled(True)
+
+        self.statusBar().showMessage(self.transaction_status.text())
 
     def _transaction_failed(self, message):
         if self._transaction_optimization_active:
@@ -333,7 +395,7 @@ class TransactionTabMixin(TransactionOptimizationTabMixin, TransactionWorkspaceM
             if cancelled else f"Операция не завершена; команды транзакции не выполнялись. {message}"
         )
         self._set_query_actions_enabled(True)
-        self.statusBar().showMessage("Разбор/получение планов транзакции завершено без запуска команд.")
+        self.statusBar().showMessage(self.transaction_status.text())
 
     def _cancel_transaction_planning(self):
         if self._transaction_control is not None:
