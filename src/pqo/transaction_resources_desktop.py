@@ -42,10 +42,10 @@ class TransactionResourcesMixin:
         row = QHBoxLayout()
         self.resource_mode = QComboBox()
         for label, key in (('Только исходная', 'original'), ('Сравнить с индексами', 'indexes'),
-                ('Сравнить с заменой SELECT', 'rewrite'), ('Сравнить с обоими изменениями', 'combined')):
+                ('Сравнить с вариантом SQL', 'rewrite'), ('Сравнить с обоими изменениями', 'combined')):
             self.resource_mode.addItem(label, key)
         self.resource_indexes_button = QPushButton('Выбрать индексы')
-        self.resource_rewrite_button = QPushButton('Выбрать SELECT')
+        self.resource_rewrite_button = QPushButton('Выбрать вариант SQL')
         row.addWidget(self.resource_mode)
         row.addWidget(self.resource_indexes_button)
         row.addWidget(self.resource_rewrite_button)
@@ -194,6 +194,14 @@ class TransactionResourcesMixin:
             details.insert(0, 'Фактический work_mem: ' + _number(report.work_mem_kb) + ' КиБ. Число 0 в счётчике отличается от «—» (нет данных).')
             for row, item in enumerate(report.variants):
                 profile = item.profile
+                backend = item.control.backend_resources
+                if backend is not None:
+                    details.append(f'{TITLES[item.kind]}: CPU процесса PostgreSQL {backend.cpu_ms:.2f} мс. '
+                        f'RSS в начале {backend.initial_rss_bytes / 1024**2:.2f} МиБ, максимум по выборкам '
+                        f'{backend.sampled_peak_rss_bytes / 1024**2:.2f} МиБ ({backend.samples} замеров).')
+                else:
+                    details.append(f'{TITLES[item.kind]}: CPU и RSS недоступны для этого подключения. '
+                        'Нужен доступ к процессу PostgreSQL на той же ОС через прямое локальное TCP-подключение.')
                 values = [TITLES[item.kind], '—', '—', '—', '—', '—']
                 if profile:
                     values = [TITLES[item.kind], _pair(profile.counters, 'shared_hit_blocks', 'shared_read_blocks'),
@@ -213,6 +221,9 @@ class TransactionResourcesMixin:
                             data = [data[0],data[1],_pair(r.counters,'shared_hit_blocks','shared_read_blocks'),
                                 _pair(r.counters,'temp_read_blocks','temp_written_blocks',1024**2/profile.block_size),
                                 _number(r.counters['wal_bytes'],1024),_number(r.max_operator_memory_kb),_number(r.execution_ms)]
+                            for name, relation, calls, elapsed in r.triggers:
+                                details.append(f'{TITLES[item.kind]}, команда {command.number}: триггер {name} '
+                                    f'на {relation}, вызовов {calls}, время {_number(elapsed)} мс.')
                         rows.append(data)
                 for col, value in enumerate(values):
                     cell = QTableWidgetItem(value)

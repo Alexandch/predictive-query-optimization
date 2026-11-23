@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
@@ -85,3 +86,11 @@ collection = COLLECT(
     upx_exclude=[],
     name="PredictiveQueryOptimization",
 )
+
+if sys.platform == "darwin":
+    app = BUNDLE(
+        collection,
+        name="PredictiveQueryOptimization.app",
+        icon=str(ROOT / "assets" / "pqo.ico"),
+        bundle_identifier="org.pqo.PredictiveQueryOptimization",
+    )

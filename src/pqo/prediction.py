@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 
 from .config import DatabaseSettings
@@ -27,6 +28,7 @@ class QueryTimePrediction:
     error_mae_ms: float | None = None
     error_source: str | None = None
     estimate_source: str = "ml"
+    unseen_template_test: tuple[int, float] | None = None
 
     @property
     def uncertainty_lower_ms(self) -> float | None:
@@ -52,6 +54,19 @@ def model_error_mae_ms(model_path: str | Path) -> float | None:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     return value if value >= 0 else None
+
+
+def unseen_template_evaluation(model_path: str | Path) -> tuple[int, float] | None:
+    """Return the recorded sample count and ±20% rate on held-out templates."""
+    try:
+        metrics_path = Path(model_path).resolve().parent / 'metrics.json'
+        result = json.loads(metrics_path.read_text(encoding='utf-8'))['unseen_template_stress']
+        count, percent = result['test_count'], result['within_20_percent']
+        if type(count) is int and count > 0 and type(percent) in (int, float) and math.isfinite(percent) and 0 <= percent <= 100:
+            return count, float(percent)
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return None
 
 
 def predict_sql_query(
@@ -128,5 +143,6 @@ def predict_sql_query(
         error_mae_ms=error_mae_ms,
         error_source=error_source,
         estimate_source=estimate_source,
+        unseen_template_test=unseen_template_evaluation(model_path),
     )
 

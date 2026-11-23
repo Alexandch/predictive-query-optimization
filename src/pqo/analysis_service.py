@@ -19,7 +19,7 @@ from .dqn_features import (
 )
 from .explain import collect_explain
 from .index_actions import IndexAction, IndexActionKind, generate_index_actions
-from .prediction import QueryTimePrediction, model_error_mae_ms
+from .prediction import QueryTimePrediction, model_error_mae_ms, unseen_template_evaluation
 from .recommendation import IndexRecommendation
 from .repository import save_analysis, save_optimization_result
 from .sql_features import extract_sql_features
@@ -161,6 +161,7 @@ def analyze_query(
         error_mae_ms=error_mae_ms,
         error_source=error_source,
         estimate_source=estimate_source,
+        unseen_template_test=unseen_template_evaluation(xgboost_model_path),
     )
     prediction_latency_ms = (perf_counter() - started) * 1000
     if prediction_ready is not None:

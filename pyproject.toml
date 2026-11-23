@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predictive-query-optimization"
-version = "0.8.57"
+version = "0.8.58"
 description = "PostgreSQL query-time prediction and index recommendation system"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,6 +25,7 @@ rl = [
     "torch>=2.10,<2.11",
 ]
 desktop = [
+    "psutil>=7,<8",
     "joblib>=1.6,<2",
     "numpy>=2.3,<2.4",
     "pandas>=3.0,<4",
@@ -39,6 +40,7 @@ build = [
     "pillow>=11,<13",
 ]
 dev = [
+    "psutil>=7,<8",
     "pytest>=8.3,<9",
     "joblib>=1.6,<2",
     "numpy>=2.3,<2.4",

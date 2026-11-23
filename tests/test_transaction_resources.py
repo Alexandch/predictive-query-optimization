@@ -124,6 +124,42 @@ class ResourcePostgresTests(TestCase):
         self.assertEqual(r.variants[0].profile.index_size_bytes, 0)
         self.assertGreater(r.variants[1].profile.index_size_bytes, 0)
 
+    def test_audit_trigger_and_whole_rewrite_compare_committed_side_effects(self):
+        from pqo.transaction_select_rewrite import generate_transaction_select_rewrites
+
+        with self.fixture.connect(self.reference) as c:
+            c.execute('CREATE TABLE retail.stock_audit(id integer PRIMARY KEY, previous integer, updated integer)')
+            c.execute('''CREATE FUNCTION retail.audit_stock() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    INSERT INTO retail.stock_audit (id, previous, updated) VALUES (NEW.id, OLD.quantity, NEW.quantity);
+                    RETURN NULL;
+                END;
+                $$''')
+            c.execute('''CREATE TRIGGER stock_audit AFTER UPDATE ON retail.stock
+                         FOR EACH ROW EXECUTE FUNCTION retail.audit_stock()''')
+
+        text = '''BEGIN ISOLATION LEVEL REPEATABLE READ;
+        UPDATE retail.stock SET quantity=quantity+1 WHERE id=1 OR id=2 RETURNING id,quantity;
+        DELETE FROM retail.stock WHERE id=3 OR id=4 RETURNING id;
+        SELECT id,updated FROM retail.stock_audit WHERE id=1 OR id=2 ORDER BY id;
+        COMMIT;'''
+        options = generate_transaction_select_rewrites(text, self.settings, include_transaction=True)
+        variant = next(option.variant_sql for option in options if option.rule_id == 'whole-transaction')
+        self.assertEqual(variant.count(' IN '), 3)
+        report = self.run_profile(text, variant_sql=variant)
+        self.assertEqual(report.status, 'completed', report.reasons)
+        self.assertTrue(report.normal_variants_equivalent and report.profiles_match_controls)
+        for item in report.variants:
+            audit = next(state for state in item.control.final_state if state.table == 'retail.stock_audit')
+            self.assertEqual(audit.rows, 2)
+            name, relation, calls, elapsed = item.profile.commands[0].resources.triggers[0]
+            self.assertEqual((name, relation, calls), ('stock_audit', 'stock', 2))
+            self.assertGreaterEqual(elapsed, 0)
+
+        changed_filter = variant.replace('id IN (1, 2)', 'id IN (1, 3)', 1)
+        mismatch = self.run_profile(text, variant_sql=changed_filter)
+        self.assertEqual(mismatch.status, 'mismatch', mismatch.reasons)
+
     def test_wrong_manual_variant_stops_before_any_instrumented_execution(self):
         r = self.run_profile(number=2, variant_sql='SELECT id,quantity FROM retail.stock WHERE account_id=30 ORDER BY id')
         self.assertEqual(r.status, 'mismatch', r.reasons)

@@ -243,18 +243,14 @@ class TransactionOptimizationTabMixin:
         ready = self._select_rewrite_current() and bool(
             self._transaction_select_rewrite_options
         )
-        number = None
+        rewrite_label = 'не подготовлена'
         if ready:
             index = self.transaction_select_rewrite_choice.currentIndex()
             if index >= 0:
                 number = self._transaction_select_rewrite_options[index].number
+                rewrite_label = 'вся транзакция' if number is None else f'SELECT № {number}'
         self.transaction_optimization_context.setText(
-            f"Отмечено индексов: {count}; замена SELECT: "
-            + (
-                f"№ {number} (текст из правого редактора)"
-                if number
-                else "не подготовлена"
-            )
+            f"Отмечено индексов: {count}. Вариант SQL: {rewrite_label}"
         )
         for field in (
             self.transaction_optimization_reference,

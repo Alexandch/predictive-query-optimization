@@ -17,6 +17,7 @@ import psycopg
 from psycopg import sql
 
 from .analysis_control import AnalysisCancelled, AnalysisControl
+from .backend_resources import BackendResourceMonitor, BackendResources
 from .config import DatabaseSettings
 from .index_actions import IndexAction, IndexActionKind
 from .transaction_replay_guard import NAME, prepare_replay, replay_catalog
@@ -70,6 +71,7 @@ class ReplaySample:
     ending: str = 'commit'
     initial_sequences: tuple[SequenceStateDigest, ...] = ()
     final_sequences: tuple[SequenceStateDigest, ...] = ()
+    backend_resources: BackendResources | None = None
 
 
 @dataclass(frozen=True)
@@ -346,7 +348,7 @@ def _build_trial_indexes(connection, actions, settings, deadline, control):
     return build_ms, size, created_indexes
 
 
-def _sample(settings, database, program, actions, series, phase, deadline, control, *, work_mem_kb=None):
+def _sample(settings, database, program, actions, series, phase, deadline, control, *, work_mem_kb=None, measure_backend=False):
     with psycopg.connect(**_kwargs(settings, database), autocommit=True) as connection, control.monitor(connection):
         for command in ("SET timezone='UTC'", "SET datestyle='ISO, YMD'", "SET standard_conforming_strings=on",
                         "SET jit=off", "SET max_parallel_workers_per_gather=0"):
@@ -367,7 +369,13 @@ def _sample(settings, database, program, actions, series, phase, deadline, contr
         build_ms, size, created_indexes = 0., 0, []
         if phase == 'B':
             build_ms, size, created_indexes = _build_trial_indexes(connection, actions, settings, deadline, control)
-        commands, elapsed, observed = _execute_program(connection, program, settings, deadline, control)
+        backend_resources = None
+        if measure_backend:
+            with BackendResourceMonitor(connection) as monitor:
+                commands, elapsed, observed = _execute_program(connection, program, settings, deadline, control)
+            backend_resources = monitor.metrics
+        else:
+            commands, elapsed, observed = _execute_program(connection, program, settings, deadline, control)
         control.report(f'{phase}: проверка итоговых данных после {program.ending.upper()}…')
         final = state_digest(connection, tables, settings, deadline, control)
         final_sequences = sequence_digest(connection,tables,settings,deadline,control)
@@ -377,7 +385,7 @@ def _sample(settings, database, program, actions, series, phase, deadline, contr
             _timeout(connection,deadline,settings)
             final_size += connection.execute('SELECT pg_catalog.pg_relation_size(c.oid) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s', (schema,name)).fetchone()[0]
     return ReplaySample(series,phase,database,commands,elapsed,initial,final,size,build_ms,final_size,observed,
-        program.ending,initial_sequences,final_sequences)
+        program.ending,initial_sequences,final_sequences,backend_resources)
 
 
 def assess_correctness(samples, series):
@@ -442,8 +450,8 @@ def _run_disposable_programs(program, source_settings, reference_database, actio
         recovery_directory, *, candidate_program=None):
     """Shared lifecycle for already guarded programs; no user SQL/admin shortcuts.
 
-    Index trials use the same program in every phase. SELECT replacement trials
-    pass a program with exactly one SELECT changed, no index actions, in B only.
+    Index trials use the same program in every phase. Rewrite trials pass a
+    guarded replacement program in B only.
     Public entry points must validate/confirm before calling this private helper.
     """
     scratch, samples, reasons = ScratchDatabases(source_settings, recovery_directory), [], []

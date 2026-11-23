@@ -59,6 +59,9 @@ class TransactionSelectRewriteDesktopTests(TestCase):
         try:
             with patch('pqo.transaction_replay.psycopg.connect') as connect:
                 snapshot,prepared=self.prepare(window)
+                option = next(o for o in window._transaction_select_rewrite_options if o.number == 2 and o.rule_id != 'manual')
+                window.transaction_select_rewrite_choice.setCurrentIndex(window._transaction_select_rewrite_options.index(option))
+                snapshot,prepared=window._select_rewrite_prepared()
             connect.assert_not_called()
             self.assertEqual(window.transaction_editor.toPlainText(),TEXT)
             self.assertEqual(parse_one(window.transaction_select_rewrite_original.toPlainText(),read='postgres'),parse_one(prepared.original_sql,read='postgres'))

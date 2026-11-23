@@ -853,7 +853,7 @@ class DesktopTests(unittest.TestCase):
             'INCLUDE ("created_at");',
         )
 
-    def test_prediction_is_clearly_labeled_as_estimate_with_range(self):
+    def test_prediction_is_clearly_labeled_as_an_estimate(self):
         prediction = QueryTimePrediction(
             sql_text="SELECT 1",
             predicted_time_ms=11.4,
@@ -870,8 +870,8 @@ class DesktopTests(unittest.TestCase):
 
         text = _format_prediction(prediction)
 
-        self.assertIn("прогноз: ML-модель", text)
-        self.assertNotIn("ориентир", text)
+        self.assertIn("ориентир: ML-модель", text)
+        self.assertNotIn("±", text)
 
     def test_prediction_labels_automatic_database_profile(self):
         prediction = QueryTimePrediction(
@@ -889,7 +889,7 @@ class DesktopTests(unittest.TestCase):
 
         text = _format_prediction(prediction)
 
-        self.assertIn("прогноз: ML + профиль БД", text)
+        self.assertIn("ориентир: ML + профиль БД", text)
 
     def test_previous_measurement_is_not_labelled_as_model_prediction(self):
         prediction = QueryTimePrediction(

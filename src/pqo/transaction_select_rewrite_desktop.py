@@ -29,11 +29,11 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         full_note = ('Замена одного SELECT без изменения остальных команд и их порядка. '
             'Подготовка вариантов локальная. Фактическая проверка выполняет всю транзакцию с её изоляцией и COMMIT/ROLLBACK '
             'на свежих одноразовых БД A1/B/A2; выбранный SELECT в B видит предыдущие записи. Новые индексы не создаются.')
-        note = self.transaction_select_rewrite_note = QLabel('Замена одного SELECT; порядок команд и режимы транзакции сохраняются. Выполнение — на одноразовых копиях.')
+        note = self.transaction_select_rewrite_note = QLabel('Сравните отдельный SELECT или целый вариант транзакции. Проверка выполняется на одноразовых копиях.')
         note.setToolTip(full_note)
         note.setWordWrap(True)
         layout.addWidget(note)
-        self.transaction_select_rewrite_generate = QPushButton('Подготовить замены SELECT (без подключения)')
+        self.transaction_select_rewrite_generate = QPushButton('Подготовить варианты SQL')
         tools = QHBoxLayout()
         tools.addWidget(self.transaction_select_rewrite_generate)
         self.transaction_select_rewrite_choice = QComboBox()
@@ -48,7 +48,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         editors = self.transaction_select_rewrite_editor_splitter = QSplitter(Qt.Orientation.Horizontal)
         editors.setChildrenCollapsible(False)
         editors.setHandleWidth(8)
-        for name,title,readonly in (('original','Исходный SELECT — только чтение',True),('variant','Замена SELECT — можно редактировать',False)):
+        for name,title,readonly in (('original','Исходный SQL',True),('variant','Вариант SQL',False)):
             panel = QWidget(); panel_layout = QVBoxLayout(panel)
             panel_layout.setContentsMargins(0,0,0,0)
             panel_layout.addWidget(QLabel(title))
@@ -186,7 +186,7 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         self._clear_transaction_select_rewrites()
         self._transaction_select_rewrite_active = 'generate'
         control = AnalysisControl()
-        worker = Worker(lambda: (snapshot,generate_transaction_select_rewrites(snapshot[1],snapshot[2],control=control)))
+        worker = Worker(lambda: (snapshot,generate_transaction_select_rewrites(snapshot[1],snapshot[2],control=control,include_transaction=True)))
         self._start_select_rewrite_worker(worker,control,self._transaction_select_rewrites_ready)
 
     def _start_select_rewrite_worker(self,worker,control,callback):
@@ -209,13 +209,15 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         else:
             self._transaction_select_rewrite_options = options
             self.transaction_select_rewrite_choice.blockSignals(True)
-            for option in options: self.transaction_select_rewrite_choice.addItem(f'SELECT № {option.number}: {option.title}')
+            for option in options:
+                label = option.title if option.number is None else f'SELECT № {option.number}: {option.title}'
+                self.transaction_select_rewrite_choice.addItem(label)
             self.transaction_select_rewrite_choice.blockSignals(False)
             self._transaction_select_rewrite_selected()
             self._transaction_reveal_analysis()
             automatic = sum(option.rule_id!='manual' for option in options)
             message = f'Подготовлено автоматических вариантов: {automatic}. Ничего не выполнялось. '
-            message += 'Выберите вариант или измените SELECT справа.' if automatic else 'Поддерживаемых автоматических замен нет; доступен ручной вариант справа.'
+            message += 'Выберите вариант или измените SQL справа.' if automatic else 'Поддерживаемых автоматических замен нет. Можно ввести вариант вручную.'
             self.transaction_select_rewrite_status.setText(message)
             self.transaction_status.setText(message)
             self.transaction_views.setCurrentIndex(9)
@@ -225,8 +227,12 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
         index = self.transaction_select_rewrite_choice.currentIndex()
         if not 0 <= index < len(self._transaction_select_rewrite_options): return
         option = self._transaction_select_rewrite_options[index]
-        self.transaction_select_rewrite_original.setPlainText(parse_one(option.original_sql,read='postgres').sql(dialect='postgres',pretty=True))
-        self.transaction_select_rewrite_variant.setPlainText(parse_one(option.variant_sql,read='postgres').sql(dialect='postgres',pretty=True))
+        if option.number is None:
+            self.transaction_select_rewrite_original.setPlainText(option.original_sql)
+            self.transaction_select_rewrite_variant.setPlainText(option.variant_sql)
+        else:
+            self.transaction_select_rewrite_original.setPlainText(parse_one(option.original_sql,read='postgres').sql(dialect='postgres',pretty=True))
+            self.transaction_select_rewrite_variant.setPlainText(parse_one(option.variant_sql,read='postgres').sql(dialect='postgres',pretty=True))
         self._clear_transaction_select_rewrite_result()
 
     def _select_rewrite_prepared(self):
@@ -241,8 +247,9 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
     def _show_transaction_select_rewrite_preview(self):
         try:
             _,prepared = self._select_rewrite_prepared()
-            self.transaction_details.setPlainText(f'ЛОКАЛЬНЫЙ ПРОСМОТР — НЕ ЗАПУСК\nМеняется только SELECT № {prepared.number}. '
-                'Все остальные команды, режимы и их порядок неизменны.\n\nТранзакция с заменой (нормализованный SQL):\n'+_render(prepared.variant))
+            numbers = ', '.join(map(str, prepared.changed_numbers))
+            change = f'Номера изменённых команд: {numbers}.' if prepared.number is None else f'Меняется только SELECT № {prepared.number}.'
+            self.transaction_details.setPlainText(change + '\n\n' + _render(prepared.variant))
             if self.transaction_workspace_mode.currentData() != 'report':
                 self._transaction_open_protocol()
         except ValueError as exc:
@@ -264,9 +271,10 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
             validate_reference(snapshot[2],reference,True,True)
         except ValueError as exc:
             self.transaction_select_rewrite_status.setText(str(exc)); return
-        answer = QMessageBox.question(self,'Замена SELECT в транзакции — только лабораторные копии',
+        numbers = ', '.join(map(str, prepared.changed_numbers))
+        answer = QMessageBox.question(self,'Замена SQL в транзакции',
             f'Сервер: {snapshot[2].host}:{snapshot[2].port}\nИсходная БД (не выполняется): {snapshot[2].dbname}\nЭталон: {reference}\n'
-            f'Меняется только SELECT № {prepared.number}. До {1+3*series} новых БД; режимы и COMMIT/ROLLBACK сохраняются в каждой копии. '
+            f'Изменённые команды: {numbers}. До {1+3*series} новых БД; режимы и COMMIT/ROLLBACK сохраняются в каждой копии. '
             f'В B используется замена, новые индексы не создаются. Пороги общего выигрыша: {policy.minimum_gain_ms:g} мс И {policy.minimum_gain_ratio*100:g}%. '
             'Каталоги/исходные состояния/все результаты/итоговые данные и удаление копий проверяются. '
             'Только доверенный тестовый сервер, не production. Бюджет 300 с; CREATE может задержать отмену до 30 с. Продолжить?',
@@ -333,13 +341,14 @@ class TransactionSelectRewriteTabMixin(TransactionParameterTabMixin):
                 'сравните исходный и правый SELECT; локальный просмотр показывает полный порядок команд без запуска.')
             return
         report = result.measurement; decision = report.recommendation
-        lines = [f'ЗАМЕНА SELECT № {result.number} В ИЗМЕРЕННОЙ ТРАНЗАКЦИИ — НЕ PRODUCTION',
+        label = 'Переписывание транзакции' if result.number is None else f'Замена SELECT № {result.number}'
+        lines = [label,
             f'Эталон: {report.reference_database}; решение: {decision.status}.',
             f'Исходные состояния: {report.initial_states_equal}; все результаты/RETURNING: {report.results_equal}; '
             f'итоговые данные: {report.final_states_equal}; удаление копий: {report.cleanup_verified}.',
             'Состояния собственных последовательностей входят в сверку. ROLLBACK/ROLLBACK TO не возвращает выданные ими номера.',
             f'Не удалены/не проверены: {report.leftover_databases}.',
-            'A1/A2 — исходная транзакция; B — только один SELECT заменён. Порядок DML и остальных SELECT неизменен; новых индексов нет.',
+            'A1/A2 — исходная транзакция. B — вариант из правого редактора. Новые индексы не создавались.',
             'Сравниваются результаты каждой команды в её контексте, не отдельный SELECT до транзакции. '
             'ORDER BY — последовательность, иначе мультимножество с NULL/дубликатами; сравниваются имена/типы столбцов и затронутые строки.',
             'Общее время — клиент от BEGIN до COMMIT/ROLLBACK, включая результат/его хеш/проверку режимов/тайм-ауты; '

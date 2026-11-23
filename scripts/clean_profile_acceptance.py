@@ -231,6 +231,19 @@ def main():
                 "SELECT version(),system_identifier::text FROM pg_control_system()"
             ).fetchone()
             report.update(postgresql=version, cluster_id=cluster_id, port=port)
+            from pqo.backend_resources import BackendResourceMonitor
+
+            with BackendResourceMonitor(connection) as monitor:
+                connection.execute('SELECT SUM(i) FROM generate_series(1, 900000) AS i').fetchone()
+            metrics = monitor.metrics
+            if metrics is None or metrics.cpu_ms <= 0 or metrics.sampled_peak_rss_bytes < metrics.initial_rss_bytes:
+                raise RuntimeError('Resource monitoring did not identify the local PostgreSQL backend')
+            report['local_backend_resources'] = {
+                'cpu_ms': metrics.cpu_ms,
+                'initial_rss_bytes': metrics.initial_rss_bytes,
+                'sampled_peak_rss_bytes': metrics.sampled_peak_rss_bytes,
+                'samples': metrics.samples,
+            }
             for role, role_password, createdb in (
                 ("pqo_accept_user", password, True),
                 ("pqo_accept_reader", reader_password, False),

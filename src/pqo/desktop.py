@@ -276,7 +276,18 @@ def _format_prediction(prediction) -> str:
         if prediction.estimate_source == "database_profile"
         else "ML-модель"
     )
-    return f"{prediction.predicted_time_ms:.2f} мс\nпрогноз: {source}"
+    return f"{prediction.predicted_time_ms:.2f} мс\nориентир: {source}"
+
+
+def _prediction_tooltip(prediction) -> str:
+    if prediction.estimate_source == "exact_history":
+        return "Оценка основана на предыдущих измерениях этого SQL."
+    message = "Время оценено по плану PostgreSQL без выполнения запроса."
+    if prediction.unseen_template_test:
+        count, rate = prediction.unseen_template_test
+        message += (f" В контрольной выборке базовой модели из {count} запросов с новыми шаблонами "
+                    f"доля прогнозов с ошибкой до ±20% составила {rate:.1f}%.")
+    return message
 
 
 def _format_index_impact(step: SequentialRecommendationStep) -> str:
@@ -1648,6 +1659,7 @@ class MainWindow(DesktopWorkflowMixin, DesktopConnectionsMixin, DesktopSessionMi
     @pyqtSlot(object, float)
     def _show_early_prediction(self, prediction, latency_ms: float) -> None:
         self.predicted_value.setText(_format_prediction(prediction))
+        self.predicted_value.setToolTip(_prediction_tooltip(prediction))
         self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
         self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
         self.node_value.setText(f"{prediction.root_node_type}\n{prediction.plan_node_count} узл.")
@@ -1713,23 +1725,7 @@ class MainWindow(DesktopWorkflowMixin, DesktopConnectionsMixin, DesktopSessionMi
                 f"{observation.actual_max_time_ms:.2f} мс"
             )
         self.predicted_value.setText(prediction_text)
-        if prediction.error_source:
-            uncertainty = ""
-            if prediction.uncertainty_lower_ms is not None:
-                uncertainty = (
-                    f" Оценочный диапазон: "
-                    f"{prediction.uncertainty_lower_ms:.2f}–"
-                    f"{prediction.uncertainty_upper_ms:.2f} мс."
-                )
-            self.predicted_value.setToolTip(
-                (
-                    "Оценка основана на предыдущих измерениях этого SQL; "
-                    "текущий запрос не выполнялся. "
-                    if prediction.estimate_source == "exact_history"
-                    else "Прогноз построен без выполнения SQL. "
-                )
-                + f"Источник ошибки: {prediction.error_source}.{uncertainty}"
-            )
+        self.predicted_value.setToolTip(_prediction_tooltip(prediction))
         self.cost_value.setText(f"{prediction.estimated_total_cost:,.2f}")
         self.rows_value.setText(f"{prediction.estimated_plan_rows:,.0f}")
         self.node_value.setText(

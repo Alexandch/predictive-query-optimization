@@ -12,6 +12,7 @@ from .transaction_upsert import validate_upsert, validate_arbiters, conflict_ass
 from .transaction_joined_dml import joined_dml_sources, validate_joined_dml_catalog
 from .transaction_cte import cte_scope, physical_tables, validate_program_ctes
 from .transaction_predicates import predicate_selects, direct_sources
+from .transaction_triggers import validate_replay_triggers
 
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -312,6 +313,7 @@ def replay_catalog(connection, settings, program):
         (sorted(oids),)).fetchall()
     source_columns={(row[1],row[2]):tuple(name for oid,name in column_rows if oid==row[0]) for row in relations}
     validate_program_ctes(program, source_columns)
+    validate_replay_triggers(connection, {row[0]: (row[1], row[2]) for row in relations}, source_columns)
     tables = []
     for oid, schema, name, kind, persistence, rls, force_rls, partition, descendants, rules, method in relations:
         if (kind != 'r' or persistence != 'p' or method != 'heap' or rls or force_rls or partition or descendants or rules):
@@ -336,14 +338,6 @@ def replay_catalog(connection, settings, program):
         # Also catch inbound FKs from schemas outside the fingerprinted state.
         if connection.execute("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint WHERE contype='f' AND confrelid=%s AND NOT (conrelid=ANY(%s)))", (oid, sorted(oids))).fetchone()[0]:
             raise ValueError('Входящий FK вне проверяемых таблиц.')
-        if connection.execute("""SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t
-            LEFT JOIN pg_catalog.pg_constraint c ON c.oid=t.tgconstraint
-            JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
-            WHERE t.tgrelid=%s AND t.tgenabled<>'D' AND
-            (NOT t.tgisinternal OR c.contype IS DISTINCT FROM 'f' OR n.nspname<>'pg_catalog' OR
-             p.proname NOT IN ('RI_FKey_check_ins','RI_FKey_check_upd','RI_FKey_noaction_del','RI_FKey_noaction_upd','RI_FKey_restrict_del','RI_FKey_restrict_upd')))
-            """, (oid,)).fetchone()[0]:
-            raise ValueError(f'{schema}.{name}: пользовательские/неизвестные триггеры исключены.')
         if connection.execute("""SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_index i
             JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid JOIN pg_catalog.pg_am a ON a.oid=c.relam
             WHERE i.indrelid=%s AND (i.indexprs IS NOT NULL OR i.indpred IS NOT NULL OR NOT i.indisvalid OR NOT i.indisready

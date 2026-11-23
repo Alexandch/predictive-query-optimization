@@ -136,7 +136,7 @@ class TransactionTabMixin(TransactionResourcesMixin, TransactionConcurrencyMixin
         self.transaction_views.addTab(self.transaction_holdout_page, "Контроль SELECT")
         self.transaction_views.addTab(self.transaction_write_page, "Запись и индексы")
         self.transaction_views.addTab(self.transaction_replay_page, "Выполнение на копиях")
-        self.transaction_views.addTab(self.transaction_select_rewrite_page, "Переписывание SELECT")
+        self.transaction_views.addTab(self.transaction_select_rewrite_page, "Переписывание SQL")
         self.transaction_views.addTab(self.transaction_optimization_page, "Итоговая оптимизация")
         self.transaction_views.addTab(self.transaction_concurrency_page, "Параллельные сессии")
         self.transaction_views.addTab(self.transaction_resource_page, "Ресурсы транзакции")

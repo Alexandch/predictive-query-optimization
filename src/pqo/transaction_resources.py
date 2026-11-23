@@ -44,6 +44,7 @@ class PlanResources:
     counters: dict[str, int | None]
     max_operator_memory_kb: int | None
     max_sort_disk_kb: int | None
+    triggers: tuple[tuple[str, str, int, float | None], ...] = ()
 
 
 def _integer(value):
@@ -83,7 +84,13 @@ def parse_resources(document):
             if not isinstance(children, list):
                 raise ValueError('Неизвестная структура дочерних узлов EXPLAIN.')
             queue.extend(children)
-    return PlanResources(execution, rows, counters, max(memories, default=None), max(disks, default=None))
+    triggers = []
+    for trigger in payload.get('Triggers', []):
+        duration = trigger.get('Time')
+        if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0):
+            raise ValueError('Некорректное время триггера.')
+        triggers.append((trigger['Trigger Name'], trigger['Relation'], _integer(trigger['Calls']), duration))
+    return PlanResources(execution, rows, counters, max(memories, default=None), max(disks, default=None), tuple(triggers))
 
 
 @dataclass(frozen=True)
@@ -142,10 +149,10 @@ class TransactionResources:
 def prepare_resource_request(text, settings, actions=(), number=None, variant_sql=None, work_mem_kb=None):
     if work_mem_kb is not None and (type(work_mem_kb) is not int or not 64 <= work_mem_kb <= 65536):
         raise ValueError('work_mem: 64–65536 КиБ либо настройка эталона.')
-    if (number is None) != (variant_sql is None):
-        raise ValueError('Для замены SELECT нужны номер и SQL варианта.')
+    if number is not None and variant_sql is None:
+        raise ValueError('Для замены SELECT нужен SQL варианта.')
     try:
-        if number is not None:
+        if variant_sql is not None:
             prepared = prepare_select_replacement(text, settings, number, variant_sql)
             original, variant = prepared.original, prepared.variant
         else:
@@ -159,8 +166,8 @@ def prepare_resource_request(text, settings, actions=(), number=None, variant_sq
             or (a.schema_name, a.table_name) not in original.tables for a in actions) or len(set(actions)) != len(actions)):
         raise ValueError('Нужны не более двух разных CREATE-кандидатов текущей транзакции.')
     programs = [('original', original, ())]
-    if actions or number is not None:
-        programs.append(('combined' if actions and number is not None else 'indexes' if actions else 'rewrite', variant, actions))
+    if actions or variant_sql is not None:
+        programs.append(('combined' if actions and variant_sql is not None else 'indexes' if actions else 'rewrite', variant, actions))
     return tuple(programs)
 
 
@@ -181,6 +188,12 @@ def _profile_sample(settings, database, program, actions, normal, work_mem_kb, d
         if block_size <= 0:
             raise ValueError('Не получен размер блока PostgreSQL.')
         tables = replay_catalog(c, settings, program)
+        audit_triggers = c.execute('''SELECT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class r ON r.oid=t.tgrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid=r.relnamespace
+            WHERE n.nspname=ANY(%s) AND NOT t.tgisinternal AND t.tgenabled='O')''',
+            (sorted(settings.allowed_schemas),)).fetchone()[0]
+        timing = 'ON' if audit_triggers else 'OFF'
         initial = state_digest(c, tables, settings, deadline, control)
         initial_sequences = sequence_digest(c, tables, settings, deadline, control)
         metadata = {(t.schema, t.name): {name for name, _ in t.columns} for t in tables}
@@ -204,7 +217,7 @@ def _profile_sample(settings, database, program, actions, normal, work_mem_kb, d
                     c.execute(command.sql)
                     readings.append(ResourceCommand(command.number, command.kind, None, False))
                 else:
-                    raw = c.execute('EXPLAIN (ANALYZE, BUFFERS, WAL, TIMING OFF, SUMMARY ON, FORMAT JSON) ' + command.sql).fetchone()[0]
+                    raw = c.execute(f'EXPLAIN (ANALYZE, BUFFERS, WAL, TIMING {timing}, SUMMARY ON, FORMAT JSON) ' + command.sql).fetchone()[0]
                     resources = parse_resources(raw)
                     checked = command.kind == 'select' or parse_one(command.sql, read='postgres').args.get('returning') is not None
                     if checked:
@@ -264,7 +277,8 @@ def run_transaction_resources(text, settings, reference_database, *, actions=(),
         for kind, program, indexes in programs:
             control.report(f'{kind}: обычный контрольный прогон на новой копии…')
             database = scratch.create(seed, enabled=True, deadline=deadline, control=control)
-            normal = _sample(settings, database, program, indexes, 1, 'B' if indexes else 'A1', deadline, control, work_mem_kb=effective_memory)
+            normal = _sample(settings, database, program, indexes, 1, 'B' if indexes else 'A1', deadline, control,
+                work_mem_kb=effective_memory, measure_backend=True)
             variants.append(ResourceVariant(kind, normal, None))
             if not scratch.remove(database):
                 raise RuntimeError('Удаление контрольной копии не подтверждено.')
