@@ -90,7 +90,7 @@ def _values(sample):
     commands = sample.commands
     return (sample.transaction_client_ms,
         sum(item.client_ms for item in commands if item.kind == 'select'),
-        sum(item.client_ms for item in commands if item.kind in {'insert','update','delete'}),
+        sum(item.client_ms for item in commands if item.kind in {'insert','update','delete','call'}),
         *(item.client_ms for item in commands))
 
 
@@ -120,7 +120,7 @@ def _evidence_problem(report, mode):
     commands = samples[0].commands
     if (not commands or [item.number for item in commands] != list(range(1, len(commands) + 1))
             or not any(item.kind == 'select' for item in commands)
-            or not any(item.kind in {'insert','update','delete'} for item in commands)
+            or not any(item.kind in {'insert','update','delete','call'} for item in commands)
                 and not (samples[0].transaction_options and samples[0].transaction_options.read_only)):
         return 'Нет полного смешанного набора SELECT и DML.'
     for sample in samples:
@@ -132,7 +132,7 @@ def _evidence_problem(report, mode):
                 or mode == 'rewrite' and any((sample.index_size_bytes,sample.index_final_size_bytes,sample.index_build_ms))
                 or sample.phase != 'B' and any((sample.index_size_bytes, sample.index_final_size_bytes, sample.index_build_ms))):
             return 'Невалидные времена/размеры индексов; пропуски не заменяются нулями.'
-        if any(item.kind not in {'select','insert','update','delete'} | CONTROL_KINDS or not _finite(item.client_ms)
+        if any(item.kind not in {'select','insert','update','delete','call'} | CONTROL_KINDS or not _finite(item.client_ms)
                 or item.client_ms < 0 or type(item.row_count) is not int or item.row_count < 0 for item in sample.commands):
             return 'Невалидное измерение отдельной команды.'
         if sum(item.client_ms for item in sample.commands) > sample.transaction_client_ms + .000001:

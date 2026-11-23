@@ -61,7 +61,7 @@ def discover_transaction_parameters(sql_text):
     inspection = inspect_transaction(sql_text)
     slots = []
     for item in inspection.statements:
-        if item.kind in CONTROL_KINDS:
+        if item.kind in CONTROL_KINDS or item.kind == 'call':
             continue
         tree = parse_one(item.sql, read="postgres")
         if tree.find(exp.Placeholder) is not None:
@@ -163,7 +163,7 @@ def bind_transaction_parameters(sql_text, parameters):
     inspection = inspect_transaction(sql_text)
     statements = []
     for item in inspection.statements:
-        if item.kind in CONTROL_KINDS:
+        if item.kind in CONTROL_KINDS or item.kind == 'call':
             statements.append(item.sql)
             continue
         tree = parse_one(item.sql, read="postgres")

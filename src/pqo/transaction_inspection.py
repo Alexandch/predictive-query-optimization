@@ -9,7 +9,7 @@ from pathlib import Path
 from sqlglot import exp, parse_one
 from sqlglot.errors import ParseError
 
-from .transaction_context import (TransactionOptions, parse_transaction_control, split_transaction_sql)
+from .transaction_context import (TransactionOptions, parse_replay_call, parse_transaction_control, split_transaction_sql)
 
 
 @dataclass(frozen=True)
@@ -86,10 +86,18 @@ def inspect_transaction(sql_text: str) -> TransactionInspection:
                 raise ValueError('Можно разобрать только одну полную транзакцию.')
             if command.kind == 'set_transaction' and not context_open:
                 raise ValueError('SET TRANSACTION поддерживается только в начале, до запросов и SAVEPOINT.')
+            if command.kind == 'set_role' and not context_open:
+                raise ValueError('SET LOCAL ROLE допускается один раз в начале, после всех SET TRANSACTION.')
             context_open = context_open and command.kind == 'set_transaction'
             statements.append(TransactionStatement(number,command.kind,command.sql,(),False,True,(),command.options,command.savepoint))
             continue
         context_open = False
+        if call := parse_replay_call(fragment):
+            schema, name = call
+            statements.append(TransactionStatement(number, 'call', f'CALL "{schema}"."{name}"()', (), True, True,
+                ('Процедура подлежит проверке каталога на лабораторном эталоне.',)))
+            requires_copy = True
+            continue
         try:
             node = parse_one(fragment,read='postgres')
         except ParseError:

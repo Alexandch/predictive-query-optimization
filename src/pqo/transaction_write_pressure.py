@@ -102,7 +102,8 @@ def assess_write_pressure(sql_text, plans, index_report, actions, *, assumptions
     selected = {}
     for action in actions:
         selected.setdefault((action.schema_name, action.table_name), []).append(action)
-    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements if item.kind not in CONTROL_KINDS}
+    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements
+             if item.kind not in CONTROL_KINDS and item.kind != 'call'}
     writes = _writes(trees)
     plans_by_number = {plan.number: plan for plan in plans.statements}
     rows, unknown, notes = [], [], []
@@ -112,14 +113,14 @@ def assess_write_pressure(sql_text, plans, index_report, actions, *, assumptions
         if not statement.changes_data:
             continue
         control.report(f"Локальная оценка записи: команда {statement.number}; SQL не выполняется…")
-        tree = trees[statement.number]
+        tree = trees.get(statement.number)
         ops = [item for item in writes if item[0] == statement.number]
         targets = tuple(sorted({item[2] for item in ops}))
         relevant = [action for target in targets for action in selected.get(target, ())]
         count = len(relevant)
         simple = (isinstance(tree, (exp.Insert, exp.Update, exp.Delete)) and len(ops) == 1
             and not tree.args.get("conflict") and tree.find(exp.Into) is None)
-        kind = type(tree).__name__.lower()
+        kind = statement.kind
         assumption = assumptions[statement.number]
         limits = []
         plan = plans_by_number.get(statement.number)
@@ -129,7 +130,7 @@ def assess_write_pressure(sql_text, plans, index_report, actions, *, assumptions
         if not simple:
             complete = False
             limits.append("Сложная запись/изменяющий CTE/MERGE/ON CONFLICT: ветви и затронутые строки не моделируются.")
-        if tree.find(exp.Anonymous) is not None:
+        if tree is not None and tree.find(exp.Anonymous) is not None:
             complete = False
             limits.append("Есть функция с неизвестными побочными эффектами; дополнительные записи не исключены.")
         relation = metadata.get(targets[0]) if len(targets) == 1 else None

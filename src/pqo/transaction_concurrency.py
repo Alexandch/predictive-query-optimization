@@ -16,7 +16,7 @@ from psycopg import sql
 from .analysis_control import AnalysisCancelled, AnalysisControl
 from .connections import password_failure
 from .transaction_comparison import source_context_digest, sql_digest
-from .transaction_context import CONTROL_KINDS, read_transaction_options
+from .transaction_context import CONTEXT_KINDS, CONTROL_KINDS, read_transaction_options
 from .transaction_replay import (
     MAX_DATABASE_BYTES, ScratchDatabases, _kwargs, _timeout, result_digest,
     sequence_digest, state_digest, validate_reference,
@@ -135,6 +135,9 @@ def prepare_concurrent(text_a, text_b, schedule, settings):
         raise ValueError(str(exc)) from None
     except Exception:
         raise ValueError('Не удалось разобрать SQL сессий; ничего не выполнялось.') from None
+    role_flags = [any(command.kind == 'set_role' for command in p.commands) for p in programs.values()]
+    if role_flags[0] != role_flags[1]:
+        raise ValueError('Если задан SET LOCAL ROLE, укажите явную роль в обеих сессиях.')
     steps = prepare_schedule(schedule, programs)
     return programs, steps
 
@@ -172,7 +175,7 @@ class _Session:
         before = time.perf_counter()
         try:
             self.connection.execute(sql.SQL('SET statement_timeout={}').format(sql.Literal(self.statement_ms)))
-            if self.observed is None and (command is None or kind != 'set_transaction'):
+            if self.observed is None and (command is None or kind not in CONTEXT_KINDS):
                 self.observed = read_transaction_options(self.connection)
                 expected = self.program.effective_options
                 if any(v is not None and v != getattr(self.observed, k) for k, v in vars(expected).items()):
@@ -183,7 +186,7 @@ class _Session:
             if cursor.rowcount > 10000 or rows is not None and len(rows) > 10000:
                 raise ValueError('Команда превысила лимит 10000 возвращённых/затронутых строк.')
             self.commands.append(ConcurrentCommand(number, kind, 'completed', (time.perf_counter() - before) * 1000,
-                0 if kind in CONTROL_KINDS or command is None else cursor.rowcount, columns,
+                0 if kind in CONTROL_KINDS or kind == 'call' or command is None else cursor.rowcount, columns,
                 result_digest(rows, command.ordered) if rows is not None else None))
             if command is None:
                 self.outcome = 'committed' if self.program.ending == 'commit' else 'rolled_back'

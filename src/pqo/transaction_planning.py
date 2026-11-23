@@ -36,7 +36,11 @@ class TransactionPlanReport:
 def planning_restriction(statement: TransactionStatement, settings: DatabaseSettings) -> str | None:
     """Conservative preflight, not a security sandbox for a hostile database."""
     if statement.kind in CONTROL_KINDS:
+        if statement.kind == 'set_role':
+            return 'Роль для оценочных планов чтения и записи; пользовательский SQL не выполняется.'
         return 'Управление транзакцией: отдельного плана нет; при получении планов команда не выполняется.'
+    if statement.kind == 'call':
+        return 'Для CALL PostgreSQL не выдаёт EXPLAIN. На копиях проверяются вызов и итоговые данные.'
     node = parse_one(statement.sql, read="postgres")
     if not statement.supported_structure:
         return "Этот тип команды пока не поддерживается для получения плана."
@@ -103,6 +107,9 @@ def collect_transaction_plans(
             connection.execute("SET LOCAL search_path = pg_catalog")
             connection.execute("SET LOCAL standard_conforming_strings = on")
             connection.execute("SET LOCAL row_security = on")
+            role = next((item for item in inspection.statements if item.kind == 'set_role'), None)
+            if role is not None:
+                connection.execute(role.sql)
             for item, reason in zip(inspection.statements, restrictions):
                 control.check()
                 if reason:

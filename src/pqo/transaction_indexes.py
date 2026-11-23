@@ -329,7 +329,8 @@ def _scan_nodes(plan, relation, relations):
 def build_transaction_index_report(inspection: TransactionInspection, plans, metadata, *, eligible=None, extra_notes=()):
     """Pure structural assessment; the sort order is not a learned benefit score."""
     eligible = set(eligible if eligible is not None else (p.number for p in plans.statements if p.status == "planned"))
-    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements if item.kind not in CONTROL_KINDS}
+    trees = {item.number: parse_one(item.sql, read="postgres") for item in inspection.statements
+             if item.kind not in CONTROL_KINDS and item.kind != 'call'}
     notes = set(extra_notes)
     accesses = [access for number, tree in trees.items() if number in eligible
                 for access in _accesses(tree, number, metadata, notes)]
@@ -459,7 +460,7 @@ def collect_transaction_index_candidates(sql_text, settings: DatabaseSettings, *
                 and planning_restriction(item, settings) is None}
     relations = set()
     for statement in inspection.statements:
-        if statement.kind in CONTROL_KINDS:
+        if statement.kind in CONTROL_KINDS or statement.kind == 'call':
             continue
         tree = parse_one(statement.sql, read="postgres")
         relations.update(relation for table in tree.find_all(exp.Table)

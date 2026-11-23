@@ -8,8 +8,11 @@ from sqlglot.tokens import TokenType
 
 
 ISOLATION_LEVELS = frozenset({'READ UNCOMMITTED', 'READ COMMITTED', 'REPEATABLE READ', 'SERIALIZABLE'})
-CONTROL_KINDS = frozenset({'set_transaction', 'savepoint', 'rollback_to', 'release'})
+CONTEXT_KINDS = frozenset({'set_transaction', 'set_role'})
+CONTROL_KINDS = CONTEXT_KINDS | {'savepoint', 'rollback_to', 'release'}
 _NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,62}$')
+_QUALIFIED_CALL = re.compile(r'CALL\s+("?[A-Za-z_][A-Za-z0-9_]{0,62}"?)\s*\.\s*'
+                             r'("?[A-Za-z_][A-Za-z0-9_]{0,62}"?)\s*\(\s*\)', re.I | re.ASCII)
 _POSTGRES = Dialect.get_or_raise('postgres')
 _CONTROL_WORD_TOKENS = frozenset({TokenType.COMMA, *(
     _POSTGRES.tokenize(word)[0].token_type for word in
@@ -64,6 +67,15 @@ class TransactionControl:
     sql: str
     options: TransactionOptions | None = None
     savepoint: str | None = None
+    role: str | None = None
+
+
+def parse_replay_call(text):
+    """Recognize one schema-qualified, zero-argument procedure call."""
+    match = _QUALIFIED_CALL.fullmatch(text.strip())
+    if match is None or any(name.startswith('"') != name.endswith('"') for name in match.groups()):
+        return None
+    return tuple(name[1:-1] if name.startswith('"') else name.lower() for name in match.groups())
 
 
 def split_transaction_sql(text):
@@ -134,6 +146,14 @@ def parse_transaction_control(text):
         _words(tokens[:2])
         options = _options(tokens[2:])
         return TransactionControl('set_transaction','SET TRANSACTION '+', '.join(options.clauses),options)
+    if (first == 'SET' and len(tokens) >= 3 and [token.text.upper() for token in tokens[1:3]] == ['LOCAL', 'ROLE']
+            and all(token.token_type not in {TokenType.STRING, TokenType.IDENTIFIER} for token in tokens[:3])):
+        if len(tokens) != 4 or tokens[3].token_type not in {TokenType.VAR, TokenType.IDENTIFIER} or not _NAME.fullmatch(tokens[3].text):
+            raise ValueError('SET LOCAL ROLE требует одно явное имя лабораторной роли.')
+        token = tokens[3]
+        name = token.text if token.token_type == TokenType.IDENTIFIER else token.text.lower()
+        identifier = exp.Identifier(this=name, quoted=True).sql(dialect='postgres')
+        return TransactionControl('set_role', 'SET LOCAL ROLE ' + identifier, role=name)
     if first in {'COMMIT','END','ROLLBACK','ABORT'}:
         if first == 'ROLLBACK':
             position = 2 if len(tokens)>1 and tokens[1].text.upper() in {'WORK','TRANSACTION'} else 1

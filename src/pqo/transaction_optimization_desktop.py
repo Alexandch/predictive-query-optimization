@@ -444,7 +444,7 @@ class TransactionOptimizationTabMixin:
                             sum(
                                 c.client_ms
                                 for c in s.commands
-                                if c.kind in {"insert", "update", "delete"}
+                                if c.kind in {"insert", "update", "delete", "call"}
                             )
                             for s in samples
                         ],

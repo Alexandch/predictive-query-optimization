@@ -18,7 +18,7 @@ from .analysis_control import AnalysisCancelled, AnalysisControl
 from .connections import password_failure
 from .index_actions import IndexAction, IndexActionKind
 from .transaction_comparison import source_context_digest, sql_digest
-from .transaction_context import CONTROL_KINDS, read_transaction_options
+from .transaction_context import CONTEXT_KINDS, CONTROL_KINDS, read_transaction_options
 from .transaction_replay import (
     MAX_DATABASE_BYTES, ScratchDatabases, _build_trial_indexes, _kwargs, _sample,
     _timeout, sequence_digest, state_digest, validate_reference,
@@ -208,12 +208,12 @@ def _profile_sample(settings, database, program, actions, normal, work_mem_kb, d
                 control.report(f'Профиль ресурсов: {command.number} {command.kind.upper()}; отдельная копия…')
                 control.check()
                 _timeout(c, deadline, settings)
-                if observed is None and command.kind != 'set_transaction':
+                if observed is None and command.kind not in CONTEXT_KINDS:
                     observed = read_transaction_options(c)
                     wanted = program.effective_options
                     if any(v is not None and v != getattr(observed, k) for k, v in vars(wanted).items()):
                         raise RuntimeError('Режимы инструментированного прогона не соответствуют SQL.')
-                if command.kind in CONTROL_KINDS:
+                if command.kind in CONTROL_KINDS or command.kind == 'call':
                     c.execute(command.sql)
                     readings.append(ResourceCommand(command.number, command.kind, None, False))
                 else:

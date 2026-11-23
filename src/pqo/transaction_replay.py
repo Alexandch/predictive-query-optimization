@@ -22,7 +22,7 @@ from .config import DatabaseSettings
 from .index_actions import IndexAction, IndexActionKind
 from .transaction_replay_guard import NAME, prepare_replay, replay_catalog
 from .transaction_mixed_recommendation import MixedReplayPolicy, MixedRecommendation, assess_mixed_replay, replay_request_digest
-from .transaction_context import CONTROL_KINDS, TransactionOptions, read_transaction_options
+from .transaction_context import CONTEXT_KINDS, CONTROL_KINDS, TransactionOptions, read_transaction_options
 
 
 PREFIX = 'pqo_replay_'
@@ -98,7 +98,7 @@ class TransactionReplay:
 def _kwargs(settings, database):
     return {**replace(settings, dbname=database, connect_timeout=min(5, max(1, settings.connect_timeout))).connection_kwargs(),
         'application_name': 'pqo_disposable_replay',
-        'options': '-c search_path=pg_catalog -c statement_timeout=30000 -c lock_timeout=1000'}
+        'options': '-c search_path=pg_catalog -c row_security=on -c statement_timeout=30000 -c lock_timeout=1000'}
 
 
 def _timeout(connection, deadline, settings):
@@ -303,7 +303,7 @@ def _execute_program(connection, program, settings, deadline, control, *, report
                 control.report(f'Последовательное выполнение: {command.number} {command.kind.upper()}; только одноразовая БД…')
             control.check()
             _timeout(connection, deadline, settings)
-            if observed is None and command.kind != 'set_transaction':
+            if observed is None and command.kind not in CONTEXT_KINDS:
                 observed = read_transaction_options(connection)
                 expected = program.effective_options
                 if any(value is not None and value != getattr(observed,key) for key,value in vars(expected).items()):
@@ -315,7 +315,7 @@ def _execute_program(connection, program, settings, deadline, control, *, report
             elapsed = (time.perf_counter() - before) * 1000
             if cursor.rowcount > 10000 or rows is not None and len(rows) > 10000:
                 raise ValueError('Команда превысила лимит 10000 возвращённых/затронутых строк.')
-            count = 0 if command.kind in CONTROL_KINDS else cursor.rowcount
+            count = 0 if command.kind in CONTROL_KINDS or command.kind == 'call' else cursor.rowcount
             readings.append(CommandReplay(command.number, command.kind, elapsed, count, columns,
                 result_digest(rows, command.ordered) if rows is not None else None))
             control.check()

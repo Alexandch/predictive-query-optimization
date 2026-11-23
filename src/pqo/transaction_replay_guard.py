@@ -1,18 +1,20 @@
 """Closed SQL/catalog contract for the first disposable-database replay mode."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 import re
 
 from sqlglot import exp, parse_one
 
 from .transaction_inspection import inspect_transaction, render_transaction_statement
-from .transaction_context import CONTROL_KINDS, TransactionOptions, parse_transaction_control
+from .transaction_context import CONTROL_KINDS, TransactionOptions, parse_replay_call, parse_transaction_control
 from .transaction_defaults import ColumnDefault, ReplaySequence, is_default, load_sequences, validate_defaults
 from .transaction_upsert import validate_upsert, validate_arbiters, conflict_assignments
 from .transaction_joined_dml import joined_dml_sources, validate_joined_dml_catalog
 from .transaction_cte import cte_scope, physical_tables, validate_program_ctes
 from .transaction_predicates import predicate_selects, direct_sources
 from .transaction_triggers import validate_replay_triggers
+from .transaction_policies import validate_replay_roles
+from .transaction_procedures import procedure_writes, validate_procedure_keys
 
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -124,9 +126,9 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
     if inspection.unsupported_commands or len(inspection.statements) > 20:
         raise ValueError('Поддерживается BEGIN … COMMIT/ROLLBACK и до 20 разрешённых команд.')
     kinds = {item.kind for item in inspection.statements}
-    writes = bool(kinds.intersection({'insert','update','delete'}))
+    writes = bool(kinds.intersection({'insert','update','delete','call'}))
     if inspection.effective_options.read_only and writes:
-        raise ValueError('READ ONLY запрещает INSERT/UPDATE/DELETE; режим не будет заменён на READ WRITE.')
+        raise ValueError('READ ONLY запрещает INSERT/UPDATE/DELETE и CALL с записью; режим сохраняется.')
     if 'select' not in kinds or not writes and inspection.effective_options.read_only is not True:
         raise ValueError('Нужны SELECT и команда записи либо явно заданная транзакция READ ONLY.')
     commands, tables, savepoints = [], set(), []
@@ -140,6 +142,12 @@ def prepare_replay(text, settings, *, allow_select_wrapper=False):
                 index = len(savepoints)-1-savepoints[::-1].index(item.savepoint)
                 savepoints = savepoints[:index+(1 if item.kind=='rollback_to' else 0)]
             commands.append(ReplayCommand(item.number,item.kind,item.sql,False))
+            continue
+        if item.kind == 'call':
+            schema, _ = parse_replay_call(item.sql)
+            if schema not in settings.allowed_schemas:
+                raise ValueError('CALL требует явно разрешённую схему.')
+            commands.append(ReplayCommand(item.number, item.kind, item.sql, False))
             continue
         tree = parse_one(item.sql, read='postgres')
         # Parameter binding emits qualified built-in types. SQLGlot represents
@@ -304,6 +312,11 @@ def replay_catalog(connection, settings, program):
         raise ValueError('Первый режим: 1–8 таблиц в разрешённых схемах.')
     sequences = load_sequences(connection, relations, sequence_rows)
     oids = {row[0] for row in relations}
+    validate_replay_roles(connection, program, [row[0] for row in relations if row[5] or row[6]])
+    writes = procedure_writes(connection, settings, program)
+    if writes:
+        program = replace(program, commands=program.commands + tuple(command for command, _ in writes),
+            tables=tuple(sorted(set(program.tables) | {target for _, target in writes})))
     if not set(program.tables) <= {(row[1], row[2]) for row in relations}:
         raise ValueError('Не все таблицы SQL найдены в лабораторной копии.')
     # Resolve SELECT */alias.* only from catalogs. No source rows/defaults are
@@ -316,8 +329,8 @@ def replay_catalog(connection, settings, program):
     validate_replay_triggers(connection, {row[0]: (row[1], row[2]) for row in relations}, source_columns)
     tables = []
     for oid, schema, name, kind, persistence, rls, force_rls, partition, descendants, rules, method in relations:
-        if (kind != 'r' or persistence != 'p' or method != 'heap' or rls or force_rls or partition or descendants or rules):
-            raise ValueError(f'{schema}.{name}: разрешены только обычные постоянные heap-таблицы без RLS/наследования/правил.')
+        if kind != 'r' or persistence != 'p' or method != 'heap' or partition or descendants or rules:
+            raise ValueError(f'{schema}.{name}: разрешены только обычные постоянные heap-таблицы без наследования/правил.')
         columns = connection.execute("""SELECT a.attname,a.atttypid,t.typname,tn.nspname,a.atthasdef,a.attidentity,a.attgenerated,cn.nspname,
             a.attnum,ad.oid,ad.adbin::text
             FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid
@@ -357,4 +370,5 @@ def replay_catalog(connection, settings, program):
         validate_arbiters(connection,oid,schema,name,tuple(col[0] for col in columns),program)
         tables.append(ReplayTable(schema,name,tuple((col[0],col[1]) for col in columns),tuple(row[0] for row in key),sequences[oid],defaults))
     validate_joined_dml_catalog(connection, program, tables)
+    validate_procedure_keys(writes, tables)
     return tuple(tables)

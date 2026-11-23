@@ -128,15 +128,17 @@ def _read_slice(sql_text, settings, action):
     inspection = inspect_transaction(sql_text)
     if inspection.unsupported_commands:
         raise ValueError("В транзакции есть неподдержанные команды контекста; фактическая проба недоступна.")
+    if any(item.kind == 'set_role' for item in inspection.statements):
+        raise ValueError('Для SET LOCAL ROLE используйте проверку всей транзакции на одноразовых копиях.')
     queries, writes = [], []
     target_read = False
     for item in inspection.statements:
         if item.kind in {'set_transaction','savepoint','rollback_to','release'}:
             continue  # This mode measures standalone SELECT, never transaction context.
-        tree = parse_one(item.sql, read="postgres")
         if item.changes_data:
             writes.append(item.number)
             continue
+        tree = parse_one(item.sql, read="postgres")
         if not isinstance(tree, (exp.Select, exp.Union, exp.Intersect, exp.Except)):
             raise ValueError(f"Команда {item.number}: разрешены только SELECT и пропускаемые команды записи.")
         restriction = planning_restriction(item, settings)
