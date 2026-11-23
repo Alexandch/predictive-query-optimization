@@ -87,7 +87,8 @@ class TransactionWorkspaceTests(TestCase):
         self.assertFalse(window.transaction_source_panel.isVisible())
         self.assertFalse(window.transaction_protocol_panel.isVisible())
         self.assertFalse(window.transaction_views.tabBar().isVisible())
-        self.assertEqual(window.transaction_sections.count(), 13)
+        self.assertEqual(window.transaction_sections.count(), 14)
+        self.assertEqual(window.transaction_views.tabText(13), 'Нагрузка')
         window.transaction_sections.setCurrentRow(5)
         self.app.processEvents()
         self.assertEqual(

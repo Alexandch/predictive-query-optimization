@@ -88,6 +88,7 @@ class TransactionParameterTabMixin:
         self._transaction_parameters_changed()
 
     def _transaction_parameters_changed(self, *_):
+        self._clear_transaction_load()
         self._transaction_binding = None
         view = self.transaction_views.currentIndex()
         had_plans = self.transaction_plan_report is not None

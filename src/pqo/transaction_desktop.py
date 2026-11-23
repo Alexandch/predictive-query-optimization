@@ -21,6 +21,7 @@ from .transaction_optimization_desktop import TransactionOptimizationTabMixin
 from .connections import password_failure
 from .transaction_concurrency_desktop import TransactionConcurrencyMixin
 from .transaction_resources_desktop import TransactionResourcesMixin
+from .transaction_load_desktop import TransactionLoadMixin
 
 
 _WARNINGS = {
@@ -43,7 +44,8 @@ _INDEX_STATUSES = {"candidate": "к проверке", "covered": "уже пок
                    "covering_review": "только INCLUDE — спорно"}
 
 
-class TransactionTabMixin(TransactionResourcesMixin, TransactionConcurrencyMixin, TransactionOptimizationTabMixin, TransactionWorkspaceMixin, TransactionTrialTabMixin):
+class TransactionTabMixin(TransactionLoadMixin, TransactionResourcesMixin, TransactionConcurrencyMixin,
+                          TransactionOptimizationTabMixin, TransactionWorkspaceMixin, TransactionTrialTabMixin):
     def _build_transaction_tab(self):
         self.transaction_inspection = None
         self.transaction_plan_report = None
@@ -126,6 +128,7 @@ class TransactionTabMixin(TransactionResourcesMixin, TransactionConcurrencyMixin
         self._build_transaction_optimization_controls()
         self._build_concurrency_controls()
         self._build_resource_controls()
+        self._build_load_controls()
         self.transaction_views = QTabWidget()
         self.transaction_views.addTab(self.transaction_table, "Команды и планы")
         self.transaction_views.addTab(self.transaction_index_table, "Индексные кандидаты")
@@ -140,6 +143,7 @@ class TransactionTabMixin(TransactionResourcesMixin, TransactionConcurrencyMixin
         self.transaction_views.addTab(self.transaction_optimization_page, "Итоговая оптимизация")
         self.transaction_views.addTab(self.transaction_concurrency_page, "Параллельные сессии")
         self.transaction_views.addTab(self.transaction_resource_page, "Ресурсы транзакции")
+        self.transaction_views.addTab(self.transaction_load_page, "Нагрузка")
         layout.addLayout(actions)
         self._build_transaction_workspace(layout, index_actions, trial_actions, comparison_actions)
         layout.addWidget(self.transaction_status)
@@ -194,9 +198,11 @@ class TransactionTabMixin(TransactionResourcesMixin, TransactionConcurrencyMixin
         self._sync_transaction_optimization_controls()
         self._sync_concurrency_controls()
         self._sync_resource_controls()
+        self._sync_load_controls()
         if hasattr(self,'workflow_status'):self._refresh_workflow()
 
     def _invalidate_transaction(self):
+        self._clear_transaction_load()
         self._clear_resource_profile()
         self._clear_transaction_auth()
         self.transaction_inspection = None
@@ -210,6 +216,7 @@ class TransactionTabMixin(TransactionResourcesMixin, TransactionConcurrencyMixin
         self._sync_transaction_controls()
 
     def _invalidate_transaction_plans(self):
+        self._clear_transaction_load()
         self._clear_resource_profile()
         self._clear_concurrency()
         self._clear_transaction_auth()
@@ -502,6 +509,8 @@ class TransactionTabMixin(TransactionResourcesMixin, TransactionConcurrencyMixin
             self._show_concurrency()
         elif index == 12:
             self._show_resources()
+        elif self.transaction_views.widget(index) is self.transaction_load_page:
+            self.transaction_details.setPlainText(self.load_details.toPlainText() or self.load_status.text())
 
     def _start_transaction_indexes(self):
         if self._query_operation_active or self._active_workers or self.transaction_plan_report is None:

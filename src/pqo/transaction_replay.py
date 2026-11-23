@@ -292,14 +292,15 @@ def result_digest(rows, ordered):
     return digest.hexdigest()
 
 
-def _execute_program(connection, program, settings, deadline, control):
+def _execute_program(connection, program, settings, deadline, control, *, report_progress=True):
     readings = []
     observed = None
     started = time.perf_counter()
     connection.execute(program.options.begin_sql)
     try:
         for command in program.commands:
-            control.report(f'Последовательное выполнение: {command.number} {command.kind.upper()}; только одноразовая БД…')
+            if report_progress:
+                control.report(f'Последовательное выполнение: {command.number} {command.kind.upper()}; только одноразовая БД…')
             control.check()
             _timeout(connection, deadline, settings)
             if observed is None and command.kind != 'set_transaction':
