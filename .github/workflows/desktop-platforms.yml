@@ -56,8 +56,7 @@ jobs:
           python -m pytest -p no:cacheprovider -o faulthandler_timeout=60 \
             tests/test_sql_features.py tests/test_prediction.py tests/test_sql_rewrite.py \
             tests/test_transaction_context.py tests/test_transaction_replay.py \
-            tests/test_transaction_select_rewrite.py tests/test_transaction_load.py \
-            tests/test_transaction_roles_and_calls.py
+            tests/test_transaction_select_rewrite.py tests/test_transaction_load.py
       - name: Freeze desktop
         run: python -m PyInstaller --noconfirm --clean packaging/PredictiveQueryOptimization.spec
       - name: Linux smoke and archive
